@@ -84,6 +84,7 @@ pub struct Strings {
     pub store_share_hint_easy: &'static str,
     pub store_busy: &'static str,
     pub store_not_connected_hint: &'static str,
+    pub files_not_connected_hint: &'static str,
 
     // ── Retrieve panel ──
     pub retrieve_heading: &'static str,
@@ -251,8 +252,14 @@ pub struct Strings {
     pub home_send_action: &'static str,
     pub home_receive_action: &'static str,
     pub home_save_action: &'static str,
+    /// Shown on the Home screen as a card when the user has no contacts yet.
+    pub home_no_contacts: &'static str,
+    /// Button on that card; opens the Contacts tab (same destination as the chat empty state).
+    pub home_open_contacts: &'static str,
     pub files_heading_easy: &'static str,
     pub files_desc_easy: &'static str,
+    /// Inbox: a link to the page where a share ID or invite code is entered to receive.
+    pub inbox_receive_by_code: &'static str,
 
     // ── Easy dashboard (store tab quick stats) ──
     pub dashboard_quick_status: &'static str,
@@ -398,6 +405,7 @@ impl Strings {
             ("store_share_hint_easy", self.store_share_hint_easy),
             ("store_busy", self.store_busy),
             ("store_not_connected_hint", self.store_not_connected_hint),
+            ("files_not_connected_hint", self.files_not_connected_hint),
             ("retrieve_heading", self.retrieve_heading),
             ("retrieve_heading_easy", self.retrieve_heading_easy),
             ("retrieve_desc", self.retrieve_desc),
@@ -544,8 +552,11 @@ impl Strings {
             ("home_send_action", self.home_send_action),
             ("home_receive_action", self.home_receive_action),
             ("home_save_action", self.home_save_action),
+            ("home_no_contacts", self.home_no_contacts),
+            ("home_open_contacts", self.home_open_contacts),
             ("files_heading_easy", self.files_heading_easy),
             ("files_desc_easy", self.files_desc_easy),
+            ("inbox_receive_by_code", self.inbox_receive_by_code),
             ("dashboard_quick_status", self.dashboard_quick_status),
             ("dashboard_storage_label", self.dashboard_storage_label),
             ("dashboard_peers_label", self.dashboard_peers_label),
@@ -653,9 +664,9 @@ pub fn strings(locale: Locale) -> &'static Strings {
 // ─── English ─────────────────────────────────────────────────────────────────
 
 static EN: Strings = Strings {
-    tab_store: "Store",
+    tab_store: "Store content",
     tab_store_easy: "Save",
-    tab_retrieve: "Retrieve",
+    tab_retrieve: "Retrieve content",
     tab_retrieve_easy: "Restore",
     tab_status: "Status",
     tab_settings: "Settings",
@@ -693,7 +704,7 @@ static EN: Strings = Strings {
     store_choose_file: "Choose File...",
     store_button: "Store Text",
     store_success: "Content stored successfully.",
-    store_mid_label: "Content ID (MID):",
+    store_mid_label: "Content ID:",
     store_mid_label_easy: "Content ID:",
     store_copy: "Copy",
     store_copied: "MID copied to clipboard.",
@@ -701,12 +712,13 @@ static EN: Strings = Strings {
     store_share_hint_easy: "Save this ID — you'll need it to get your content back.",
     store_busy: "Storing file...",
     store_not_connected_hint: "Start the app first to save content.",
+    files_not_connected_hint: "These actions need the background service. Follow the card at the top of the window to finish setup or wait for it to start.",
 
     retrieve_heading: "Retrieve Content",
     retrieve_heading_easy: "Restore Content",
     retrieve_desc: "Reconstruct content from its Miasma Content ID.",
     retrieve_desc_easy: "Enter your Content ID to get your content back.",
-    retrieve_mid_label: "Content ID (MID):",
+    retrieve_mid_label: "Content ID:",
     retrieve_mid_label_easy: "Content ID:",
     retrieve_button: "Retrieve",
     retrieve_button_easy: "Restore",
@@ -747,7 +759,7 @@ static EN: Strings = Strings {
     status_used: "Used:",
     status_replication: "Replication:",
     status_transport: "Transport",
-    status_transport_name: "Transport",
+    status_transport_name: "Name",
     status_transport_status: "Status",
     status_transport_counts: "Success / Fail",
     status_transport_details: "Details",
@@ -806,7 +818,7 @@ static EN: Strings = Strings {
     settings_mode: "Interface mode",
     settings_mode_technical: "Technical",
     settings_mode_easy: "Easy",
-    settings_mode_desc_technical: "Full diagnostics, transport details, protocol visibility",
+    settings_mode_desc_technical: "Shows diagnostics and protocol details.",
     settings_mode_desc_easy: "Simplified interface, less technical detail",
     settings_theme: "Appearance",
     settings_theme_system: "System",
@@ -851,6 +863,8 @@ static EN: Strings = Strings {
     home_send_action: "Send a file",
     home_receive_action: "Receive a file",
     home_save_action: "Save securely",
+    home_no_contacts: "You have no one to send to yet. Add a contact or send an invite on the Contacts tab, and you can start sending files.",
+    home_open_contacts: "Open Contacts",
     files_heading_easy: "Files",
     files_desc_easy: "Send, receive, recover, and review your file activity here.",
 
@@ -863,13 +877,13 @@ static EN: Strings = Strings {
     storage_bar_label: "Storage used",
 
     // ── Directed sharing ──
-    tab_send: "Send",
+    tab_send: "Private send",
     tab_send_easy: "Send",
-    tab_inbox: "Inbox",
+    tab_inbox: "Private inbox",
     tab_inbox_easy: "Inbox",
     send_heading: "Private Send",
     send_heading_easy: "Send to Someone",
-    send_desc: "Encrypt and send a file to one recipient, using their file receive code.",
+    send_desc: "Encrypt and send a file to one person, using their receive code.",
     send_desc_easy: "Send a file privately to someone you know.",
     send_contact_label: "Recipient's receive code:",
     send_contact_hint: "msk:...@PeerId",
@@ -878,40 +892,41 @@ static EN: Strings = Strings {
     send_retention_hint: "(e.g. 24h, 7d, 30d)",
     details_easy: "Details",
     settings_network_details_easy: "Network details",
-    inbox_challenge_easy: "Check code:",
-    outbox_confirm_heading_easy: "Enter the check code",
+    inbox_challenge_easy: "One-time code:",
+    outbox_confirm_heading_easy: "Enter the one-time code",
     outbox_challenge_failed_easy: "Wrong code",
-    send_contact_hint_easy: "Paste the contact code you were given",
+    send_contact_hint_easy: "Paste the receive code you were given",
     envelope_waiting: "Waiting",
     envelope_needs_action: "Action needed",
     send_choose_file: "Choose file...",
     send_button: "Send",
     send_busy: "Sending...",
-    send_success: "Sent! Share the challenge code with recipient.",
+    send_success: "Sent. Tell the other person the one-time code.",
     send_not_connected: "Connect to send files.",
     inbox_heading: "Private Inbox",
     inbox_heading_easy: "Received Files",
-    inbox_desc: "Private files other users have sent to you.",
+    inbox_desc: "Private files sent to you.",
     inbox_desc_easy: "Files people have sent to you.",
     inbox_empty: "Inbox is empty.",
+    inbox_receive_by_code: "Receive with a code…",
     inbox_from: "From:",
     inbox_state: "State:",
-    inbox_challenge: "Challenge:",
+    inbox_challenge: "One-time code:",
     inbox_retrieve_button: "Retrieve",
     inbox_password_label: "Password:",
     inbox_revoke_button: "Decline",
     inbox_refresh: "Refresh",
-    sharing_key_label: "Your file receive code:",
+    sharing_key_label: "Your receive code:",
     sharing_key_desc: "Give this code to people so they can send you private files.",
     sharing_key_desc_easy: "Give this to people who want to send you files.",
     sharing_key_copy: "Copy Code",
     sharing_key_copied: "Copied!",
 
-    tab_outbox: "Outbox",
+    tab_outbox: "Private outbox",
     tab_outbox_easy: "Sent",
     outbox_heading: "Private Outbox",
     outbox_heading_easy: "Files You Sent",
-    outbox_desc: "Private files you have sent to others.",
+    outbox_desc: "Private files you have sent.",
     outbox_desc_easy: "Files you sent to specific people.",
     outbox_empty: "Outbox is empty.",
     outbox_to: "To:",
@@ -919,17 +934,17 @@ static EN: Strings = Strings {
     outbox_filename: "File:",
     outbox_refresh: "Refresh",
     outbox_revoke_button: "Revoke",
-    outbox_confirm_heading: "Enter Challenge Code",
-    outbox_confirm_label: "Code:",
+    outbox_confirm_heading: "Enter the one-time code",
+    outbox_confirm_label: "One-time code:",
     outbox_confirm_hint: "XXXX-XXXX",
     outbox_confirm_button: "Confirm",
     outbox_confirm_success: "Confirmed! Recipient can now retrieve the file.",
-    outbox_waiting_challenge: "Waiting for recipient challenge...",
+    outbox_waiting_challenge: "Waiting for the other person's one-time code...",
     outbox_confirmed: "Confirmed",
     outbox_retrieved: "Retrieved",
     outbox_expired: "Expired",
     outbox_revoked: "Revoked",
-    outbox_challenge_failed: "Challenge Failed",
+    outbox_challenge_failed: "Wrong one-time code",
     outbox_password_failed: "Password Failed",
     inbox_filename: "File:",
     inbox_file_size: "Size:",
@@ -947,9 +962,9 @@ static EN: Strings = Strings {
 // ─── Japanese ────────────────────────────────────────────────────────────────
 
 static JA: Strings = Strings {
-    tab_store: "保存",
+    tab_store: "コンテンツ保存",
     tab_store_easy: "保存",
-    tab_retrieve: "取得",
+    tab_retrieve: "コンテンツ取得",
     tab_retrieve_easy: "復元",
     tab_status: "ステータス",
     tab_settings: "設定",
@@ -982,34 +997,35 @@ static JA: Strings = Strings {
     store_heading_easy: "保存",
     store_desc: "コンテンツを暗号化・分割してMiasmaネットワークに保存します。",
     store_desc_easy: "コンテンツを安全に保存します。",
-    store_text_label: "テキスト入力:",
+    store_text_label: "テキスト入力：",
     store_text_hint: "テキストを入力またはペースト...",
     store_choose_file: "ファイルを選択...",
     store_button: "テキストを保存",
     store_success: "保存しました。",
-    store_mid_label: "コンテンツID (MID):",
-    store_mid_label_easy: "コンテンツID:",
+    store_mid_label: "コンテンツID：",
+    store_mid_label_easy: "コンテンツID：",
     store_copy: "コピー",
     store_copied: "IDをコピーしました。",
     store_share_hint: "このIDを共有すると、他の人がコンテンツを取得できます。",
     store_share_hint_easy: "このIDを保存してください。取り出すときに必要です。",
     store_busy: "保存中...",
     store_not_connected_hint: "保存するにはアプリを起動してください。",
+    files_not_connected_hint: "これらの操作にはバックグラウンド機能が必要です。画面上部のカードに従って、セットアップを済ませるか起動を待ってください。",
 
     retrieve_heading: "コンテンツ取得",
     retrieve_heading_easy: "復元",
     retrieve_desc: "MiasmaコンテンツIDからコンテンツを復元します。",
     retrieve_desc_easy: "コンテンツIDを入力して取り出します。",
-    retrieve_mid_label: "コンテンツID (MID):",
-    retrieve_mid_label_easy: "コンテンツID:",
+    retrieve_mid_label: "コンテンツID：",
+    retrieve_mid_label_easy: "コンテンツID：",
     retrieve_button: "取得",
     retrieve_button_easy: "復元",
     retrieve_busy: "取得中...",
     retrieve_success: "取得しました。ファイルに保存できます。",
     retrieve_save_button: "ファイルに保存...",
-    retrieve_saved: "保存しました:",
-    retrieve_save_failed: "保存に失敗:",
-    retrieve_result_label: "取得結果:",
+    retrieve_saved: "保存しました：",
+    retrieve_save_failed: "保存に失敗：",
+    retrieve_result_label: "取得結果：",
     retrieve_not_connected_hint: "取り出すにはアプリを起動してください。",
 
     status_heading: "ノードステータス",
@@ -1017,31 +1033,31 @@ static JA: Strings = Strings {
     status_copy_diag: "診断情報をコピー",
     status_diag_copied: "診断情報をコピーしました。",
     status_connection: "接続",
-    status_state: "状態:",
+    status_state: "状態：",
     status_state_connected: "接続中",
     status_state_starting: "起動中...",
     status_state_not_running: "停止中",
     status_state_not_init: "未初期化",
-    status_peer_id: "ピアID:",
-    status_peers: "ピア数:",
-    status_relay: "リレー:",
-    relay_down_s: "{n} 秒間つながっていません",
-    relay_down_min: "{n} 分間つながっていません",
-    relay_down_h: "{h} 時間 {m} 分間つながっていません",
-    relay_cause_dns: "このコンピューターがリレーのアドレスを引けません (DNS)",
+    status_peer_id: "ピアID：",
+    status_peers: "ピア数：",
+    status_relay: "リレー：",
+    relay_down_s: "{n}秒間つながっていません",
+    relay_down_min: "{n}分間つながっていません",
+    relay_down_h: "{h}時間{m}分間つながっていません",
+    relay_cause_dns: "このコンピューターがリレーのアドレスを引けません（DNS）",
     relay_cause_timeout: "リレーが時間内に応答しません",
-    relay_cause_tls: "リレーの証明書が受け入れられませんでした (通信を検査するネットワークでは?)",
+    relay_cause_tls: "リレーの証明書が受け入れられませんでした（通信を検査するネットワークでは？）",
     relay_cause_denied: "リレーがこのコンピューターを拒否しました",
     relay_cause_other: "リレーへの接続に失敗しました",
-    relay_cert_trusted: "このネットワークは安全な通信を再署名しています(証明書の発行元「{ca}」は公開 CA ではありません)。このコンピューターはその CA を信頼しています。",
-    relay_cert_untrusted: "このネットワークは安全な通信を再署名しています(証明書の発行元「{ca}」は公開 CA ではありません)。このコンピューターはその CA を信頼していません。CA をシステムの証明書ストアに入れるか、transport.iroh_extra_ca_pem を設定してください。",
-    status_listening: "リッスン:",
+    relay_cert_trusted: "このネットワークは安全な通信を再署名しています（証明書の発行元「{ca}」は公開 CA ではありません）。このコンピューターはその CA を信頼しています。",
+    relay_cert_untrusted: "このネットワークは安全な通信を再署名しています（証明書の発行元「{ca}」は公開 CA ではありません）。このコンピューターはその CA を信頼していません。CA をシステムの証明書ストアに入れるか、transport.iroh_extra_ca_pem を設定してください。",
+    status_listening: "リッスン：",
     status_storage: "ストレージ",
-    status_shares: "シェア数:",
-    status_used: "使用量:",
-    status_replication: "レプリケーション:",
+    status_shares: "シェア数：",
+    status_used: "使用量：",
+    status_replication: "レプリケーション：",
     status_transport: "トランスポート",
-    status_transport_name: "トランスポート",
+    status_transport_name: "種類",
     status_transport_status: "状態",
     status_transport_counts: "成功 / 失敗",
     status_transport_details: "詳細",
@@ -1049,7 +1065,7 @@ static JA: Strings = Strings {
 
     status_ready: "準備完了",
     status_not_ready: "準備中",
-    status_items_stored: "保存済み:",
+    status_items_stored: "保存済み：",
     status_hint_ready: "コンテンツの保存と取り出しができます。",
     status_hint_not_ready: "アプリがまだ起動していません。「保存」タブから始めましょう。",
     status_hint_no_peers: "接続済みですが、ピアが見つかりません。ピアが見つかるまでレプリケーションは保留されます。",
@@ -1063,7 +1079,7 @@ static JA: Strings = Strings {
     wipe_confirm_button: "すべて消去する",
     wipe_cancel: "やめる",
     wipe_done: "消去しました。Miasmaを閉じて、続けて使う場合は最初から設定し直してください。",
-    wipe_confirm_kept: "消えないもの: すでに相手に送ったコピーと、受信フォルダなど別の場所に保存したファイル。",
+    wipe_confirm_kept: "消えないもの：すでに相手に送ったコピーと、受信フォルダなど別の場所に保存したファイル。",
     wipe_confirm_offline: "バックグラウンドのサービスが止まっているため、サービスを使わずに直接消去します。",
     wipe_offline_note: "バックグラウンドのサービスが止まっていても消去できます。",
     close_title: "閉じますか？",
@@ -1082,17 +1098,17 @@ static JA: Strings = Strings {
 
     settings_heading: "設定",
     settings_paths: "パス",
-    settings_data_dir: "データディレクトリ:",
-    settings_config_file: "設定ファイル:",
-    settings_log: "デスクトップログ:",
-    settings_install: "インストール場所:",
+    settings_data_dir: "データディレクトリ：",
+    settings_config_file: "設定ファイル：",
+    settings_log: "デスクトップログ：",
+    settings_install: "インストール場所：",
     settings_path_copied: "パスをコピーしました。",
     settings_how: "仕組み",
     settings_how_line1: "デスクトップアプリはバックグラウンドデーモンを管理し、ストレージとネットワークを処理します。",
     settings_how_line1_easy: "このアプリはバックグラウンドサービスでコンテンツを管理します。",
     settings_how_line2: "デーモンはアプリ起動時に自動起動し、閉じると停止します。",
     settings_how_line2_easy: "アプリを開くと自動的に起動し、閉じると停止します。",
-    settings_stored_in: "データの保存先:",
+    settings_stored_in: "データの保存先：",
     settings_preserved: "アンインストールしてもこのディレクトリは保持されます。",
     settings_actions: "操作",
     settings_open_folder: "データフォルダを開く",
@@ -1100,8 +1116,8 @@ static JA: Strings = Strings {
     settings_mode: "表示モード",
     settings_mode_technical: "テクニカル",
     settings_mode_easy: "かんたん",
-    settings_mode_desc_technical: "診断情報、トランスポート詳細、プロトコル表示",
-    settings_mode_desc_easy: "シンプルな表示、技術的詳細を非表示",
+    settings_mode_desc_technical: "診断情報やプロトコルの詳細を表示します。",
+    settings_mode_desc_easy: "シンプルな表示にして、技術的な詳細を隠します。",
     settings_theme: "外観",
     settings_theme_system: "システム設定に合わせる",
     settings_theme_light: "ライト",
@@ -1145,6 +1161,8 @@ static JA: Strings = Strings {
     home_send_action: "ファイルを送る",
     home_receive_action: "ファイルを受け取る",
     home_save_action: "安全に保存する",
+    home_no_contacts: "まだ相手がいません。「連絡先」タブで相手を追加するか、招待を送るとファイルを送れます。",
+    home_open_contacts: "連絡先を開く",
     files_heading_easy: "ファイル",
     files_desc_easy: "送受信、復元、保存中のファイルをここで確認できます。",
 
@@ -1157,76 +1175,77 @@ static JA: Strings = Strings {
     storage_bar_label: "ストレージ使用量",
 
     // ── Directed sharing ──
-    tab_send: "送信",
+    tab_send: "プライベート送信",
     tab_send_easy: "送る",
-    tab_inbox: "受信箱",
+    tab_inbox: "プライベート受信箱",
     tab_inbox_easy: "届いたファイル",
     send_heading: "プライベート送信",
     send_heading_easy: "ファイルを送る",
-    send_desc: "受信者のファイル受信コードを使って暗号化し送信します。",
+    send_desc: "相手の受信コードを使って、ファイルを暗号化して送ります。",
     send_desc_easy: "知り合いにファイルを安全に送ります。",
-    send_contact_label: "送信先の受信コード:",
+    send_contact_label: "送信先の受信コード：",
     send_contact_hint: "msk:...@PeerId",
-    send_password_label: "パスワード:",
-    send_retention_label: "保持期間:",
-    send_retention_hint: "(例: 24h、7d、30d)",
+    send_password_label: "パスワード：",
+    send_retention_label: "保持期間：",
+    send_retention_hint: "（例：24h、7d、30d）",
     details_easy: "詳細",
     settings_network_details_easy: "ネットワークの詳細",
-    inbox_challenge_easy: "確認コード:",
-    outbox_confirm_heading_easy: "確認コードを入力",
+    inbox_challenge_easy: "ワンタイムコード：",
+    outbox_confirm_heading_easy: "ワンタイムコードを入力",
     outbox_challenge_failed_easy: "コードが違います",
-    send_contact_hint_easy: "受け取った連絡先コードを貼り付け",
+    send_contact_hint_easy: "受け取った受信コードを貼り付け",
     envelope_waiting: "待機中",
     envelope_needs_action: "対応が必要",
     send_choose_file: "ファイル選択...",
     send_button: "送信",
     send_busy: "送信中...",
-    send_success: "送信完了！チャレンジコードを受信者に共有してください。",
+    send_success: "送信しました。ワンタイムコードを相手に伝えてください。",
     send_not_connected: "接続してから送信してください。",
     inbox_heading: "プライベート受信箱",
     inbox_heading_easy: "届いたファイル",
-    inbox_desc: "他のユーザーから届いたプライベートなファイル。",
+    inbox_desc: "あなた宛てに届いたプライベートなファイル。",
     inbox_desc_easy: "あなた宛に送られたファイル。",
     inbox_empty: "受信箱は空です。",
-    inbox_from: "送信者:",
-    inbox_state: "状態:",
-    inbox_challenge: "チャレンジ:",
+    inbox_receive_by_code: "コードで受け取る…",
+    inbox_from: "送信者：",
+    inbox_state: "状態：",
+    inbox_challenge: "ワンタイムコード：",
     inbox_retrieve_button: "取得",
-    inbox_password_label: "パスワード:",
+    inbox_password_label: "パスワード：",
     inbox_revoke_button: "受け取らない",
     inbox_refresh: "更新",
-    sharing_key_label: "あなたのファイル受信コード:",
+    sharing_key_label: "あなたの受信コード：",
     sharing_key_desc: "このコードを相手に渡すと、プライベートにファイルを送ってもらえます。",
     sharing_key_desc_easy: "ファイルを受け取るにはこれを相手に教えてください。",
     sharing_key_copy: "コピー",
     sharing_key_copied: "コピーしました！",
 
-    tab_outbox: "送信済み",
+    tab_outbox: "プライベート送信済み",
     tab_outbox_easy: "送ったファイル",
     outbox_heading: "送信済みプライベートファイル",
     outbox_heading_easy: "送ったファイル",
-    outbox_desc: "他のユーザーに送ったプライベートなファイル。",
+    outbox_desc: "あなたが送ったプライベートなファイル。",
     outbox_desc_easy: "あなたが送ったファイルの一覧。",
     outbox_empty: "送信済みはありません。",
-    outbox_to: "宛先:",
-    outbox_state: "状態:",
-    outbox_filename: "ファイル:",
+    outbox_to: "宛先：",
+    outbox_state: "状態：",
+    outbox_filename: "ファイル：",
     outbox_refresh: "更新",
     outbox_revoke_button: "取り消す",
-    outbox_confirm_heading: "チャレンジコード入力",
-    outbox_confirm_label: "コード:",
+    outbox_confirm_heading: "ワンタイムコードを入力",
+    outbox_confirm_label: "ワンタイムコード：",
     outbox_confirm_hint: "XXXX-XXXX",
     outbox_confirm_button: "確認",
-    outbox_confirm_success: "確認完了！受信者がファイルを取得できます。",
-    outbox_waiting_challenge: "受信者のチャレンジ待ち...",
+    outbox_confirm_success: "確認しました。相手がファイルを受け取れます。",
+    outbox_waiting_challenge: "相手のワンタイムコードを待っています...",
     outbox_confirmed: "確認済み",
     outbox_retrieved: "取得済み",
     outbox_expired: "期限切れ",
     outbox_revoked: "取り消し済み",
-    outbox_challenge_failed: "チャレンジ失敗",
-    outbox_password_failed: "パスワード失敗",
-    inbox_filename: "ファイル:",
-    inbox_file_size: "サイズ:",
+    outbox_challenge_failed: "ワンタイムコードが違います",
+    outbox_password_failed: "パスワードが違います",
+    inbox_filename: "ファイル：",
+    inbox_file_size: "サイズ：",
     inbox_expired: "この共有は期限切れです。",
     inbox_revoked: "送信者がこの共有を取り消しました。",
     inbox_retrieved: "取得済みです。",
@@ -1281,7 +1300,7 @@ static ZH_CN: Strings = Strings {
     store_choose_file: "选择文件...",
     store_button: "存储文本",
     store_success: "存储成功。",
-    store_mid_label: "内容 ID (MID)：",
+    store_mid_label: "内容 ID：",
     store_mid_label_easy: "内容 ID：",
     store_copy: "复制",
     store_copied: "已复制 ID。",
@@ -1289,12 +1308,13 @@ static ZH_CN: Strings = Strings {
     store_share_hint_easy: "请保存此 ID，恢复内容时需要使用。",
     store_busy: "正在存储...",
     store_not_connected_hint: "请先启动应用再保存内容。",
+    files_not_connected_hint: "这些操作需要后台服务。请按照窗口顶部的卡片完成设置或等待其启动。",
 
     retrieve_heading: "恢复内容",
     retrieve_heading_easy: "恢复内容",
     retrieve_desc: "通过 Miasma 内容 ID 恢复内容。",
     retrieve_desc_easy: "输入内容 ID 恢复你的内容。",
-    retrieve_mid_label: "内容 ID (MID)：",
+    retrieve_mid_label: "内容 ID：",
     retrieve_mid_label_easy: "内容 ID：",
     retrieve_button: "恢复",
     retrieve_button_easy: "恢复",
@@ -1335,7 +1355,7 @@ static ZH_CN: Strings = Strings {
     status_used: "已使用：",
     status_replication: "副本：",
     status_transport: "传输方式",
-    status_transport_name: "传输方式",
+    status_transport_name: "名称",
     status_transport_status: "状态",
     status_transport_counts: "成功 / 失败",
     status_transport_details: "详情",
@@ -1394,7 +1414,7 @@ static ZH_CN: Strings = Strings {
     settings_mode: "界面模式",
     settings_mode_technical: "高级模式",
     settings_mode_easy: "简易模式",
-    settings_mode_desc_technical: "完整诊断信息、传输详情、协议可见",
+    settings_mode_desc_technical: "显示诊断信息和协议详情。",
     settings_mode_desc_easy: "简化界面，隐藏技术细节",
     settings_theme: "外观",
     settings_theme_system: "跟随系统",
@@ -1439,6 +1459,8 @@ static ZH_CN: Strings = Strings {
     home_send_action: "发送文件",
     home_receive_action: "接收文件",
     home_save_action: "安全保存",
+    home_no_contacts: "你还没有可发送的对象。在“联系人”页添加联系人或发送邀请后，即可开始发送文件。",
+    home_open_contacts: "打开联系人",
     files_heading_easy: "文件",
     files_desc_easy: "在这里发送、接收、恢复并查看文件活动。",
 
@@ -1451,13 +1473,13 @@ static ZH_CN: Strings = Strings {
     storage_bar_label: "存储使用量",
 
     // ── Directed sharing ──
-    tab_send: "发送",
+    tab_send: "私密发送",
     tab_send_easy: "发送",
-    tab_inbox: "收件箱",
+    tab_inbox: "私密收件箱",
     tab_inbox_easy: "收到的文件",
     send_heading: "私密发送",
     send_heading_easy: "发送文件",
-    send_desc: "使用接收者的文件接收码加密并发送文件。",
+    send_desc: "使用对方的文件接收码加密并发送文件。",
     send_desc_easy: "安全地把文件发送给你认识的人。",
     send_contact_label: "接收者的文件接收码：",
     send_contact_hint: "msk:...@PeerId",
@@ -1479,9 +1501,10 @@ static ZH_CN: Strings = Strings {
     send_not_connected: "请先连接再发送。",
     inbox_heading: "私密收件箱",
     inbox_heading_easy: "收到的文件",
-    inbox_desc: "其他用户私密发送给你的文件。",
+    inbox_desc: "私密发送给你的文件。",
     inbox_desc_easy: "别人发给你的文件。",
     inbox_empty: "收件箱为空。",
+    inbox_receive_by_code: "用代码接收…",
     inbox_from: "发送者：",
     inbox_state: "状态：",
     inbox_challenge: "验证码：",
@@ -1495,11 +1518,11 @@ static ZH_CN: Strings = Strings {
     sharing_key_copy: "复制",
     sharing_key_copied: "已复制！",
 
-    tab_outbox: "发件箱",
+    tab_outbox: "私密发件箱",
     tab_outbox_easy: "已发送",
     outbox_heading: "私密发件箱",
     outbox_heading_easy: "你发送的文件",
-    outbox_desc: "你私密发送给其他用户的文件。",
+    outbox_desc: "你私密发送的文件。",
     outbox_desc_easy: "你发送给特定人的文件。",
     outbox_empty: "发件箱为空。",
     outbox_to: "收件人：",
@@ -1728,6 +1751,8 @@ pub struct TransferStrings {
     pub pw_short_warning: &'static str,
     pub pw_generate: &'static str,
     pub pw_generated_note: &'static str,
+    /// Shown while the daemon keeps the computer from sleeping during work.
+    pub awake_note: &'static str,
 }
 
 impl TransferStrings {
@@ -1873,6 +1898,7 @@ impl TransferStrings {
             ("pw_short_warning", self.pw_short_warning),
             ("pw_generate", self.pw_generate),
             ("pw_generated_note", self.pw_generated_note),
+            ("awake_note", self.awake_note),
         ]
     }
 }
@@ -1890,7 +1916,7 @@ static TR_EN: TransferStrings = TransferStrings {
     tab_easy: "Transfers",
     heading: "Transfers",
     heading_easy: "Transfers",
-    desc: "Large files are sent and received by the background service. They can be stopped and resumed, and this list shows exactly how far each one has got.",
+    desc: "Large files are sent and received in the background, and a stopped transfer can be resumed.",
     desc_easy: "Send or receive large files here. You can stop a transfer and continue it later from where it stopped.",
 
     send: "Send",
@@ -1909,7 +1935,7 @@ static TR_EN: TransferStrings = TransferStrings {
     eta: "ETA",
     day: "d",
 
-    mid_label: "MID",
+    mid_label: "Content ID (MID)",
     mid_label_easy: "Content ID",
     mid_internal_note: "Internal use only; it cannot be used to receive (give the Share ID instead).",
     copy: "Copy",
@@ -1961,7 +1987,7 @@ static TR_EN: TransferStrings = TransferStrings {
     no_path_hint: "The save location is not known any more. Start the transfer again from the form below.",
 
     new_heading: "New transfer",
-    forms_offline: "Start the background service first (see the top of the window).",
+    forms_offline: "The background service is not ready yet. Finish setup or wait for it to start, then try again.",
     recv_path_label: "Save to",
     recv_path_hint: "Where to write the finished file",
     recv_name_lookup: "Looking up the file name...",
@@ -1973,12 +1999,12 @@ static TR_EN: TransferStrings = TransferStrings {
     password_note: "Used as part of the encryption key. It is not stored: keep it, you will need it to resume.",
     via_label: "Via URL (optional)",
     via_hint: "wss://... from the sender",
-    via_note: "Fetch straight from the sender's tunnel URL, not through the Miasma peer-to-peer (DHT) path, so no peer or DHT is needed. Leave empty normally.",
+    via_note: "Fetch straight from the sender's tunnel URL, not through the Miasma peer-to-peer (DHT) path, so no peer or DHT is needed.",
     confirm_label: "Confirm password",
     mismatch: "The two passwords do not match.",
     recv_button: "Start receiving",
     send_button: "Start sending",
-    err_mid: "Paste a Share ID (starts with \"miasma-share:\") or a MID (starts with \"miasma:\").",
+    err_mid: "Paste a Share ID (starts with \"miasma-share:\") or a content ID (starts with \"miasma:\").",
     started: "Transfer started.",
     stop_requested: "Stopping at the next safe point. Progress is kept.",
     send_hint: "The receiver must be able to reach this computer, and this computer must stay on and online until the receiver has finished: other computers do not keep a copy by default.",
@@ -2007,7 +2033,7 @@ static TR_EN: TransferStrings = TransferStrings {
     err_remove_running: "This transfer is still running. Stop it first.",
     err_remove_paused: "This transfer is paused and can be resumed, so it was not removed.",
     recv_folder_note: "That is a folder. The file will be saved inside it, under the name it had when it was sent: {path}",
-    recv_id_label: "Share ID (or MID)",
+    recv_id_label: "Share ID (or content ID)",
     recv_id_label_easy: "Invitation code",
     pw_policy_note_easy: "Optional. If you set one: at least 6 characters with a digit, a letter (a-z, A-Z) and a symbol; a space does not count. Even so, a short password is weak. Press Generate for a strong one.",
     share_id_label: "Share ID",
@@ -2037,7 +2063,8 @@ static TR_EN: TransferStrings = TransferStrings {
     pw_err_no_symbol: "it has no symbol such as ! # $ %",
     pw_short_warning: "short: use 12+ characters or press Generate",
     pw_generate: "Generate",
-    pw_generated_note: "Generated password, shown once. Store it now: it is not saved anywhere and cannot be recovered. The receiver needs it in addition to the MID.",
+    pw_generated_note: "Generated password, shown once. Store it now: it is not saved anywhere and cannot be recovered. The receiver needs it in addition to the Share ID.",
+    awake_note: "Keeping this computer awake while transferring",
 };
 
 static TR_JA: TransferStrings = TransferStrings {
@@ -2045,7 +2072,7 @@ static TR_JA: TransferStrings = TransferStrings {
     tab_easy: "ファイル転送",
     heading: "転送",
     heading_easy: "ファイル転送",
-    desc: "大きなファイルをバックグラウンドで送受信します。途中で止めても再開できます。",
+    desc: "大きなファイルもバックグラウンドで送受信でき、中断しても再開できます。",
     desc_easy: "大きなファイルをここで送ったり受け取ったりできます。途中で止めても、あとで続きから再開できます。",
 
     send: "送信",
@@ -2064,7 +2091,7 @@ static TR_JA: TransferStrings = TransferStrings {
     eta: "残り",
     day: "日",
 
-    mid_label: "MID",
+    mid_label: "コンテンツID",
     mid_label_easy: "コンテンツID",
     mid_internal_note: "内部用。受信には使えません（共有IDを渡してください）。",
     copy: "コピー",
@@ -2090,7 +2117,7 @@ static TR_JA: TransferStrings = TransferStrings {
     split_label: "時間の内訳",
     split_recv: "取得 {a}%   復号 {b}%   書き込み {c}%",
     split_send: "相手へ送信 {a}%   暗号化・分割 {b}%   ローカル保存 {c}%",
-    pieces_label: "ピース",
+    pieces_label: "断片",
     pieces_fmt: "受信 {ok}個 / 不一致で破棄 {bad}個",
     retries_label: "セグメントの再試行",
     error_label: "最後のエラー",
@@ -2116,7 +2143,7 @@ static TR_JA: TransferStrings = TransferStrings {
     no_path_hint: "保存先が分からなくなりました。下のフォームからもう一度転送を開始してください。",
 
     new_heading: "新しい転送",
-    forms_offline: "先にバックグラウンドのサービスを起動してください（画面の上部を参照）。",
+    forms_offline: "バックグラウンドのサービスがまだ準備できていません。セットアップを済ませるか、起動を待ってから、もう一度お試しください。",
     recv_path_label: "保存先",
     recv_path_hint: "完成したファイルの保存先",
     recv_name_lookup: "ファイル名を確認しています...",
@@ -2128,26 +2155,26 @@ static TR_JA: TransferStrings = TransferStrings {
     password_note: "保存されません。再開に必要なので控えておいてください。",
     via_label: "経由 URL（任意）",
     via_hint: "送信側の wss://...",
-    via_note: "送信側のトンネル URL から直接取得し、P2P（DHT）経路は使いません。通常は空欄です。",
+    via_note: "送信側のトンネル URL から直接取得し、P2P（DHT）経路は使いません。",
     confirm_label: "パスワード（確認）",
     mismatch: "2つのパスワードが一致しません。",
     recv_button: "受信を開始",
     send_button: "送信を開始",
-    err_mid: "共有ID(「miasma-share:」で始まる)またはMID(「miasma:」で始まる)を貼り付けてください。",
+    err_mid: "共有ID（「miasma-share:」で始まる）またはコンテンツID（「miasma:」で始まる）を貼り付けてください。",
     started: "転送を開始しました。",
     stop_requested: "次の区切りで停止します。進捗は保たれます。",
-    send_hint: "受信側からこのコンピュータへ接続できる必要があります。受信が終わるまで、このコンピュータの電源とネットワークを維持してください。既定では他のコンピュータに複製は残りません。",
+    send_hint: "受信側からこのコンピューターへ接続できる必要があります。受信が終わるまで、このコンピューターの電源とネットワークを維持してください。既定では他のコンピューターに複製は残りません。",
 
     red_label: "冗長度",
     red_label_easy: "保護レベル",
-    red_row: "{kn}   保存容量 {x}   欠けても復元できるピース数 {loss}",
+    red_row: "{kn}   保存容量 {x}   欠けても復元できる断片数 {loss}",
     red_default: "（既定）",
     easy_fast: "最速",
     easy_fast_desc: "ディスク容量と時間が最小です。予備がないため、破損は修復できません。",
     easy_bal: "標準",
-    easy_bal_desc: "少し予備があり、各部分で最大2ピースの破損まで修復できます。",
+    easy_bal_desc: "少し予備があり、各部分で断片が最大2個壊れても修復できます。",
     easy_safe: "最も安全",
-    easy_safe_desc: "ディスク容量が2倍になります。各部分で最大10ピースの破損まで修復できます。",
+    easy_safe_desc: "ディスク容量が2倍になります。各部分で断片が最大10個壊れても修復できます。",
 
     btn_remove: "リストから外す",
     btn_clear_finished: "完了分を消去",
@@ -2161,12 +2188,12 @@ static TR_JA: TransferStrings = TransferStrings {
     removed_msg: "リストから外しました。",
     err_remove_running: "この転送はまだ実行中です。先に停止してください。",
     err_remove_paused: "この転送は一時停止中で再開できるため、外していません。",
-    recv_folder_note: "指定先はフォルダです。送信時のファイル名でこのフォルダの中に保存します: {path}",
-    recv_id_label: "共有ID (またはMID)",
+    recv_folder_note: "指定先はフォルダです。送信時のファイル名でこのフォルダの中に保存します：{path}",
+    recv_id_label: "共有ID（またはコンテンツID）",
     recv_id_label_easy: "招待コード",
-    pw_policy_note_easy: "任意です。設定する場合は 6 文字以上で、数字・英字 (a-z, A-Z)・記号をそれぞれ含めてください（空白は記号に数えません）。ただし短いパスワードは弱くなります。「生成」で強いパスワードを作れます。",
+    pw_policy_note_easy: "任意です。設定する場合は6文字以上で、数字・英字（a-z・A-Z）・記号をそれぞれ含めてください（空白は記号に数えません）。ただし短いパスワードは弱くなります。「生成」で強いパスワードを作れます。",
     share_id_label: "共有ID",
-    share_id_send_note: "この共有ID(とパスワード)を受信する人に渡してください。誰が公開したファイルかも確認できます。",
+    share_id_send_note: "この共有IDとパスワードを、受信する人に渡してください。誰が公開したファイルかも確認できます。",
     copy_invitation: "招待文をコピー",
     invite_lang: miasma_core::transfer::InviteLang::Ja,
     invitation_note: "招待文には共有IDだけが入り、パスワードは入りません。パスワードは別の方法で渡してください。",
@@ -2177,22 +2204,23 @@ static TR_JA: TransferStrings = TransferStrings {
     err_share_id: "共有IDが正しくありません。文字の打ち間違いの可能性があります。元のIDと見比べてください。",
     publisher_label: "発行元",
     publisher_verified: "共有IDで確認済み",
-    publisher_unverified: "未確認: 共有IDを使ってください",
+    publisher_unverified: "未確認：共有IDを使ってください",
     path_label: "接続",
     path_direct: "直接接続（ピアツーピア）",
     path_relay: "リレーサーバ経由（低速）",
 
-    pw_policy_note: "任意です。設定する場合は 6 文字以上で、数字・英字 (a-z, A-Z)・記号をそれぞれ含めてください（空白は記号に数えません）。ただし短いパスワードは弱く、転送のマニフェストを持つ人はオフラインで何度でも推測できます。「生成」で強いパスワードを作れます。",
-    pw_weak_prefix: "このパスワードは使えません:",
+    pw_policy_note: "任意です。設定する場合は6文字以上で、数字・英字（a-z・A-Z）・記号をそれぞれ含めてください（空白は記号に数えません）。ただし短いパスワードは弱く、転送のマニフェストを持つ人はオフラインで何度でも推測できます。「生成」で強いパスワードを作れます。",
+    pw_weak_prefix: "このパスワードは使えません：",
     pw_err_sep: "、",
-    pw_err_too_short: "6 文字未満です",
-    pw_err_too_long: "1024 文字を超えています",
-    pw_err_no_digit: "数字 (0-9) がありません",
-    pw_err_no_letter: "英字 (a-z, A-Z) がありません",
-    pw_err_no_symbol: "記号 (! # $ % など) がありません",
-    pw_short_warning: "短めです: 12 文字以上にするか「生成」を押してください",
+    pw_err_too_short: "6文字未満です",
+    pw_err_too_long: "1024文字を超えています",
+    pw_err_no_digit: "数字（0-9）がありません",
+    pw_err_no_letter: "英字（a-z・A-Z）がありません",
+    pw_err_no_symbol: "記号（! # $ % など）がありません",
+    pw_short_warning: "短めです：12文字以上にするか「生成」を押してください",
     pw_generate: "生成",
-    pw_generated_note: "生成したパスワードです（この1回だけ表示）。今すぐ保管してください。どこにも保存されず、失くすと復元できません。受信する人には MID に加えてこのパスワードが必要です。",
+    pw_generated_note: "生成したパスワードです（この1回だけ表示）。今すぐ保管してください。どこにも保存されず、失くすと復元できません。受信する人には共有IDに加えてこのパスワードが必要です。",
+    awake_note: "転送が終わるまで、このパソコンをスリープさせません",
 };
 
 static TR_ZH_CN: TransferStrings = TransferStrings {
@@ -2200,7 +2228,7 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     tab_easy: "文件传输",
     heading: "传输",
     heading_easy: "文件传输",
-    desc: "大文件由后台服务收发。传输可以中途停止并继续，此列表会准确显示每个传输的进度。",
+    desc: "大文件在后台收发，中断后也可以继续。",
     desc_easy: "在这里发送或接收大文件。可以随时停止，之后从中断处继续。",
 
     send: "发送",
@@ -2219,7 +2247,7 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     eta: "剩余",
     day: "天",
 
-    mid_label: "MID",
+    mid_label: "内容 ID",
     mid_label_easy: "内容 ID",
     mid_internal_note: "仅供内部使用，不能用于接收（请改为提供共享 ID）。",
     copy: "复制",
@@ -2271,7 +2299,7 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     no_path_hint: "已不知道保存位置。请从下方表单重新开始传输。",
 
     new_heading: "新建传输",
-    forms_offline: "请先启动后台服务（见窗口顶部）。",
+    forms_offline: "后台服务尚未就绪。请先完成设置或等待其启动，然后重试。",
     recv_path_label: "保存到",
     recv_path_hint: "完成后文件的保存位置",
     recv_name_lookup: "正在查找文件名...",
@@ -2283,12 +2311,12 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     password_note: "会作为加密密钥的一部分使用。密码不会被保存，继续传输时需要，请妥善记下。",
     via_label: "经由 URL（可选）",
     via_hint: "发送方提供的 wss://...",
-    via_note: "不通过 Miasma 的 P2P/DHT 路径，而是直接从发送方提供的隧道 URL 获取。通常留空。",
+    via_note: "不通过 Miasma 的 P2P/DHT 路径，而是直接从发送方提供的隧道 URL 获取。",
     confirm_label: "确认密码",
     mismatch: "两次输入的密码不一致。",
     recv_button: "开始接收",
     send_button: "开始发送",
-    err_mid: "请粘贴共享 ID（以“miasma-share:”开头）或 MID（以“miasma:”开头）。",
+    err_mid: "请粘贴共享 ID（以“miasma-share:”开头）或内容 ID（以“miasma:”开头）。",
     started: "传输已开始。",
     stop_requested: "将在下一个安全点停止，进度会保留。",
     send_hint: "接收方必须能够连接到这台电脑，并且在接收完成之前，这台电脑要保持开机和联网：默认情况下其他电脑不会保存副本。",
@@ -2317,7 +2345,7 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     err_remove_running: "此传输仍在运行。请先停止它。",
     err_remove_paused: "此传输已暂停且可以继续，因此未被移除。",
     recv_folder_note: "该路径是文件夹。文件将以发送时的文件名保存在其中：{path}",
-    recv_id_label: "共享 ID（或 MID）",
+    recv_id_label: "共享 ID（或内容 ID）",
     recv_id_label_easy: "邀请码",
     pw_policy_note_easy: "可选。若设置，须至少 6 个字符，并包含数字、字母 (a-z, A-Z) 和符号；空格不算符号。即便如此，短密码仍然很弱。点击“生成”可得到高强度密码。",
     share_id_label: "共享 ID",
@@ -2347,7 +2375,8 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     pw_err_no_symbol: "没有符号（如 ! # $ %）",
     pw_short_warning: "偏短：请使用 12 个以上字符，或点击“生成”",
     pw_generate: "生成",
-    pw_generated_note: "已生成的密码（仅显示这一次）。请立即保存：它不会保存在任何地方，丢失后无法找回。接收方除 MID 外还需要此密码。",
+    pw_generated_note: "已生成的密码（仅显示这一次）。请立即保存：它不会保存在任何地方，丢失后无法找回。接收方除共享 ID 外还需要此密码。",
+    awake_note: "传输期间让此电脑保持唤醒",
 };
 
 // ─── Contacts (trusted-contact push) ────────────────────────────────────────
@@ -2398,6 +2427,10 @@ contact_strings! {
     open_missing, open_failed, saved_to, earlier_failed, earlier_show, earlier_hide,
     invite_btn, menu_more, menu_verify, menu_permissions, send_short, row_ready, verify_body,
     paste_what, empty_line, done_btn, invite_lead,
+    qr_img_btn, qr_img_title, qr_img_busy, qr_img_drop, qr_img_overlay,
+    err_img_unreadable, err_img_not_image, err_img_too_large, err_img_no_qr, err_img_not_miasma,
+    cam_btn, cam_stop, cam_starting, cam_scanning, cam_preview,
+    cam_none, cam_denied, cam_busy, cam_failed, cam_timeout, cam_left,
 }
 
 pub fn contact_strings(locale: Locale) -> &'static ContactStrings {
@@ -2418,7 +2451,7 @@ static CT_EN: ContactStrings = ContactStrings {
     help_2: "2. Paste the message you got from them into \"Add a contact\" and press Add. Ask them to do the same.",
     help_3: "3. Once you have both added each other, press \"Send files\" on their row and pick the files.",
     loading: "Loading...",
-    daemon_down: "Miasma's background service is not running, so contacts are unavailable. Start it with the button at the top of the window.",
+    daemon_down: "Miasma's background service has stopped responding, so contacts are unavailable. Please wait a moment; if it does not recover, close Miasma completely and open it again.",
     push_unavailable: "Contacts are not available right now. Close Miasma and open it again. If that does not help, save the report in Settings and contact support.",
     old_daemon: "The background service does not answer contact requests. It is probably an older version. Close Miasma completely and start it again. If that does not help, update both the app and the background service.",
     retry_now: "Try again",
@@ -2567,6 +2600,27 @@ static CT_EN: ContactStrings = ContactStrings {
     empty_line: "Add the people you want to send files to.",
     done_btn: "Done",
     invite_lead: "Send this message to the person you want to add. They paste it under \"Add a contact\".",
+    qr_img_btn: "Choose QR image",
+    qr_img_title: "Choose a picture of the QR code",
+    qr_img_busy: "Reading the image...",
+    qr_img_drop: "You can also drop a PNG or JPEG picture of the QR code here.",
+    qr_img_overlay: "Drop the QR image to read it",
+    err_img_unreadable: "That file could not be opened.",
+    err_img_not_image: "That is not a PNG or JPEG image, or the file is damaged.",
+    err_img_too_large: "That image is too large. Crop it to the QR code or save a smaller copy.",
+    err_img_no_qr: "No QR code was found in the image. Choose a sharp picture that shows the whole code.",
+    err_img_not_miasma: "This QR code is not a Miasma contact code.",
+    cam_btn: "Scan with camera",
+    cam_stop: "Stop camera",
+    cam_starting: "Starting the camera...",
+    cam_scanning: "Hold the QR code in front of the camera.",
+    cam_preview: "Camera preview",
+    cam_none: "No camera was found.",
+    cam_denied: "Miasma is not allowed to use the camera. Allow it in your system settings, then try again.",
+    cam_busy: "Another app is using the camera. Close it and try again.",
+    cam_failed: "The camera could not be started.",
+    cam_timeout: "No QR code was seen for 60 seconds, so the camera was turned off.",
+    cam_left: "The camera was turned off because the window was left.",
 };
 
 static CT_JA: ContactStrings = ContactStrings {
@@ -2579,7 +2633,7 @@ static CT_JA: ContactStrings = ContactStrings {
     help_2: "2. 相手から届いたメッセージを「連絡先を追加」に貼り付けて、「追加」を押します。相手にも同じようにしてもらいます。",
     help_3: "3. お互いに登録できたら、相手の行の「ファイルを送る」を押して、ファイルを選びます。",
     loading: "読み込み中です...",
-    daemon_down: "Miasmaのバックグラウンド機能が止まっているため、連絡先を使えません。画面上部のボタンで起動してください。",
+    daemon_down: "Miasmaのバックグラウンド機能が応答しなくなり、連絡先を使えません。少し待ってください。直らないときは、Miasmaを完全に閉じてから、もう一度開いてください。",
     push_unavailable: "連絡先はいま使えない状態です。Miasmaを閉じてから、もう一度開いてください。直らないときは、設定でレポートを保存して、サポートに送ってください。",
     old_daemon: "バックグラウンド機能が連絡先の要求に応答しません。古いバージョンかもしれません。Miasmaを完全に終了して、もう一度起動してください。直らないときは、アプリとバックグラウンド機能の両方を最新にしてください。",
     retry_now: "もう一度試す",
@@ -2587,7 +2641,7 @@ static CT_JA: ContactStrings = ContactStrings {
     my_code: "あなたの連絡先コード",
     my_code_hint: "人に見せても大丈夫です。パスワードではありません。",
     my_fp: "あなたの確認用コード",
-    my_fp_hint: "電話などで相手に読み上げ、相手の画面のコードと見比べてもらいます。",
+    my_fp_hint: "電話などで相手に読み上げ、相手の画面の「確認用コード」と見比べてもらいます。違っていたら、この連絡先を削除してもらってください。",
     copy_code: "連絡先コードをコピー",
     copy_invite: "招待メッセージをコピー",
     copied: "コピーしました",
@@ -2598,7 +2652,7 @@ static CT_JA: ContactStrings = ContactStrings {
     add_hint: "相手から届いたメッセージをそのまま貼り付けてください。連絡先コードは自動で見つかります。",
     add_paste: "届いたメッセージ、または連絡先コード",
     add_label: "名前",
-    add_label_hint: "覚えやすい名前（例: 田中さん）",
+    add_label_hint: "覚えやすい名前（例：田中さん）",
     add_button: "追加",
     add_busy: "追加しています...",
     added_title: "{label} を追加しました",
@@ -2622,7 +2676,7 @@ static CT_JA: ContactStrings = ContactStrings {
     list_empty: "まだ連絡先がありません。上の「連絡先を追加」から登録してください。",
     chip_registered: "登録済み",
     chip_not_registered: "相手はまだあなたを登録していません",
-    hint_not_registered: "直前のファイルは相手に断られました。相手のMiasmaで、あなたを連絡先に追加してもらってください。招待メッセージをもう一度送ると便利です。",
+    hint_not_registered: "直前のファイルは相手に断られました。相手のMiasmaであなたを連絡先に追加してもらってください。招待メッセージをもう一度送ると便利です。",
     allow_receive: "この人からファイルを受け取る",
     allow_send: "この人にファイルを送る",
     max_size: "最大ファイルサイズ（GiB）",
@@ -2667,10 +2721,10 @@ static CT_JA: ContactStrings = ContactStrings {
     btn_open_file: "ファイルを開く",
     btn_show_folder: "フォルダで表示",
     btn_clear_finished: "終わったものを消す",
-    eta: "あと {t}",
+    eta: "あと{t}",
     rej_too_large: "相手に断られました。ファイルが相手の受け取れるサイズより大きいです。",
     rej_no_space: "相手に断られました。相手のパソコンの空き容量が足りません。",
-    rej_not_allowed: "相手はまだあなたを登録していません。相手のMiasmaで、あなたの連絡先コードを追加してもらってください。",
+    rej_not_allowed: "相手はまだあなたを登録していません。相手のMiasmaであなたの連絡先コードを追加してもらってください。",
     rej_busy: "相手がほかの転送で手一杯です。少し待ってから、もう一度試してください。",
     rej_bad_name: "相手がこのファイル名を受け付けませんでした。ファイル名を変えて、もう一度試してください。",
     rej_bad_request: "相手が要求を理解できませんでした。お互いのMiasmaのバージョンが違うのかもしれません。",
@@ -2680,24 +2734,24 @@ static CT_JA: ContactStrings = ContactStrings {
     fail_lost_in: "通信が途切れました。相手が再び送ると、続きから受け取れます。",
     fail_peer_cancelled: "相手が転送を中止しました。",
     fail_source_changed: "ファイルが送信を予約したあとに変更または差し替えられたため、送りませんでした。もう一度送ってください。",
-    wait_retry: "再試行待ち(次の試行は{t}後、{n}回目)",
-    wait_offline: "一時停止中: 相手がオフラインです。",
-    wait_in_sec: "{n} 秒",
-    wait_in_min: "{n} 分",
-    wait_in_hour: "{n} 時間",
+    wait_retry: "再試行待ち（次の試行は{t}後、{n}回目）",
+    wait_offline: "一時停止中：相手がオフラインです。",
+    wait_in_sec: "{n}秒",
+    wait_in_min: "{n}分",
+    wait_in_hour: "{n}時間",
     max_size_default_hint: "空欄 = 既定の上限（{limit}）",
-    eta_sec: "{s} 秒",
-    eta_min: "{m} 分 {s} 秒",
-    eta_min_even: "{m} 分",
-    eta_hour: "{h} 時間 {m} 分",
-    eta_hour_even: "{h} 時間",
-    eta_day: "{d} 日 {h} 時間",
+    eta_sec: "{s}秒",
+    eta_min: "{m}分{s}秒",
+    eta_min_even: "{m}分",
+    eta_hour: "{h}時間{m}分",
+    eta_hour_even: "{h}時間",
+    eta_day: "{d}日{h}時間",
     inbox_title: "受け取ったファイル",
     inbox_dir: "保存先",
     open_folder: "フォルダを開く",
     inbox_note: "受け取ったファイルが自動で開かれることはありません。",
     arrival_toast: "{label} から「{name}」が届きました",
-    queued_toast: "{n} 件のファイルを {label} への送信待ちにしました",
+    queued_toast: "{n}件のファイルを {label} への送信待ちにしました",
     nav_new: "新着",
     dismiss: "閉じる",
     qr_too_long: "連絡先コードが長すぎて、QRコードにできません。",
@@ -2707,14 +2761,14 @@ static CT_JA: ContactStrings = ContactStrings {
     sugg_attempts: "{n}回",
     sugg_add: "連絡先に追加",
     sugg_ignore: "無視",
-    sugg_prefill_note: "接続の履歴から追加します。あなたが許可を入れるまで、この連絡先は送信も受信もオフです。",
+    sugg_prefill_note: "連絡の申請から追加しました。あなたが許可を入れるまで、この連絡先は送信も受信もオフです。",
     sugg_now: "たった今",
     sugg_min: "{n}分前",
     sugg_hour: "{n}時間前",
-    open_missing: "ファイルが見つかりません。移動または削除された可能性があります: {path}",
-    open_failed: "開けませんでした: {path} ({why})",
-    saved_to: "保存先: {path}",
-    earlier_failed: "以前の失敗 {n} 件",
+    open_missing: "ファイルが見つかりません。移動または削除された可能性があります：{path}",
+    open_failed: "開けませんでした：{path}（{why}）",
+    saved_to: "保存先：{path}",
+    earlier_failed: "以前の失敗{n}件",
     earlier_show: "表示",
     earlier_hide: "隠す",
     invite_btn: "あなたの招待",
@@ -2722,12 +2776,33 @@ static CT_JA: ContactStrings = ContactStrings {
     menu_verify: "確認用コードを見る",
     menu_permissions: "送受信の許可",
     send_short: "送る",
-    row_ready: "送れます",
-    verify_body: "{label}さんの「あなたの招待」にある確認用コードと、下のコードを見比べてください。違うときはこの連絡先を削除してください。",
+    row_ready: "送信できます",
+    verify_body: "{label}さんの画面の「あなたの招待」にある確認用コードを読み上げてもらい、下のコードと見比べてください。一致すれば、正しい相手とつながっています。違うときは、この連絡先を削除してください。",
     paste_what: "相手から届いたものを貼り付けてください",
     empty_line: "ファイルを送りたい相手を追加しましょう。",
     done_btn: "完了",
-    invite_lead: "この招待を相手に送ってください。",
+    invite_lead: "この招待を追加したい相手に送ってください。相手はそれを「連絡先を追加」に貼り付けます。",
+    qr_img_btn: "画像から読み取る",
+    qr_img_title: "QRコードの画像を選んでください",
+    qr_img_busy: "画像を読み取っています...",
+    qr_img_drop: "QRコードのPNGまたはJPEG画像をここにドロップして読み取ることもできます。",
+    qr_img_overlay: "QRコードの画像をドロップすると読み取ります",
+    err_img_unreadable: "そのファイルを開けませんでした。",
+    err_img_not_image: "PNGまたはJPEGの画像ではないか、ファイルが壊れています。",
+    err_img_too_large: "画像が大きすぎます。QRコードの部分だけ切り取るか、小さく保存し直してください。",
+    err_img_no_qr: "画像からQRコードが見つかりませんでした。コード全体が写った、鮮明な画像を選んでください。",
+    err_img_not_miasma: "このQRコードはMiasmaの連絡先コードではありません。",
+    cam_btn: "カメラで読み取る",
+    cam_stop: "カメラを止める",
+    cam_starting: "カメラを起動しています...",
+    cam_scanning: "QRコードをカメラに向けてください。",
+    cam_preview: "カメラの映像",
+    cam_none: "カメラが見つかりません。",
+    cam_denied: "Miasmaにカメラの使用が許可されていません。システムの設定で許可してから、もう一度お試しください。",
+    cam_busy: "ほかのアプリがカメラを使っています。そのアプリを閉じてから、もう一度お試しください。",
+    cam_failed: "カメラを起動できませんでした。",
+    cam_timeout: "60秒たってもQRコードが見つからなかったので、カメラを止めました。",
+    cam_left: "ウィンドウから離れたので、カメラを止めました。",
 };
 
 // zh-CN
@@ -2741,7 +2816,7 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     help_2: "2. 把对方发来的消息粘贴到“添加联系人”中，然后点击“添加”。也请对方同样操作。",
     help_3: "3. 双方都添加完成后，点击对方那一行的“发送文件”，选择要发送的文件。",
     loading: "正在加载...",
-    daemon_down: "Miasma 的后台服务没有运行，因此无法使用联系人。请点击窗口顶部的按钮启动它。",
+    daemon_down: "Miasma 的后台服务已停止响应，因此无法使用联系人。请稍候；若未恢复，请完全关闭 Miasma 后再次打开。",
     push_unavailable: "联系人功能暂时无法使用。请关闭 Miasma 后重新打开。若仍然无法解决，请在设置中保存报告并联系支持。",
     old_daemon: "后台服务没有响应联系人请求，可能是旧版本。请完全退出 Miasma 后重新打开。若仍然无法解决，请将应用和后台服务都更新到最新版。",
     retry_now: "重试",
@@ -2890,6 +2965,27 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     empty_line: "添加你想发送文件的人。",
     done_btn: "完成",
     invite_lead: "把这条消息发给你想添加的人，对方将它粘贴到“添加联系人”中。",
+    qr_img_btn: "选择二维码图片",
+    qr_img_title: "选择二维码图片",
+    qr_img_busy: "正在读取图片...",
+    qr_img_drop: "也可以把二维码的 PNG 或 JPEG 图片拖到这里。",
+    qr_img_overlay: "松开即可读取二维码图片",
+    err_img_unreadable: "无法打开该文件。",
+    err_img_not_image: "这不是 PNG 或 JPEG 图片，或文件已损坏。",
+    err_img_too_large: "图片太大。请裁剪出二维码部分，或另存为较小的图片。",
+    err_img_no_qr: "图片中没有找到二维码。请换一张清晰且完整显示二维码的图片。",
+    err_img_not_miasma: "这个二维码不是 Miasma 联系人代码。",
+    cam_btn: "用摄像头扫描",
+    cam_stop: "关闭摄像头",
+    cam_starting: "正在启动摄像头...",
+    cam_scanning: "请把二维码对准摄像头。",
+    cam_preview: "摄像头画面",
+    cam_none: "没有找到摄像头。",
+    cam_denied: "Miasma 没有使用摄像头的权限。请在系统设置中允许后再试。",
+    cam_busy: "摄像头正被其他应用使用。请关闭该应用后再试。",
+    cam_failed: "无法启动摄像头。",
+    cam_timeout: "60 秒内没有看到二维码，摄像头已关闭。",
+    cam_left: "因为离开了窗口，摄像头已关闭。",
 };
 
 // Group conversations of the Chat area (their own file: `locale/group.rs`).
@@ -2969,6 +3065,9 @@ chat_strings! {
     a11y_row, a11y_unread, nav_new, dismiss,
     state_read, receipts_on, receipts_off, receipts_hint, receipts_global_off, a11y_receipts,
     system_label, file_waiting, file_sending, file_done, file_failed,
+    // Plain-language versions of the technical sentences, shown in Easy mode.
+    queued_note_relay_easy, fail_session_easy, fail_pqc_peer_no_hybrid_easy,
+    fail_pqc_failed_easy, daemon_down_easy, old_daemon_easy,
 }
 
 pub fn chat_strings(locale: Locale) -> &'static ChatStrings {
@@ -2982,9 +3081,9 @@ pub fn chat_strings(locale: Locale) -> &'static ChatStrings {
 static CH_EN: ChatStrings = ChatStrings {
     tab: "Chat",
     heading: "Chat",
-    desc: "Send short text messages to the contacts you have added. To send a file, use \"Send a file\".",
+    desc: "Send short messages to the contacts you have added.",
     loading: "Loading...",
-    daemon_down: "Miasma's background service is not running, so chat is unavailable. Start it with the button at the top of the window.",
+    daemon_down: "Miasma's background service has stopped responding, so chat is unavailable. Please wait a moment; if it does not recover, close Miasma completely and open it again.",
     unavailable: "Chat is not available right now. Check that contacts work, then restart Miasma.",
     old_daemon: "The background service does not answer chat requests. It is probably an older version. Close Miasma completely and start it again. If that does not help, update both the app and the background service.",
     retry_now: "Try again",
@@ -3028,12 +3127,12 @@ static CH_EN: ChatStrings = ChatStrings {
     fail_expired: "It could not be delivered in time.",
     fail_session: "A secure connection could not be set up. Check the contact's verification code with them.",
     fail_other: "It could not be sent.",
-    fail_pqc_peer_no_hybrid: "Not sent. Your setting requires advanced encryption, and the other person's Miasma does not offer it.",
-    fail_pqc_failed: "Not sent. The extra protection could not be set up with this contact. Try again later.",
+    fail_pqc_peer_no_hybrid: "Not sent. The other person's app does not support the advanced encryption your setting requires. Ask them to update to the latest version.",
+    fail_pqc_failed: "Not sent. The advanced encryption could not be set up with this contact. Try again later.",
     pqc_hybrid: "Advanced encryption is on",
     pqc_classical: "Standard protection only",
-    pqc_pending: "Setting up extra protection...",
-    pqc_failed: "Extra protection could not be set up (standard protection only)",
+    pqc_pending: "Setting up advanced encryption",
+    pqc_failed: "Advanced encryption could not be set up (standard protection only)",
     delete_history: "Delete this conversation's history",
     delete_title: "Delete the history of this conversation?",
     delete_body: "All messages with {name} will be deleted from this device only. This cannot be undone. The other person keeps their own copy.",
@@ -3074,14 +3173,20 @@ static CH_EN: ChatStrings = ChatStrings {
     file_sending: "Sending: {name} ({pct}%)",
     file_done: "File sent: {name}",
     file_failed: "File not sent: {name}",
+    queued_note_relay_easy: "Miasma is not connected right now, so this cannot go out yet.",
+    fail_session_easy: "It could not be sent safely. Try again later.",
+    fail_pqc_peer_no_hybrid_easy: "Not sent. The other person's app is too old for this. Ask them to update to the latest version.",
+    fail_pqc_failed_easy: "Not sent. A safe way to send could not be prepared with this contact. Try again later.",
+    daemon_down_easy: "Miasma has stopped responding, so chat is unavailable. Please wait a moment; if it does not recover, close Miasma completely and open it again.",
+    old_daemon_easy: "Chat does not work with this version of Miasma. Close Miasma completely and open it again. If that does not help, update Miasma.",
 };
 
 static CH_JA: ChatStrings = ChatStrings {
     tab: "チャット",
     heading: "チャット",
-    desc: "登録した連絡先と、短い文字のメッセージをやり取りできます。ファイルは「ファイルを送る」から送れます。",
+    desc: "登録した連絡先と短いメッセージをやり取りできます。",
     loading: "読み込み中です...",
-    daemon_down: "Miasmaのバックグラウンド機能が止まっているため、チャットを使えません。画面上部のボタンで起動してください。",
+    daemon_down: "Miasmaのバックグラウンド機能が応答しなくなり、チャットを使えません。少し待ってください。直らないときは、Miasmaを完全に閉じてから、もう一度開いてください。",
     unavailable: "チャットはいま使えない状態です。連絡先が使えるか確認して、Miasmaを再起動してください。",
     old_daemon: "バックグラウンド機能がチャットに応答しません。古いバージョンかもしれません。Miasmaを完全に終了して、もう一度起動してください。直らないときは、アプリとバックグラウンド機能の両方を最新にしてください。",
     retry_now: "もう一度試す",
@@ -3094,8 +3199,8 @@ static CH_JA: ChatStrings = ChatStrings {
     pick_none: "登録した連絡先がありません。先に「連絡先」タブで相手を登録してください。",
     pick_send_off: "この人には送らない設定です。",
     pick_close: "閉じる",
-    preview_you: "あなた: {text}",
-    preview_file: "ファイル: {name}",
+    preview_you: "あなた：{text}",
+    preview_file: "ファイル：{name}",
     time_today: "今日 {time}",
     time_yesterday: "昨日",
     time_date: "{m}月{d}日",
@@ -3105,9 +3210,9 @@ static CH_JA: ChatStrings = ChatStrings {
     composer_keys: "Enterで送信、Shift+Enterで改行します。",
     send: "送信",
     send_empty_hint: "メッセージを入力すると送信できます。",
-    counter_chars: "{n} 文字",
-    counter_near: "あと約 {n} 文字",
-    counter_over: "約 {n} 文字、長すぎます",
+    counter_chars: "{n}文字",
+    counter_near: "あと約{n}文字",
+    counter_over: "約{n}文字、長すぎます",
     too_long_note: "メッセージが長すぎます。短くしてから送ってください。",
     state_sending: "送信中",
     state_queued: "送信済み（相手に届くのを待っています）",
@@ -3116,7 +3221,7 @@ static CH_JA: ChatStrings = ChatStrings {
     retry: "もう一度送る",
     queued_note: "相手がオンラインになると届きます。",
     queued_note_relay: "このコンピューターがリレーに接続できていないため、まだ送れません。「ノードステータス」を確認してください。",
-    fail_not_allowed: "相手はまだあなたを登録していません。相手のMiasmaで、あなたの連絡先コードを追加してもらってください。",
+    fail_not_allowed: "相手はまだあなたを登録していません。相手のMiasmaであなたの連絡先コードを追加してもらってください。",
     fail_too_big: "メッセージが長すぎて、相手が受け取れませんでした。",
     fail_rejected: "相手がメッセージを受け付けませんでした。",
     fail_unsupported: "相手のMiasmaが古く、チャットに対応していません。更新してもらってください。",
@@ -3125,12 +3230,12 @@ static CH_JA: ChatStrings = ChatStrings {
     fail_expired: "届けられないまま、時間が過ぎました。",
     fail_session: "安全な接続を作れませんでした。相手と確認用コードを見比べてください。",
     fail_other: "送れませんでした。",
-    fail_pqc_peer_no_hybrid: "送りませんでした。設定で追加の保護を必須にしていますが、相手の Miasma が対応していません。",
-    fail_pqc_failed: "送りませんでした。この相手との間で追加の保護を準備できませんでした。しばらくしてからもう一度お試しください。",
+    fail_pqc_peer_no_hybrid: "相手のアプリが高度な暗号化に対応していないため、送れません。相手に最新版への更新を依頼してください。",
+    fail_pqc_failed: "送りませんでした。この相手との間で高度な暗号化を準備できませんでした。しばらくしてからもう一度お試しください。",
     pqc_hybrid: "高度な暗号化：オン",
     pqc_classical: "標準の保護のみ",
-    pqc_pending: "追加の保護を準備中…",
-    pqc_failed: "追加の保護を準備できませんでした（標準の保護のみ）",
+    pqc_pending: "高度な暗号化を準備中",
+    pqc_failed: "高度な暗号化を準備できませんでした（標準の保護のみ）",
     delete_history: "この会話の履歴を削除",
     delete_title: "この会話の履歴を削除しますか？",
     delete_body: "{name} との会話の履歴をこの端末からすべて削除します。元に戻せません。相手の端末の履歴は消えません。",
@@ -3161,25 +3266,31 @@ static CH_JA: ChatStrings = ChatStrings {
     nav_new: "新着",
     dismiss: "閉じる",
     state_read: "既読",
-    receipts_on: "既読表示: オン",
-    receipts_off: "既読表示: オフ",
+    receipts_on: "既読表示：オン",
+    receipts_off: "既読表示：オフ",
     receipts_hint: "オンにすると、あなたがメッセージを読んだことが相手に伝わり、相手が読んだこともあなたに表示されます。お互いにオンのときだけ働きます。押すと切り替わります。",
-    receipts_global_off: "設定で、すべての相手への既読表示がオフになっています。既読は送られず、表示もされません。",
+    receipts_global_off: "設定ですべての相手への既読表示がオフになっています。既読は送られず、表示もされません。",
     a11y_receipts: "この人との既読表示を切り替える",
     system_label: "状況",
-    file_waiting: "送信待ち: {name}",
-    file_sending: "送信中: {name} ({pct}%)",
-    file_done: "ファイルを送りました: {name}",
-    file_failed: "ファイルを送れませんでした: {name}",
+    file_waiting: "送信待ち：{name}",
+    file_sending: "送信中：{name}（{pct}%）",
+    file_done: "ファイルを送りました：{name}",
+    file_failed: "ファイルを送れませんでした：{name}",
+    queued_note_relay_easy: "いまMiasmaがつながっていないため、まだ送れません。",
+    fail_session_easy: "安全に送れませんでした。しばらくしてからもう一度お試しください。",
+    fail_pqc_peer_no_hybrid_easy: "送りませんでした。相手のアプリが古いため送れません。相手に最新版への更新を依頼してください。",
+    fail_pqc_failed_easy: "送りませんでした。この相手に安全に送る準備ができませんでした。しばらくしてからもう一度お試しください。",
+    daemon_down_easy: "Miasmaが応答しなくなり、チャットを使えません。少し待ってください。直らないときは、Miasmaを完全に閉じてから、もう一度開いてください。",
+    old_daemon_easy: "このバージョンのMiasmaではチャットが動きません。Miasmaを完全に閉じてから、もう一度開いてください。直らないときは、Miasmaを更新してください。",
 };
 
 // zh-CN: a first translation; to be reviewed by a native speaker before it is called finished.
 static CH_ZH_CN: ChatStrings = ChatStrings {
     tab: "聊天",
     heading: "聊天",
-    desc: "可以与已添加的联系人互发简短的文字消息。发送文件请使用“发送文件”。",
+    desc: "可以与已添加的联系人互发简短的消息。",
     loading: "加载中...",
-    daemon_down: "Miasma 的后台服务未运行，无法使用聊天。请点击窗口顶部的按钮启动。",
+    daemon_down: "Miasma 的后台服务已停止响应，无法使用聊天。请稍候；若未恢复，请完全关闭 Miasma 后再次打开。",
     unavailable: "聊天目前不可用。请确认联系人功能正常，然后重启 Miasma。",
     old_daemon: "后台服务不响应聊天请求，可能是旧版本。请完全退出 Miasma 后重新启动。若仍不行，请将应用和后台服务都更新到最新版本。",
     retry_now: "重试",
@@ -3223,12 +3334,12 @@ static CH_ZH_CN: ChatStrings = ChatStrings {
     fail_expired: "一直未能送达，已超时。",
     fail_session: "无法建立安全连接。请与对方核对安全码。",
     fail_other: "无法发送。",
-    fail_pqc_peer_no_hybrid: "未发送。你的设置要求使用高级加密，但对方的 Miasma 不提供。",
-    fail_pqc_failed: "未发送。无法与该联系人建立增强保护，请稍后再试。",
+    fail_pqc_peer_no_hybrid: "未发送。对方的应用不支持你的设置所要求的高级加密。请对方更新到最新版本。",
+    fail_pqc_failed: "未发送。无法与该联系人建立高级加密，请稍后再试。",
     pqc_hybrid: "高级加密已开启",
     pqc_classical: "仅标准保护",
-    pqc_pending: "正在建立增强保护……",
-    pqc_failed: "增强保护建立失败（仅标准保护）",
+    pqc_pending: "正在建立高级加密",
+    pqc_failed: "高级加密建立失败（仅标准保护）",
     delete_history: "删除此会话的记录",
     delete_title: "删除此会话的记录？",
     delete_body: "将从本设备删除与 {name} 的全部消息。无法恢复。对方设备上的记录仍会保留。",
@@ -3269,6 +3380,12 @@ static CH_ZH_CN: ChatStrings = ChatStrings {
     file_sending: "正在发送：{name}（{pct}%）",
     file_done: "文件已发送：{name}",
     file_failed: "文件未能发送：{name}",
+    queued_note_relay_easy: "Miasma 当前未连接，暂时无法发出。",
+    fail_session_easy: "无法安全发送。请稍后重试。",
+    fail_pqc_peer_no_hybrid_easy: "未发送。对方的应用版本过旧。请让对方更新到最新版本。",
+    fail_pqc_failed_easy: "未发送。无法与该联系人建立安全发送。请稍后重试。",
+    daemon_down_easy: "Miasma 已停止响应，因此无法使用聊天。请稍候；若未恢复，请完全关闭 Miasma 后再次打开。",
+    old_daemon_easy: "当前版本的 Miasma 无法使用聊天。请完全关闭 Miasma 后重新打开。若仍然无法解决，请更新 Miasma。",
 };
 
 // ─── Logs (memory-only logging, opt-in diagnostic logging) ──────────────────
@@ -3315,6 +3432,7 @@ macro_rules! pqc_strings {
 pqc_strings! {
     heading, intro, off, prefer, require, off_help, prefer_help, require_help,
     restart_note, unavailable, review_note, save_failed, a11y_mode,
+    advanced_label, advanced_hint, fallback_warning, required_note,
 }
 
 pub fn pqc_strings(locale: Locale) -> &'static PqcStrings {
@@ -3327,50 +3445,62 @@ pub fn pqc_strings(locale: Locale) -> &'static PqcStrings {
 
 static PQ_EN: PqcStrings = PqcStrings {
     heading: "Advanced encryption",
-    intro: "Private conversations are already encrypted. This adds a further, stronger layer to the way each conversation is secured. It is off by default and only takes effect when both people have it turned on.",
+    intro: "Private conversations are already encrypted. This adds a further, stronger layer to the way each conversation is secured. It is required by default: a message is sent only once that stronger protection is in place.",
     off: "Off",
     prefer: "Use when possible",
     require: "Always required",
-    off_help: "Chat works exactly as before.",
+    off_help: "Chat works exactly as before, without the stronger protection.",
     prefer_help: "Used when the other person's Miasma supports it. Otherwise chat keeps working as before, and the conversation shows \"Standard protection only\".",
-    require_help: "Messages are sent only after the stronger protection is in place. If the other person cannot use it, the message is not sent and you are told why. Nothing is sent without it.",
-    restart_note: "A change applies the next time Miasma's background service starts.",
+    require_help: "Default. Messages are sent only after the stronger protection is in place. If the other person cannot use it, the message is not sent and you are told why. Nothing is sent without it.",
+    restart_note: "Changes take effect after Miasma restarts.",
     unavailable: "This version of Miasma does not include this protection, so the setting has no effect.",
     review_note: "This feature has not yet been reviewed by an outside security expert.",
     save_failed: "The setting could not be saved. Please try again.",
     a11y_mode: "Advanced encryption",
+    advanced_label: "Advanced: let messages fall back to standard protection",
+    advanced_hint: "These choices lower the protection below the default. Most people should leave this alone. They are meant for testing and special setups.",
+    fallback_warning: "Your setting lets messages fall back to standard protection when the other person cannot use the stronger one.",
+    required_note: "This is standard and required. If the other person's app cannot use the stronger protection, the message is not sent and you are told why.",
 };
 
 static PQ_JA: PqcStrings = PqcStrings {
     heading: "高度な暗号化",
-    intro: "個人チャットはすでに暗号化されています。この機能は、会話を守る仕組みをさらに一段強くします。初期設定はオフで、お互いにオンにしたときだけ働きます。",
+    intro: "個人チャットはすでに暗号化されています。この機能は会話を守る仕組みをさらに一段強くします。初期設定では必須で、強い保護が整ってからメッセージを送ります。",
     off: "オフ",
     prefer: "使えるときは使う",
     require: "必ず使う",
-    off_help: "チャットはこれまでと同じように動きます。",
+    off_help: "強い保護を使わず、チャットはこれまでと同じように動きます。",
     prefer_help: "相手の Miasma が対応しているときに使います。対応していないときはこれまでどおり送れますが、会話に「標準の保護のみ」と表示されます。",
-    require_help: "強い保護が整ってから送ります。相手が対応していないときは送らず、理由を表示します。この保護なしで送ることはありません。",
-    restart_note: "変更は次回起動時に反映されます。",
+    require_help: "初期設定です。強い保護が整ってから送ります。相手が対応していないときは送らず、理由を表示します。この保護なしで送ることはありません。",
+    restart_note: "変更は Miasma の再起動後に反映されます。",
     unavailable: "このビルドでは利用できません。",
     review_note: "外部のセキュリティ専門家による確認は未実施です。",
     save_failed: "設定を保存できませんでした。もう一度お試しください。",
     a11y_mode: "高度な暗号化",
+    advanced_label: "詳細設定：相手が使えないときは標準の保護で送る",
+    advanced_hint: "これらを選ぶと、保護が初期設定より弱くなります。ふだんは変更しないでください。試験や特別な用途のための項目です。",
+    fallback_warning: "いまの設定では、相手が強い保護を使えないとき、標準の保護に切り替えて送ります。",
+    required_note: "これが標準で、必須です。相手のアプリが強い保護を使えないときは送らず、理由を表示します。",
 };
 
 static PQ_ZH_CN: PqcStrings = PqcStrings {
     heading: "高级加密",
-    intro: "私人聊天本来就已加密。此功能会进一步加强对每个会话的保护。默认关闭，只有双方都开启时才会生效。",
+    intro: "私人聊天本来就已加密。此功能会进一步加强对每个会话的保护。默认必须使用：只有在增强保护建立之后才会发送消息。",
     off: "关闭",
     prefer: "尽量使用",
     require: "必须使用",
-    off_help: "聊天与以前完全一样。",
+    off_help: "不使用增强保护，聊天与以前完全一样。",
     prefer_help: "对方的 Miasma 支持时就使用。不支持时聊天照常进行，并在会话中标出“仅标准保护”。",
-    require_help: "只有在增强保护建立之后才发送消息。对方不支持时不会发送，并告诉你原因。没有这项保护就不会发出任何内容。",
-    restart_note: "更改将在下次后台服务启动时生效。",
+    require_help: "默认选项。只有在增强保护建立之后才发送消息。对方不支持时不会发送，并告诉你原因。没有这项保护就不会发出任何内容。",
+    restart_note: "更改将在重启 Miasma 后生效。",
     unavailable: "此版本的 Miasma 不包含这项保护，设置不会生效。",
     review_note: "此功能尚未经过外部安全专家审查。",
     save_failed: "无法保存设置，请重试。",
     a11y_mode: "高级加密",
+    advanced_label: "高级：对方无法使用时，改用标准保护发送",
+    advanced_hint: "这些选项会把保护降到默认以下。大多数人无需改动。它们供测试和特殊配置使用。",
+    fallback_warning: "当前设置会在对方无法使用增强保护时，改用标准保护发送。",
+    required_note: "这是标准，且为必须。如果对方的应用无法使用增强保护，消息将不会发送，并会告诉你原因。",
 };
 
 pub fn log_strings(locale: Locale) -> &'static LogStrings {
@@ -3410,9 +3540,9 @@ static LG_EN: LogStrings = LogStrings {
 
 static LG_JA: LogStrings = LogStrings {
     heading: "ログ",
-    memory_only: "メモリ上のみ(ディスクには何も書き込まれません)",
+    memory_only: "メモリ上のみ（ディスクには何も書き込まれません）",
     diag_label: "診断ログ",
-    diag_warning: "診断ログを有効にすると、使った記録がファイルに残ります。使った日時や相手の情報の一部がパソコンに残るため、不具合を調べるときだけ有効にし、終わったら必ず無効にしてください(無効にするとファイルは削除されます)。",
+    diag_warning: "診断ログを有効にすると、使った記録がファイルに残ります。使った日時や相手の情報の一部がパソコンに残るため、不具合を調べるときだけ有効にし、終わったら必ず無効にしてください（無効にするとファイルは削除されます）。",
     diag_banner: "診断ログが有効です。使った記録がこのパソコンのファイルに書き込まれています。確認が終わったら、設定で無効にしてください。",
     diag_save_failed: "設定を保存できませんでした。もう一度お試しください。",
     show_logs: "ログを表示",
@@ -3424,15 +3554,15 @@ static LG_JA: LogStrings = LogStrings {
     memory_note: "これらの行はメモリ上にだけあり、Miasma を閉じると消えます。",
     daemon_title: "バックグラウンドサービス",
     desktop_title: "このウィンドウ",
-    empty: "(行がありません)",
+    empty: "（行がありません）",
     unsupported: "古いバックグラウンドサービスのため、対応していません",
     unavailable: "バックグラウンドサービスが起動していません",
     legacy_title: "古いログファイルが見つかりました",
     legacy_body: "Miasma はログをファイルに書き込まなくなりました。このパソコンに古いログファイルが見つかりました。ログファイルには Miasma を使った日時が残っています。今すぐ安全に削除するか、そのまま残すかを選んでください。",
     legacy_delete: "今すぐ削除",
     legacy_keep: "残す",
-    legacy_deleted: "古いログファイルを削除しました: {n} 件",
-    legacy_failed: "{n} 件を削除できませんでした。使用中のほかのプログラムを閉じて、次回の起動時にもう一度お試しください。",
+    legacy_deleted: "古いログファイルを削除しました：{n}件",
+    legacy_failed: "{n}件を削除できませんでした。使用中のほかのプログラムを閉じて、次回の起動時にもう一度お試しください。",
 };
 
 static LG_ZH_CN: LogStrings = LogStrings {
@@ -3519,18 +3649,18 @@ static SG_EN: StorageStrings = StorageStrings {
     skipped: "Left in place (in use or unsafe): {ids}",
     nothing: "Nothing was deleted.",
     note_unsupported: "This background service is older and does not support storage management. Close Miasma completely and start it again.",
-    note_unavailable: "The background service is not running, so the stored shares cannot be listed. Start it with the button at the top of the window.",
+    note_unavailable: "The background service is not running, so the stored shares cannot be listed. Finish setup or wait for it to start, then try again.",
 };
 
 static SG_JA: StorageStrings = StorageStrings {
     heading: "ストレージ",
-    desc: "この端末が保管している共有です。削除すると空き容量が増えます。使用中の共有は削除されません。",
+    desc: "この端末が保管している共有です。自分が共有したファイルの断片と、ほかの人のファイルを預かっている断片があります。削除すると、このパソコンの空き容量が増えます。使用中の共有は削除されません。",
     show: "保存している共有を表示",
     hide: "隠す",
     refresh: "更新",
     loading: "読み込み中です...",
     empty: "保存している共有はありません。",
-    total: "共有 {count} 件、合計 {size}",
+    total: "共有{count}件、合計 {size}",
     in_use: "使用中",
     delete_old: "保存から次の日数以上たった共有を削除：",
     days_label: "日",
@@ -3542,11 +3672,11 @@ static SG_JA: StorageStrings = StorageStrings {
     confirm_body: "これらのファイルの共有IDを受け取った人はもうダウンロードできなくなります。",
     confirm_button: "削除",
     cancel: "キャンセル",
-    deleted: "共有 {n} 件を削除し、{size} を解放しました。",
-    skipped: "そのまま残しました(使用中または安全でないため): {ids}",
+    deleted: "共有{n}件を削除し、{size} を解放しました。",
+    skipped: "そのまま残しました（使用中または安全でないため）：{ids}",
     nothing: "削除したものはありません。",
     note_unsupported: "このバックグラウンド機能は古く、ストレージ管理に対応していません。Miasmaを完全に終了して、もう一度起動してください。",
-    note_unavailable: "バックグラウンド機能が起動していないため、保存している共有を一覧できません。画面上部のボタンで起動してください。",
+    note_unavailable: "バックグラウンド機能が起動していないため、保存している共有を一覧できません。セットアップを済ませるか、起動を待ってから、もう一度お試しください。",
 };
 
 static SG_ZH_CN: StorageStrings = StorageStrings {
@@ -3573,7 +3703,7 @@ static SG_ZH_CN: StorageStrings = StorageStrings {
     skipped: "已保留（使用中或不安全）：{ids}",
     nothing: "没有删除任何内容。",
     note_unsupported: "此后台服务版本较旧，不支持存储管理。请完全退出 Miasma 后重新启动。",
-    note_unavailable: "后台服务未运行，无法列出已保存的共享。请点击窗口顶部的按钮启动。",
+    note_unavailable: "后台服务未运行，无法列出已保存的共享。请先完成设置或等待其启动，然后重试。",
 };
 
 // ─── Updates (Settings section and the update banner) ───────────────────────
@@ -3658,28 +3788,28 @@ static UP_EN: UpdateStrings = UpdateStrings {
 
 static UP_JA: UpdateStrings = UpdateStrings {
     heading: "更新",
-    mode_label: "更新:",
+    mode_label: "更新：",
     mode_off: "オフ",
     mode_notify: "知らせる",
     mode_auto: "自動",
     mode_desc_off: "更新を確認せず、GitHubへの接続も行いません。",
     mode_desc_notify: "起動後に一度だけ確認して知らせます。同意するまでインストールしません。",
     mode_desc_auto: "起動後に一度だけ確認し、送受信をしていないときに新しいバージョンを自動でインストールします。",
-    version_label: "バージョン:",
+    version_label: "バージョン：",
     check_now: "今すぐ確認",
     checking: "確認しています...",
-    last_check_label: "前回の確認:",
+    last_check_label: "前回の確認：",
     never_checked: "起動してからまだ確認していません。",
-    ago_seconds: "{n} 秒前",
-    ago_minutes: "{n} 分前",
-    ago_hours: "{n} 時間前",
+    ago_seconds: "{n}秒前",
+    ago_minutes: "{n}分前",
+    ago_hours: "{n}時間前",
     result_up_to_date: "最新のバージョンです。",
     result_available: "バージョン {v} が利用できます。",
     result_failed: "確認できませんでした。最新であるという意味ではありません。",
     result_disabled: "更新はオフです。",
     result_no_asset: "バージョン {v} はありますが、このパソコン向けのダウンロードはまだありません。",
     result_unverifiable: "バージョン {v} はありますが、検証できないため案内しません。",
-    result_local: "開発用のビルドフォルダに、より新しいビルドがあります。",
+    result_local: "開発用のビルドフォルダにより新しいビルドがあります。",
     status_downloading: "更新をダウンロードして確認しています... {pct}%",
     status_applying: "更新をインストールしています...",
     status_ready: "更新のダウンロードと確認が済みました。Miasmaが使われていないときにインストールします。",
@@ -3687,14 +3817,14 @@ static UP_JA: UpdateStrings = UpdateStrings {
     status_installed: "バージョン {v} をインストールしました。再起動すると使えます。",
     status_rolled_back: "新しいバージョンが起動しなかったため、元のバージョンに戻しました。",
     status_skipped: "バージョン {v} はスキップに設定されています。",
-    wait_before_recheck: "もう一度確認するには {n} 秒お待ちください。",
+    wait_before_recheck: "もう一度確認するには{n}秒お待ちください。",
     banner_available: "Miasmaの新しいバージョン {v} が利用できます。",
     banner_installed: "Miasma {v} をインストールしました。再起動すると使えます。",
     update_now: "今すぐ更新",
     later: "あとで",
     skip_version: "このバージョンをスキップ",
     restart_now: "今すぐ再起動",
-    backup_note: "更新前のバージョンはバックアップとして残ります。",
+    backup_note: "更新前のバージョンは、プログラムと同じフォルダーにバックアップとして残ります。",
     config_save_failed: "設定を保存できませんでした。もう一度お試しください。",
 };
 
@@ -3793,17 +3923,17 @@ static SP_EN: SpeedStrings = SpeedStrings {
 
 static SP_JA: SpeedStrings = SpeedStrings {
     path_direct: "直接接続",
-    path_relay: "リレー経由(遅い)",
+    path_relay: "リレー経由（遅い）",
     path_mixed: "直接+リレー",
-    reason_udp: "お使いのネットワークが直接接続を遮断しています(UDP が外に出ていません)。",
+    reason_udp: "お使いのネットワークが直接接続を遮断しています（UDP が外に出ていません）。",
     reason_nat: "ルーターが宛先ごとにアドレスを変えるため、直接接続を確立できません。",
-    avg: "平均 {speed}、{secs} 秒",
-    total: "現在: {speed}({n} 件)",
+    avg: "平均 {speed}、{secs}秒",
+    total: "現在：{speed}（{n}件）",
     rtt: "RTT {ms} ms",
-    stalled: "停止 {secs} 秒",
+    stalled: "停止{secs}秒",
     settings_unit: "速度の主表示",
-    unit_bits: "ビット(Mbps)",
-    unit_bytes: "バイト(MB/s、MiB/s)",
+    unit_bits: "ビット（Mbps）",
+    unit_bytes: "バイト（MB/s、MiB/s）",
     settings_shown: "速度の単位",
     shown_both: "両方",
     shown_bits: "ビットのみ",
@@ -4080,6 +4210,63 @@ mod tests {
     }
 
     #[test]
+    fn the_advanced_group_names_require_as_the_default() {
+        // The weaker choices live under an advanced group; its label, hint and
+        // the fallback warning are filled in every language, and the warning
+        // names the required default so the weaker state is visible.
+        for lang in Locale::ALL {
+            let p = pqc_strings(lang);
+            for (name, value) in [
+                ("advanced_label", p.advanced_label),
+                ("advanced_hint", p.advanced_hint),
+                ("fallback_warning", p.fallback_warning),
+            ] {
+                assert!(!value.trim().is_empty(), "{lang:?} pqc.{name} is empty");
+            }
+        }
+        // Each language's required-default word appears in the help for the
+        // required choice, and not in the help for the weaker `prefer` choice.
+        for (lang, default_word) in [
+            (Locale::En, "Default"),
+            (Locale::Ja, "初期設定"),
+            (Locale::ZhCn, "默认"),
+        ] {
+            let p = pqc_strings(lang);
+            assert!(
+                p.require_help.contains(default_word),
+                "{lang:?} require_help should name the default"
+            );
+            assert!(
+                !p.prefer_help.contains(default_word),
+                "{lang:?} prefer_help should no longer be the default"
+            );
+        }
+    }
+
+    #[test]
+    fn the_required_note_states_the_standard_in_every_language() {
+        // The normal (easy) view offers only the required choice and shows this
+        // note: it says the required mode is the standard and that a message to
+        // a contact that cannot use the stronger protection is not sent. The
+        // note is filled in every language and names the required standard.
+        for (lang, required_word) in [
+            (Locale::En, "required"),
+            (Locale::Ja, "必須"),
+            (Locale::ZhCn, "必须"),
+        ] {
+            let p = pqc_strings(lang);
+            assert!(
+                !p.required_note.trim().is_empty(),
+                "{lang:?} required_note is empty"
+            );
+            assert!(
+                p.required_note.contains(required_word),
+                "{lang:?} required_note should name the required standard"
+            );
+        }
+    }
+
+    #[test]
     fn chat_placeholders_survive_translation() {
         for lang in Locale::ALL {
             let c = chat_strings(lang);
@@ -4265,7 +4452,7 @@ mod tests {
         assert_eq!(group_strings(zh).code_label, "安全码");
         assert_eq!(
             transfer_strings(zh).via_note,
-            "不通过 Miasma 的 P2P/DHT 路径，而是直接从发送方提供的隧道 URL 获取。通常留空。"
+            "不通过 Miasma 的 P2P/DHT 路径，而是直接从发送方提供的隧道 URL 获取。"
         );
 
         // Old wording must not come back anywhere in the zh-CN tables.
@@ -4411,6 +4598,26 @@ mod tests {
     }
 
     #[test]
+    fn every_main_string_exists_in_every_locale() {
+        // Walk the whole key list, not a spot-check, so a key added in one
+        // language but missed in another is caught here.
+        for lang in Locale::ALL {
+            for (name, value) in strings(lang).all() {
+                assert!(!value.trim().is_empty(), "{lang:?} strings.{name} is empty");
+            }
+        }
+        // The files tab's not-connected reason is present and distinct per language.
+        let (en, ja, zh) = (
+            strings(Locale::En).files_not_connected_hint,
+            strings(Locale::Ja).files_not_connected_hint,
+            strings(Locale::ZhCn).files_not_connected_hint,
+        );
+        assert_ne!(en, ja);
+        assert_ne!(en, zh);
+        assert_ne!(ja, zh);
+    }
+
+    #[test]
     fn relay_status_placeholders_survive_translation() {
         for lang in Locale::ALL {
             let s = strings(lang);
@@ -4471,6 +4678,37 @@ mod tests {
         assert!(Locale::ALL.contains(&Locale::En));
         assert!(Locale::ALL.contains(&Locale::Ja));
         assert!(Locale::ALL.contains(&Locale::ZhCn));
+    }
+
+    // The three strings added for the empty-state guidance (Home "no contacts" card and the
+    // Inbox "receive by code" link). The zh-CN side of each is already covered by the strings
+    // translation-parity test; this guards the Japanese side and the shared wiring.
+    #[test]
+    fn the_empty_state_guidance_strings_are_filled_and_translated() {
+        for lang in Locale::ALL {
+            let s = strings(lang);
+            for (idx, v) in [
+                s.home_no_contacts,
+                s.home_open_contacts,
+                s.inbox_receive_by_code,
+                // The Easy Inbox title reuses this label, so it must be present too.
+                s.home_receive_action,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                assert!(!v.trim().is_empty(), "{lang:?} string #{idx} is empty");
+            }
+        }
+        // Japanese is a real translation, not the English left in place.
+        let (en, ja) = (strings(Locale::En), strings(Locale::Ja));
+        assert_ne!(en.home_no_contacts, ja.home_no_contacts);
+        assert_ne!(en.home_open_contacts, ja.home_open_contacts);
+        assert_ne!(en.inbox_receive_by_code, ja.inbox_receive_by_code);
+        // The Japanese points to the same place the card's button opens: the Contacts tab.
+        assert!(ja.home_no_contacts.contains("連絡先"));
+        assert_eq!(ja.home_open_contacts, "連絡先を開く");
+        assert_eq!(ja.inbox_receive_by_code, "コードで受け取る…");
     }
 
     #[test]

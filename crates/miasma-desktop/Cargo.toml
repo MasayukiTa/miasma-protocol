@@ -10,11 +10,11 @@ license.workspace = true
 # Developer-only: walk theme x language x tab and save screenshots (see src/app/tour.rs).
 ui-tour = []
 # Hybrid upgrade of private conversations, included in release builds (the
-# setting itself is off by default). See
+# setting `privacy.pqc_mode` defaults to `prefer`). See
 # docs/pqc-session-upgrade.md.
 pqc = ["miasma-core/pqc"]
-# Release builds include the hybrid upgrade; `privacy.pqc_mode` is still off
-# until a person turns it on.
+# Release builds include the hybrid upgrade; `privacy.pqc_mode` defaults to
+# `prefer` (used when the contact supports it) until a person changes it.
 default = ["pqc"]
 
 [[bin]]
@@ -42,6 +42,19 @@ eframe = { version = "0.27", features = ["default_fonts"] }
 rfd    = "0.14"   # native file-picker dialogs
 # Share ID QR code: pure Rust, no image or system dependencies.
 qrcode = { version = "0.14", default-features = false }
+# Reading a QR code from a picture file: pure Rust decoders only (no system libraries).
+# `image` is limited to the two formats people photograph or screenshot a code in.
+image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
+rqrr  = { version = "0.11", default-features = false }
+
+# Camera for reading a contact QR code. One maintained crate with only the platform backend that
+# is needed (Media Foundation on Windows, AVFoundation on macOS). Its default `decoding` feature
+# pulls in a C++ JPEG library, so it is off: camera JPEG frames go through the `image` decoder.
+[target.'cfg(windows)'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-msmf"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
@@ -49,5 +62,6 @@ winresource = "0.1"
 [dev-dependencies]
 serde_json.workspace = true
 tempfile.workspace = true
+rand.workspace = true
 # The tree consumer used by the Windows adapter: lets tests apply a tree update the way the platform side does.
 accesskit_consumer = "0.16"

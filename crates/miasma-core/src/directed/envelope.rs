@@ -102,9 +102,20 @@ pub enum RetentionPeriod {
     Custom(u64),
 }
 
+/// Length in seconds of each retention preset, as enum discriminants.
+#[derive(Clone, Copy)]
+#[repr(u64)]
+enum PresetSecs {
+    TenMinutes = 600,
+    OneHour = 3600,
+    OneDay = 86400,
+    SevenDays = 604800,
+    ThirtyDays = 2592000,
+}
+
 /// Shortest retention a sender may choose: the shortest preset
 /// (`RetentionPeriod::TenMinutes`).
-pub const MIN_RETENTION_SECS: u64 = 600;
+pub const MIN_RETENTION_SECS: u64 = PresetSecs::TenMinutes as u64;
 
 /// Longest retention a sender may choose, and the longest time a recipient
 /// keeps a share it received: the longest preset (`RetentionPeriod::ThirtyDays`).
@@ -114,7 +125,7 @@ pub const MIN_RETENTION_SECS: u64 = 600;
 /// share on the recipient's disk with no end. A sender-side value outside
 /// `[MIN_RETENTION_SECS, MAX_RETENTION_SECS]` is refused so that `now + retention`
 /// cannot overflow.
-pub const MAX_RETENTION_SECS: u64 = 2_592_000;
+pub const MAX_RETENTION_SECS: u64 = PresetSecs::ThirtyDays as u64;
 
 impl RetentionPeriod {
     /// The retention in seconds, or an error when it is outside
@@ -134,11 +145,11 @@ impl RetentionPeriod {
     /// Duration in seconds.
     pub fn as_secs(&self) -> u64 {
         match self {
-            Self::TenMinutes => 600,
-            Self::OneHour => 3600,
-            Self::OneDay => 86400,
-            Self::SevenDays => 604800,
-            Self::ThirtyDays => 2592000,
+            Self::TenMinutes => PresetSecs::TenMinutes as u64,
+            Self::OneHour => PresetSecs::OneHour as u64,
+            Self::OneDay => PresetSecs::OneDay as u64,
+            Self::SevenDays => PresetSecs::SevenDays as u64,
+            Self::ThirtyDays => PresetSecs::ThirtyDays as u64,
             Self::Custom(s) => *s,
         }
     }
@@ -259,6 +270,13 @@ impl DirectedEnvelope {
         now_secs >= self.expires_at
     }
 
+    /// Record a (validated) retention on a new envelope: it ends `secs` after
+    /// it was created, without overflowing.
+    fn set_retention(&mut self, secs: u64) {
+        self.expires_at = self.created_at.saturating_add(secs);
+        self.retention_secs = secs;
+    }
+
     /// Bring the sender-chosen retention fields of a received envelope into
     /// the range this node is willing to keep.
     ///
@@ -324,7 +342,7 @@ pub fn create_envelope(
 ) -> Result<(DirectedEnvelope, Vec<u8>, Zeroizing<[u8; 32]>), MiasmaError> {
     crate::transfer::password_policy::check_directed(password)
         .map_err(MiasmaError::WeakPassword)?;
-    build_envelope(
+    build_with_retention(
         sender_secret,
         recipient_pubkey,
         password,
@@ -345,7 +363,7 @@ pub(crate) fn create_envelope_unchecked(
     plaintext: &[u8],
     filename: Option<String>,
 ) -> Result<(DirectedEnvelope, Vec<u8>, Zeroizing<[u8; 32]>), MiasmaError> {
-    build_envelope(
+    build_with_retention(
         sender_secret,
         recipient_pubkey,
         password,
@@ -355,7 +373,12 @@ pub(crate) fn create_envelope_unchecked(
     )
 }
 
-fn build_envelope(
+/// Validate the retention, build the envelope, then record the retention on it.
+///
+/// The retention is applied after the keys and ciphertext exist, and never
+/// passed into [`build_envelope`], so the retention seconds are not an input
+/// of the key, nonce or salt handling.
+fn build_with_retention(
     sender_secret: &[u8; 32],
     recipient_pubkey: &[u8; 32],
     password: &str,
@@ -363,10 +386,27 @@ fn build_envelope(
     plaintext: &[u8],
     filename: Option<String>,
 ) -> Result<(DirectedEnvelope, Vec<u8>, Zeroizing<[u8; 32]>), MiasmaError> {
-    use rand::RngCore;
-
     // Refuse a retention that is out of range before doing any work.
     let retention_secs = retention.checked_secs()?;
+    let (mut envelope, protected_data, envelope_key) = build_envelope(
+        sender_secret,
+        recipient_pubkey,
+        password,
+        plaintext,
+        filename,
+    )?;
+    envelope.set_retention(retention_secs);
+    Ok((envelope, protected_data, envelope_key))
+}
+
+fn build_envelope(
+    sender_secret: &[u8; 32],
+    recipient_pubkey: &[u8; 32],
+    password: &str,
+    plaintext: &[u8],
+    filename: Option<String>,
+) -> Result<(DirectedEnvelope, Vec<u8>, Zeroizing<[u8; 32]>), MiasmaError> {
+    use rand::RngCore;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -433,14 +473,15 @@ fn build_envelope(
         encrypted_payload,
         payload_nonce,
         password_salt,
-        expires_at: now.saturating_add(retention_secs),
+        // Set by `set_retention` once the retention is known.
+        expires_at: now,
         created_at: now,
         state: EnvelopeState::Pending,
         challenge_hash: None,
         password_attempts_remaining: 3,
         challenge_attempts_remaining: 3,
         challenge_expires_at: 0,
-        retention_secs,
+        retention_secs: 0,
     };
 
     Ok((envelope, protected_data, envelope_key))
@@ -1189,5 +1230,28 @@ mod tests {
         let before = bincode::serialize(&env).unwrap();
         env.normalize_received_retention(env.created_at).unwrap();
         assert_eq!(bincode::serialize(&env).unwrap(), before);
+    }
+
+    #[test]
+    fn winding_the_clock_back_does_not_extend_the_effective_expiry() {
+        // An envelope whose stored end is far beyond the cap, so every call is
+        // decided by `now + MAX_RETENTION_SECS` rather than the stored value.
+        let created_at = 1_000_000;
+        let first_now = 1_800_000_000;
+        let mut env = envelope_with_window(created_at, u64::MAX);
+        env.normalize_received_retention(first_now).unwrap();
+        let after_first = env.expires_at;
+
+        // Re-normalize the same envelope with the clock wound back. The cap only
+        // ever lowers `expires_at` (`min`), so an earlier `now` can never push
+        // the effective end later than what an earlier, larger `now` produced.
+        for earlier in [first_now - 1, first_now - 10_000, created_at + 1, 0] {
+            env.normalize_received_retention(earlier).unwrap();
+            assert!(
+                env.expires_at <= after_first,
+                "clock wound back to {earlier}: expiry {} rose above {after_first}",
+                env.expires_at
+            );
+        }
     }
 }

@@ -509,6 +509,8 @@ pub struct TransfersUi {
     /// Browse was clicked and the sender's file name is being looked up before the Save-As
     /// dialog opens.
     name_peek: Option<NamePeek>,
+    /// The daemon reports that it is keeping the computer awake (from the status poll).
+    pub keeping_awake: bool,
 }
 
 /// How long the form waits for the name lookup before it opens the dialog with the placeholder
@@ -571,6 +573,7 @@ impl Default for TransfersUi {
             show_qr: false,
             focus_recv_password: false,
             name_peek: None,
+            keeping_awake: false,
         }
     }
 }
@@ -826,47 +829,68 @@ impl TransfersUi {
         easy: bool,
         connected: bool,
     ) -> Vec<WorkerCmd> {
+        self.show_in(ui, t, easy, connected, true)
+    }
+
+    /// [`Self::show`], with or without the page title and description: inside another page
+    /// (the Easy Files page) the title would repeat the strip above it.
+    pub fn show_in(
+        &mut self,
+        ui: &mut egui::Ui,
+        t: &TransferStrings,
+        easy: bool,
+        connected: bool,
+        titled: bool,
+    ) -> Vec<WorkerCmd> {
         let mut cmds = Vec::new();
         // A poll that could not reach the daemon overrides what the header says: it is the newer
         // fact, and nothing here can be started or stopped without the daemon.
         let connected = connected && !self.poll_error.as_ref().is_some_and(|(_, down)| *down);
 
         let desc = if easy { t.desc_easy } else { t.desc };
-        kit::page(
-            ui,
-            if easy { t.heading_easy } else { t.heading },
-            Some(desc),
-            |ui| {
-                if let Some((msg, down)) = &self.poll_error {
-                    let shown = if *down { t.offline_note } else { msg.as_str() };
-                    kit::notice(ui, Level::Warn, shown);
-                    if !self.jobs.is_empty() {
-                        kit::hint(ui, t.stale_note);
-                    }
+        let mut body = |ui: &mut egui::Ui| {
+            if self.keeping_awake {
+                kit::hint(ui, t.awake_note);
+            }
+            if let Some((msg, down)) = &self.poll_error {
+                let shown = if *down { t.offline_note } else { msg.as_str() };
+                kit::notice(ui, Level::Warn, shown);
+                if !self.jobs.is_empty() {
+                    kit::hint(ui, t.stale_note);
                 }
+            }
 
-                if show_clear_finished(&self.jobs) {
-                    kit::button_row(ui, |ui| {
-                        // Neutral: the one accent action on this screen is Start receiving / sending.
-                        if crate::form_check::add_enabled(
-                            ui,
-                            connected,
-                            kit::secondary_button(t.btn_clear_finished),
-                        )
-                        .on_hover_text(t.clear_finished_hint)
-                        .clicked()
-                        {
-                            cmds.push(WorkerCmd::TransferClearFinished);
-                            self.drop_rows(|j| !clearable(j));
-                        }
-                    });
-                }
-                self.list_card(ui, t, easy);
-                ui.add_space(kit::SP_2);
-                self.detail_card(ui, t, easy, connected, &mut cmds);
-                self.new_card(ui, t, easy, connected, &mut cmds);
-            },
-        );
+            if show_clear_finished(&self.jobs) {
+                kit::button_row(ui, |ui| {
+                    // Neutral: the one accent action on this screen is Start receiving / sending.
+                    if crate::form_check::add_enabled(
+                        ui,
+                        connected,
+                        kit::secondary_button(t.btn_clear_finished),
+                    )
+                    .on_hover_text(t.clear_finished_hint)
+                    .clicked()
+                    {
+                        cmds.push(WorkerCmd::TransferClearFinished);
+                        self.drop_rows(|j| !clearable(j));
+                    }
+                });
+            }
+            self.list_card(ui, t, easy);
+            ui.add_space(kit::SP_2);
+            self.detail_card(ui, t, easy, connected, &mut cmds);
+            self.new_card(ui, t, easy, connected, &mut cmds);
+        };
+        if titled {
+            kit::page(
+                ui,
+                if easy { t.heading_easy } else { t.heading },
+                Some(desc),
+                body,
+            );
+        } else {
+            body(ui);
+        }
         cmds
     }
 

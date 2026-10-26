@@ -521,6 +521,12 @@ pub(super) async fn prepare(
     // ── 2. The password, before any piece is fetched. ───────────────────────
     let key: Option<Arc<UnlockedKey>> = match (manifest.as_ref().map(|m| &m.protection), password) {
         (Some(Protection::Password(prot)), Some(pw)) => {
+            if prot.is_weak_kdf() {
+                // An old transfer made below the current create floor. Still
+                // received; the state records that its key derivation is weak.
+                progress.note_weak_key_derivation();
+                tracing::warn!("this transfer was made with a weak key derivation");
+            }
             let prot = prot.clone();
             let unlocked = tokio::task::spawn_blocking(move || prot.unlock(pw.as_str()))
                 .await

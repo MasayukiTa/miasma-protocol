@@ -1,7 +1,7 @@
-//! Opt-in hybrid (X25519 + ML-KEM-768) upgrade of a private-conversation
-//! session. Compiled only with the `pqc` cargo feature; off by default, and
-//! even in a build that has it, nothing below acts unless
-//! `privacy.pqc_mode` is `prefer` or `require`.
+//! Hybrid (X25519 + ML-KEM-768) upgrade of a private-conversation
+//! session. Compiled only with the `pqc` cargo feature; in a build that has it,
+//! nothing below acts unless `privacy.pqc_mode` is `prefer` (the default) or
+//! `require`.
 //!
 //! This wiring has not been reviewed by an outside cryptographer. See
 //! `docs/pqc-session-upgrade.md` for the design, the limits and what is not
@@ -153,6 +153,39 @@ pub mod reason {
 pub const FAIL_NO_HYBRID: &str = "pqc_peer_no_hybrid";
 pub const FAIL_EXCHANGE: &str = "pqc_failed";
 
+/// Why a message was refused under `require`, with the information a caller
+/// needs to tell the person which contact and why. The hybrid key exchange
+/// could not be established, so nothing is sent in the classical session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PqcRefusal {
+    /// The contact does not offer the hybrid post-quantum suite (it offered
+    /// nothing, an incompatible set, a missing capability, or a build that
+    /// does not know the exchange). No classical fallback is allowed.
+    PeerLacksPqc { peer: [u8; 32] },
+    /// The hybrid exchange was attempted but did not complete: a stripped or
+    /// corrupt ML-KEM part, a capability that did not match the message, a
+    /// failed key confirmation, or a timeout. Refusing it rather than
+    /// continuing is what keeps a downgrade from succeeding.
+    PqcDowngradeRefused { peer: [u8; 32] },
+}
+
+impl PqcRefusal {
+    /// The contact this refusal is about.
+    pub fn peer(&self) -> &[u8; 32] {
+        match self {
+            Self::PeerLacksPqc { peer } | Self::PqcDowngradeRefused { peer } => peer,
+        }
+    }
+
+    /// The stable reason string shown through the usual failed-message reason.
+    pub fn reason_str(&self) -> &'static str {
+        match self {
+            Self::PeerLacksPqc { .. } => FAIL_NO_HYBRID,
+            Self::PqcDowngradeRefused { .. } => FAIL_EXCHANGE,
+        }
+    }
+}
+
 // ─── Counters (numbers only, no peer identifiers) ───────────────────────────
 
 static HYBRID_SESSIONS: AtomicU64 = AtomicU64::new(0);
@@ -228,8 +261,9 @@ pub enum Pass {
     /// shortly.
     Hold,
     /// `require`: the contact cannot be reached with the hybrid exchange; fail
-    /// the waiting messages with this reason.
-    Refuse(&'static str),
+    /// the waiting messages. The typed refusal carries the contact and the
+    /// reason for a message shown to the person.
+    Refuse(PqcRefusal),
 }
 
 /// What the peer did with a record we delivered.
@@ -482,6 +516,16 @@ fn kex_config(p: &Peer, env: &Env) -> Option<KexConfig> {
 }
 
 fn mark_classical(p: &mut Peer, env: &Env, why: u8) {
+    if env.mode == PqcMode::Require {
+        // `require` forbids a classical-only session: there is no path that
+        // drops to the classical key exchange. Fail the contact (nothing is
+        // sent in the classical session) instead of marking it classical.
+        // Still count the refusal so the `refused` stat does not regress; the
+        // classical-only counter is intentionally not touched here.
+        REFUSED.fetch_add(1, Ordering::Relaxed);
+        mark_failed(p, env, why);
+        return;
+    }
     p.wipe_exchange();
     p.phase = Phase::Classical;
     p.reason = why;
@@ -630,9 +674,14 @@ fn gate_of_decided(p: &Peer, env: &Env) -> Pass {
     if env.mode != PqcMode::Require {
         return Pass::Proceed;
     }
-    match p.phase {
-        Phase::Failed => Pass::Refuse(FAIL_EXCHANGE),
-        _ => Pass::Refuse(FAIL_NO_HYBRID),
+    // The reason decides which typed refusal is shown. A finished-but-failed
+    // exchange (stripped/invalid ML-KEM, confirmation mismatch, timeout) is a
+    // refused downgrade; anything else is the peer not offering the suite.
+    match p.reason {
+        reason::EXCHANGE_FAILED | reason::CONFIRM_MISMATCH | reason::TIMEOUT => {
+            Pass::Refuse(PqcRefusal::PqcDowngradeRefused { peer: env.peer })
+        }
+        _ => Pass::Refuse(PqcRefusal::PeerLacksPqc { peer: env.peer }),
     }
 }
 
@@ -1197,6 +1246,10 @@ fn on_init(p: &mut Peer, env: &Env, guard: &mut ReplayGuard, body: &[u8]) {
     };
     p.reasm = None;
     if asm.suite_id != SUITE_ID_HYBRID {
+        // The declared suite does not match a hybrid exchange: a forged or
+        // non-hybrid offer reaching the responder. Fail it (symmetric with
+        // `on_resp`) rather than returning, so it cannot pass as classical.
+        mark_failed(p, env, reason::EXCHANGE_FAILED);
         return;
     }
     let Some(cfg) = kex_config(p, env) else {

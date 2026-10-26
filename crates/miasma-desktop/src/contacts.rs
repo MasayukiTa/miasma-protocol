@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -19,6 +20,8 @@ use crate::a11y::CollapsingExt as _;
 use crate::app::{card_frame, danger_button};
 use crate::locale::{ContactStrings, Locale};
 use crate::open_path::{self, Action, Resolved};
+use crate::qr_camera::{self, CameraBackend, ScanConfig, ScanState, Scanner};
+use crate::qr_image::{self, QrImageError};
 use crate::theme::{self, Palette};
 use crate::transfers::{fill, format_bytes, format_eta};
 use crate::ui_kit::{self as kit, Confirm, Level, ListRow, MenuItem};
@@ -38,8 +41,8 @@ pub fn eta_secs(size: u64, bytes: u64, rate_bps: u64) -> Option<u64> {
     Some((size - bytes).div_ceil(rate_bps))
 }
 
-/// The remaining time in the person's language, compact: `あと 5 秒`, `あと 3 分 12 秒`,
-/// `あと 1 時間 5 分` (English keeps `hh:mm:ss`). The words come from `ContactStrings::eta_*`.
+/// The remaining time in the person's language, compact: `あと5秒`, `あと3分12秒`,
+/// `あと1時間5分` (English keeps `hh:mm:ss`). The words come from `ContactStrings::eta_*`.
 pub fn eta_text(c: &ContactStrings, secs: u64) -> String {
     let (d, h, m, s) = (
         secs / 86_400,
@@ -928,6 +931,22 @@ pub struct ContactsUi {
     /// Failures of "Open file" / "Show in folder" reported by the helper thread.
     open_tx: std::sync::mpsc::Sender<String>,
     open_rx: std::sync::mpsc::Receiver<String>,
+    /// A picture of a QR code is being read on a helper thread; its answer comes back here with
+    /// the number of the request (a picture read for a dialog that was closed since is dropped).
+    qr_img_tx: std::sync::mpsc::Sender<QrImageAnswer>,
+    qr_img_rx: std::sync::mpsc::Receiver<QrImageAnswer>,
+    qr_img_seq: u64,
+    qr_img_busy: bool,
+    qr_img_error: Option<QrImageError>,
+    /// The camera of this computer (`None` where there is no camera support), the scan in
+    /// progress, whether a camera was found, and the preview picture of the scan.
+    camera: Option<Arc<dyn CameraBackend>>,
+    scanner: Scanner,
+    cam_avail: CamAvail,
+    cam_avail_rx: Option<std::sync::mpsc::Receiver<bool>>,
+    cam_texture: Option<egui::TextureHandle>,
+    /// The scan was stopped because the window was left.
+    cam_left: bool,
     /// The path the last open was aimed at (named in the notice if it fails).
     last_open: String,
     /// The notice was just set: bring it into view once.
@@ -956,15 +975,37 @@ pub struct ContactsUi {
 
     /// Speed units, the sparklines' data, and the UI language for their words.
     speed: crate::speed::SpeedUi,
+    /// Whether some transfer (sending or receiving) was running at the last list update.
+    prev_active: bool,
+    /// A transfer has just started: open the Transfers section once, so a file that arrives
+    /// while the section is closed is not hidden behind it.
+    open_transfers: bool,
+}
+
+/// The Transfers section opens by itself when the first running transfer appears.
+pub fn should_open_transfers(was_active: bool, is_active: bool) -> bool {
+    is_active && !was_active
 }
 
 impl Default for ContactsUi {
     fn default() -> Self {
         let now = Instant::now();
         let (open_tx, open_rx) = std::sync::mpsc::channel();
+        let (qr_img_tx, qr_img_rx) = std::sync::mpsc::channel();
         Self {
             open_tx,
             open_rx,
+            qr_img_tx,
+            qr_img_rx,
+            qr_img_seq: 0,
+            qr_img_busy: false,
+            qr_img_error: None,
+            camera: qr_camera::system_backend(),
+            scanner: Scanner::default(),
+            cam_avail: CamAvail::Unknown,
+            cam_avail_rx: None,
+            cam_texture: None,
+            cam_left: false,
             last_open: String::new(),
             scroll_to_msg: false,
             show_earlier: HashSet::new(),
@@ -1018,6 +1059,8 @@ impl Default for ContactsUi {
             err_locale: Locale::En,
             err_technical: false,
             speed: Default::default(),
+            prev_active: false,
+            open_transfers: false,
         }
     }
 }
@@ -1240,6 +1283,152 @@ impl ContactsUi {
         self.add_open = true;
     }
 
+    /// The "Add a contact" form is open and can take a picture (dropped on the window, or chosen
+    /// with the button).
+    pub fn add_dialog_open(&self) -> bool {
+        self.add_open && self.add_result.is_none()
+    }
+
+    /// Read a picture of a QR code for the add form. The file is read and decoded on a helper
+    /// thread; the answer is taken up by [`Self::collect_qr_image`]. What it finds is put in the
+    /// form as if the person had pasted it, and the form's own check and button do the rest.
+    pub fn load_qr_image(&mut self, ctx: &egui::Context, path: PathBuf) {
+        if !self.add_dialog_open() || self.qr_img_busy {
+            return;
+        }
+        // A picture replaces a scan that is still going.
+        self.scanner.reset();
+        self.qr_img_busy = true;
+        self.qr_img_error = None;
+        let (seq, tx, ctx) = (self.qr_img_seq, self.qr_img_tx.clone(), ctx.clone());
+        let started = std::thread::Builder::new()
+            .name("qr-image".into())
+            .spawn(move || {
+                let _ = tx.send((seq, qr_image::contact_code_from_file(&path)));
+                ctx.request_repaint();
+            });
+        if started.is_err() {
+            self.qr_img_busy = false;
+            self.qr_img_error = Some(QrImageError::Unreadable);
+        }
+    }
+
+    /// Take up the answers of the picture reader.
+    fn collect_qr_image(&mut self) {
+        while let Ok((seq, answer)) = self.qr_img_rx.try_recv() {
+            if seq != self.qr_img_seq {
+                continue;
+            }
+            self.qr_img_busy = false;
+            match answer {
+                Ok(code) => self.apply_scanned_code(code),
+                Err(e) => self.qr_img_error = Some(e),
+            }
+        }
+    }
+
+    /// A contact code read from a picture or by the camera goes into the form as if it had been
+    /// pasted; the form's own check and button do the rest.
+    fn apply_scanned_code(&mut self, code: String) {
+        self.add_text = code;
+        self.add_from_suggestion = None;
+        self.add_error = None;
+        self.qr_img_error = None;
+    }
+
+    /// Once per frame of the open form: the camera check, the scan's answers, the preview picture,
+    /// and the rule that the camera is off whenever the window is not in front.
+    fn camera_tick(&mut self, ctx: &egui::Context) {
+        if self.camera.is_none() {
+            return;
+        }
+        if self.cam_avail == CamAvail::Unknown {
+            self.cam_avail = CamAvail::Checking;
+            if let Some(backend) = self.camera.clone() {
+                let (tx, rx) = std::sync::mpsc::channel();
+                let ctx = ctx.clone();
+                let started = std::thread::Builder::new()
+                    .name("qr-camera-check".into())
+                    .spawn(move || {
+                        let _ = tx.send(matches!(backend.camera_count(), Ok(n) if n > 0));
+                        ctx.request_repaint();
+                    });
+                if started.is_ok() {
+                    self.cam_avail_rx = Some(rx);
+                } else {
+                    self.cam_avail = CamAvail::Present;
+                }
+            }
+        }
+        if let Some(rx) = &self.cam_avail_rx {
+            if let Ok(present) = rx.try_recv() {
+                self.cam_avail = if present {
+                    CamAvail::Present
+                } else {
+                    CamAvail::Missing
+                };
+                self.cam_avail_rx = None;
+            }
+        }
+        // The system's permission question takes the focus on macOS, so a scan that is still
+        // starting is not stopped for that.
+        let in_front = ctx.input(|i| i.raw.focused);
+        if self.scanner.state() == ScanState::Scanning && !in_front {
+            self.scanner.stop();
+            self.cam_left = true;
+        }
+        if let Some(code) = self.scanner.pump() {
+            self.apply_scanned_code(code);
+        }
+        if let Some(f) = self.scanner.take_preview() {
+            let image = egui::ColorImage::from_gray([f.width, f.height], &f.luma);
+            match &mut self.cam_texture {
+                Some(t) => t.set(image, egui::TextureOptions::LINEAR),
+                None => {
+                    self.cam_texture = Some(ctx.load_texture(
+                        "qr_camera_preview",
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ))
+                }
+            }
+        }
+        if !self.scanner.running() {
+            self.cam_texture = None;
+        }
+    }
+
+    /// Turn the camera on for the form.
+    fn start_camera(&mut self, ctx: &egui::Context) {
+        let Some(backend) = self.camera.clone() else {
+            return;
+        };
+        self.cam_left = false;
+        self.qr_img_error = None;
+        let ctx = ctx.clone();
+        self.scanner.reset();
+        self.scanner.start(
+            backend,
+            ScanConfig::default(),
+            Arc::new(move || ctx.request_repaint()),
+        );
+    }
+
+    /// The sentence for how the last scan ended, if it ended badly.
+    fn camera_note(&self, c: &ContactStrings) -> Option<&'static str> {
+        if self.cam_left {
+            return Some(c.cam_left);
+        }
+        match self.scanner.state() {
+            ScanState::Denied => Some(c.cam_denied),
+            ScanState::NoCamera => Some(c.cam_none),
+            ScanState::Busy => Some(c.cam_busy),
+            ScanState::Failed => Some(c.cam_failed),
+            ScanState::TimedOut => Some(c.cam_timeout),
+            _ => None,
+        }
+    }
+
     /// "Add as contact" from outside this tab (a group member): fill the add form with the
     /// contact code. As with a suggestion, nothing is added until the person gives a label and
     /// presses the form's button, and then with sending and receiving off.
@@ -1363,6 +1552,13 @@ impl ContactsUi {
         self.speed
             .sparks
             .observe(miasma_core::push::state::now_ms(), &self.rows);
+        let active = self.has_active();
+        if should_open_transfers(self.prev_active, active) {
+            self.open_transfers = true;
+        } else if !active {
+            self.open_transfers = false;
+        }
+        self.prev_active = active;
     }
 
     /// Speed units and language, set by the app from its settings.
@@ -1694,7 +1890,16 @@ impl ContactsUi {
     }
 
     fn body(&mut self, ui: &mut egui::Ui, c: &ContactStrings, connected: bool, technical: bool) {
-        if !connected || self.availability == Availability::DaemonDown {
+        // When the daemon is not connected (needs setup, stopped, or starting),
+        // the connection card above the tab is the single place that explains
+        // what to do and carries the button; a second notice here would repeat
+        // the reason and point at a button this tab does not have.
+        if !connected {
+            return;
+        }
+        // Connected, but the service dropped the contacts channel after start:
+        // no connection card is shown then, so the reason belongs here.
+        if self.availability == Availability::DaemonDown {
             self.notice_card(ui, c.daemon_down, pal().warning, None);
             return;
         }
@@ -1729,7 +1934,7 @@ impl ContactsUi {
             if self.contacts_loaded {
                 let mut invite = false;
                 let add = kit::empty_state_with(ui, c.empty_line, c.add_title, |ui| {
-                    invite = ui.add(kit::quiet_button(c.invite_btn)).clicked();
+                    invite = ui.add(kit::secondary_button(c.invite_btn)).clicked();
                 });
                 if add {
                     self.open_add_dialog();
@@ -1746,9 +1951,11 @@ impl ContactsUi {
         // Transfers and the inbox folder are not the point of this page: closed until opened.
         if !self.contacts.is_empty() || !self.rows.is_empty() {
             ui.add_space(kit::GAP_GROUP);
+            let force_open = std::mem::take(&mut self.open_transfers);
             egui::CollapsingHeader::new(kit::section_text(c.tr_title))
                 .id_source("contacts_transfers")
                 .default_open(self.has_active())
+                .open(force_open.then_some(true))
                 .show_a11y(ui, |ui| self.transfers_ui(ui, c));
             egui::CollapsingHeader::new(kit::section_text(c.inbox_title))
                 .id_source("contacts_inbox")
@@ -1842,12 +2049,12 @@ impl ContactsUi {
                 } else {
                     c.copy_code
                 };
-                if ui.add(kit::quiet_button(l)).clicked() {
+                if ui.add(kit::secondary_button(l)).clicked() {
                     ui.output_mut(|o| o.copied_text = code.clone());
                     self.copied_at = Some(Instant::now());
                 }
                 let l = if self.show_qr { c.hide_qr } else { c.show_qr };
-                if ui.add(kit::quiet_button(l)).clicked() {
+                if ui.add(kit::secondary_button(l)).clicked() {
                     self.show_qr = !self.show_qr;
                 }
             });
@@ -1881,9 +2088,12 @@ impl ContactsUi {
                     hint(ui, c.my_fp_hint);
                 });
             ui.add_space(kit::SP_3);
-            if ui.add(kit::quiet_button(c.done_btn)).clicked() {
-                close = true;
-            }
+            // Closing is a real button, at the right like the other dialogs'.
+            kit::dialog_actions(ui, |ui| {
+                if ui.add(kit::secondary_button(c.done_btn)).clicked() {
+                    close = true;
+                }
+            });
         });
         if shown.is_none() || close {
             self.invite_open = false;
@@ -1898,9 +2108,16 @@ impl ContactsUi {
     /// to add. After the add, the verification code to compare.
     fn add_dialog(&mut self, ctx: &egui::Context, c: &ContactStrings) {
         const KEY: &str = "contact_add";
+        self.collect_qr_image();
         if !self.add_open {
+            // The form is gone (closed, or switched off from outside): so is the camera.
+            if self.scanner.running() {
+                self.scanner.reset();
+                self.cam_texture = None;
+            }
             return;
         }
+        self.camera_tick(ctx);
         let mut close = false;
         let shown = kit::dialog(ctx, KEY, c.add_title, |ui| {
             if let Some((label, fp)) = self.add_result.clone() {
@@ -1932,6 +2149,78 @@ impl ContactsUi {
                     .hint_text(c.add_paste),
             );
             crate::form_check::name(&add_edit, au.a11y_add_code);
+            // The same code from a picture of its QR code: the text lands in the field above and
+            // is checked there exactly as if it had been pasted.
+            ui.add_space(kit::SP_1);
+            ui.horizontal(|ui| {
+                let busy = self.qr_img_busy;
+                let label = if busy { c.qr_img_busy } else { c.qr_img_btn };
+                let pick = crate::form_check::add_enabled(
+                    ui,
+                    !busy && !self.add_busy,
+                    kit::secondary_button(label),
+                );
+                if pick.clicked() {
+                    if let Some(p) = rfd::FileDialog::new()
+                        .set_title(c.qr_img_title)
+                        .add_filter("PNG, JPEG", &["png", "jpg", "jpeg"])
+                        .pick_file()
+                    {
+                        self.load_qr_image(ctx, p);
+                    }
+                }
+                if busy {
+                    ui.spinner();
+                }
+                // The camera: shown only where this computer has camera support, and switched
+                // off with the reason below when no camera is connected.
+                if self.camera.is_some() {
+                    if self.scanner.running() {
+                        if ui.add(kit::secondary_button(c.cam_stop)).clicked() {
+                            self.scanner.stop();
+                        }
+                    } else {
+                        let ready = self.cam_avail != CamAvail::Missing && !busy && !self.add_busy;
+                        let cam = crate::form_check::add_enabled(
+                            ui,
+                            ready,
+                            kit::secondary_button(c.cam_btn),
+                        );
+                        if cam.clicked() {
+                            self.start_camera(ctx);
+                        }
+                    }
+                }
+            });
+            hint(ui, c.qr_img_drop);
+            if self.camera.is_some() && self.cam_avail == CamAvail::Missing {
+                hint(ui, c.cam_none);
+            }
+            if self.scanner.running() {
+                ui.add_space(kit::SP_1);
+                let status = if self.scanner.state() == ScanState::Scanning {
+                    c.cam_scanning
+                } else {
+                    c.cam_starting
+                };
+                ui.label(label_text(status));
+                if let Some(t) = &self.cam_texture {
+                    let size = t.size_vec2();
+                    let shown = size * (240.0 / size.x.max(size.y).max(1.0)).min(1.0);
+                    let pic = ui.image(egui::load::SizedTexture::new(t.id(), shown));
+                    crate::form_check::name(&pic, c.cam_preview);
+                }
+                if self.scanner.not_miasma {
+                    kit::notice(ui, Level::Warn, c.err_img_not_miasma);
+                }
+            } else if let Some(note) = self.camera_note(c) {
+                ui.add_space(kit::SP_1);
+                kit::notice(ui, Level::Error, note);
+            }
+            if let Some(e) = self.qr_img_error {
+                ui.add_space(kit::SP_1);
+                kit::notice(ui, Level::Error, qr_image_error_text(c, e));
+            }
             // The pasted text is read at once: the name is asked for only when it holds a contact
             // code, and when it does not, the reason is under the field (which keeps its focus).
             let has_text = !self.add_text.trim().is_empty();
@@ -1979,7 +2268,7 @@ impl ContactsUi {
                         self.queue_add(label);
                     }
                 }
-                if ui.add(kit::quiet_button(c.cancel)).clicked() {
+                if ui.add(kit::secondary_button(c.cancel)).clicked() {
                     close = true;
                 }
             });
@@ -1991,6 +2280,14 @@ impl ContactsUi {
             self.add_text.clear();
             self.add_label.clear();
             self.add_from_suggestion = None;
+            // A picture still being read belongs to the form that was closed.
+            self.qr_img_seq += 1;
+            self.qr_img_busy = false;
+            self.qr_img_error = None;
+            // The camera goes off with the form.
+            self.scanner.reset();
+            self.cam_texture = None;
+            self.cam_left = false;
             if shown.is_some() {
                 crate::a11y::dialog_leave(ctx, KEY);
             }
@@ -2188,7 +2485,7 @@ impl ContactsUi {
                     {
                         commit = true;
                     }
-                    if ui.add(kit::quiet_button(c.cancel)).clicked() {
+                    if ui.add(kit::secondary_button(c.cancel)).clicked() {
                         close = true;
                     }
                 });
@@ -2273,7 +2570,7 @@ impl ContactsUi {
                     if ui.add(kit::secondary_button(c.sugg_add)).clicked() {
                         add = Some(s.endpoint_id.clone());
                     }
-                    if ui.add(kit::quiet_button(c.sugg_ignore)).clicked() {
+                    if ui.add(kit::compact_button(c.sugg_ignore)).clicked() {
                         ignore = Some(s.endpoint_id.clone());
                     }
                 },
@@ -2343,7 +2640,7 @@ impl ContactsUi {
                     let send = crate::form_check::add_enabled(
                         ui,
                         ct.allow_send,
-                        kit::quiet_button(c.send_short),
+                        kit::compact_button(c.send_short),
                     )
                     .on_hover_text(c.send_files)
                     .on_disabled_hover_text(c.send_disabled_note);
@@ -2436,7 +2733,7 @@ impl ContactsUi {
                     ui.label(egui::RichText::new(t).color(pal().muted));
                 }
                 if self.rows.iter().any(|r| r.finished())
-                    && ui.add(kit::quiet_button(c.btn_clear_finished)).clicked()
+                    && ui.add(kit::compact_button(c.btn_clear_finished)).clicked()
                 {
                     self.clear_confirm = true;
                 }
@@ -2648,6 +2945,29 @@ fn label_text(text: &str) -> egui::RichText {
 }
 
 /// A line of explanation under a field.
+/// Whether a camera is connected, found once when the form is first shown.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CamAvail {
+    Unknown,
+    Checking,
+    Present,
+    Missing,
+}
+
+/// What the picture reader sends back: the request number and the contact code or the reason.
+type QrImageAnswer = (u64, Result<String, QrImageError>);
+
+/// The sentence for a picture that gave no contact code.
+fn qr_image_error_text(c: &ContactStrings, e: QrImageError) -> &'static str {
+    match e {
+        QrImageError::Unreadable => c.err_img_unreadable,
+        QrImageError::NotImage => c.err_img_not_image,
+        QrImageError::TooLarge => c.err_img_too_large,
+        QrImageError::NoQr => c.err_img_no_qr,
+        QrImageError::NotMiasma => c.err_img_not_miasma,
+    }
+}
+
 fn hint(ui: &mut egui::Ui, text: &str) {
     ui.add(egui::Label::new(label_text(text)).wrap(true));
 }
@@ -2817,6 +3137,17 @@ impl ContactsUi {
                         8,
                     ),
                 ];
+                // Sending and receiving rows carry the same live numbers: speed, path, RTT.
+                for (id, rate_bits, rtt) in [("1", 35_200_000u64, 27u32), ("2", 248_000_000, 9)] {
+                    if let Some(x) = board.iter_mut().find(|x| x.id == id) {
+                        x.stats = Some(miasma_core::push::stats::TransferStats {
+                            rate_bits,
+                            path: miasma_core::push::stats::PathKind::Direct,
+                            rtt_ms: Some(rtt),
+                            ..Default::default()
+                        });
+                    }
+                }
             }
             "failed" => {
                 let mut a2 = a.clone();
@@ -2916,6 +3247,7 @@ impl ContactsUi {
 mod tests {
     use super::*;
     use crate::locale::{contact_strings, Locale};
+    use miasma_core::push::stats::{PathKind, TransferStats};
 
     fn t(id: &str, dir: Direction, contact: &str, state: PushState, at: u64) -> PushTransferInfo {
         PushTransferInfo {
@@ -3866,13 +4198,13 @@ mod tests {
         let ja = contact_strings(Locale::Ja);
         let en = contact_strings(Locale::En);
         for (secs, want_ja) in [
-            (5, "5 秒"),
-            (59, "59 秒"),
-            (60, "1 分"),
-            (192, "3 分 12 秒"),
-            (3600, "1 時間"),
-            (3900, "1 時間 5 分"),
-            (90_000, "1 日 1 時間"),
+            (5, "5秒"),
+            (59, "59秒"),
+            (60, "1分"),
+            (192, "3分12秒"),
+            (3600, "1時間"),
+            (3900, "1時間5分"),
+            (90_000, "1日1時間"),
         ] {
             assert_eq!(eta_text(ja, secs), want_ja, "{secs}");
             assert_eq!(
@@ -3881,15 +4213,9 @@ mod tests {
                 "en keeps hh:mm:ss ({secs})"
             );
         }
-        assert_eq!(fill(ja.eta, &[("t", &eta_text(ja, 5))]), "あと 5 秒");
-        assert_eq!(
-            fill(ja.eta, &[("t", &eta_text(ja, 192))]),
-            "あと 3 分 12 秒"
-        );
-        assert_eq!(
-            fill(ja.eta, &[("t", &eta_text(ja, 3900))]),
-            "あと 1 時間 5 分"
-        );
+        assert_eq!(fill(ja.eta, &[("t", &eta_text(ja, 5))]), "あと5秒");
+        assert_eq!(fill(ja.eta, &[("t", &eta_text(ja, 192))]), "あと3分12秒");
+        assert_eq!(fill(ja.eta, &[("t", &eta_text(ja, 3900))]), "あと1時間5分");
     }
 
     #[test]
@@ -3939,6 +4265,65 @@ mod tests {
         }
         let (used, avail) = seen.unwrap();
         (used, avail, state.row_rects.clone())
+    }
+
+    /// Draw the Contacts page once with AccessKit on and collect every node name,
+    /// so a test can check whether a given line of text is shown. `availability`
+    /// lets a test place the UI in the "service dropped after connect" state.
+    fn contacts_drawn_names(connected: bool, availability: Availability) -> Vec<String> {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        crate::ui_kit::apply_theme(&ctx, false);
+        let c = contact_strings(Locale::En);
+        let mut state = ContactsUi::fixture("two", c).unwrap();
+        state.availability = availability;
+        let mut names = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 2400.0),
+                )),
+                ..Default::default()
+            };
+            let out = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    crate::ui_kit::column(ui, |ui| state.show(ui, c, connected, false));
+                });
+            });
+            if let Some(update) = out.platform_output.accesskit_update {
+                names = update
+                    .nodes
+                    .iter()
+                    .filter_map(|(_, n)| n.name().map(|s| s.to_owned()))
+                    .collect();
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn before_setup_the_contacts_tab_does_not_repeat_the_service_notice() {
+        // Not connected: the connection card above the tab is the single guide, so
+        // the tab body must not repeat the "service" notice.
+        let names = contacts_drawn_names(false, Availability::Unknown);
+        let notice = contact_strings(Locale::En).daemon_down;
+        assert!(
+            !names.iter().any(|n| n == notice),
+            "the contacts tab repeated the service notice while disconnected: {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_dropped_service_after_connect_still_explains_itself_in_contacts() {
+        // Connected but the service stopped answering: no connection card is shown,
+        // so the reason must appear in the tab body.
+        let names = contacts_drawn_names(true, Availability::DaemonDown);
+        let notice = contact_strings(Locale::En).daemon_down;
+        assert!(
+            names.iter().any(|n| n == notice),
+            "the contacts tab did not explain the dropped service: {names:?}"
+        );
     }
 
     #[test]
@@ -4475,6 +4860,384 @@ mod tests {
             let (avail, used) = inner.unwrap();
             assert!(used.height() > 40.0, "{l:?}: the card was not drawn");
             assert!(used.right() <= avail.right() + 1.0, "{l:?}: overflow");
+        }
+    }
+
+    // ── The receiving card is the sending card ─────────────────────────────────
+
+    fn live(id: &str, dir: Direction, rate_bps: u64, stats: Option<TransferStats>) -> Row {
+        let mut i = t(id, dir, "peer", PushState::Sending, 1);
+        i.size = 1000 << 20;
+        i.bytes = 237 << 20;
+        i.rate_bps = rate_bps;
+        i.stats = stats;
+        Row::from(&i)
+    }
+
+    fn direct(rate_bits: u64, rtt: u32) -> TransferStats {
+        TransferStats {
+            rate_bits,
+            path: PathKind::Direct,
+            rtt_ms: Some(rtt),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_receiving_row_gets_the_same_speed_eta_path_and_rtt_text_as_a_sending_row() {
+        for l in Locale::ALL {
+            let c = contact_strings(l);
+            let sp = crate::speed::SpeedUi {
+                locale: l,
+                ..Default::default()
+            };
+            let out = live("o", Direction::Out, 4_400_000, Some(direct(35_200_000, 27)));
+            let inn = live("i", Direction::In, 4_400_000, Some(direct(35_200_000, 27)));
+            assert!(out.outbound && !inn.outbound);
+            let want = sp.rate_text(&out, 800.0).unwrap();
+            assert!(want.contains("Mbps"), "{want}");
+            assert_eq!(sp.rate_text(&inn, 800.0), Some(want));
+            assert_eq!(
+                eta_secs(inn.size, inn.bytes, inn.rate_bps),
+                eta_secs(out.size, out.bytes, out.rate_bps)
+            );
+            assert!(eta_secs(inn.size, inn.bytes, inn.rate_bps).is_some());
+            let s = crate::speed::speed_strings(l);
+            let st = inn.stats.as_ref().unwrap();
+            assert!(crate::speed::path_badge(s, st.path).is_some());
+            assert_eq!(
+                crate::speed::detail_text(s, st),
+                crate::speed::detail_text(s, out.stats.as_ref().unwrap())
+            );
+            assert!(crate::speed::detail_text(s, st).unwrap().contains("27"));
+            // Both ends are "Stop"-able while they run: the same cancel request applies.
+            assert!(!inn.finished() && !c.btn_cancel.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_receiving_row_from_a_daemon_without_stats_keeps_the_byte_rate_and_shows_no_extras() {
+        let old = r#"{"id":"ab","direction":"in","contact_id":"c","contact_label":"L",
+            "name":"f.bin","size":1048576000,"bytes":248512512,"rate_bps":4400000,
+            "state":"sending","created_at_ms":1,"updated_at_ms":2}"#;
+        let info: PushTransferInfo = serde_json::from_str(old).unwrap();
+        let r = Row::from(&info);
+        assert!(!r.outbound);
+        assert_eq!(r.stats, None);
+        let sp = crate::speed::SpeedUi::default();
+        // 4.4 MB/s from the plain byte rate: 35.2 Mbps.
+        assert_eq!(crate::speed::row_rate_bits(&r), 35_200_000);
+        assert!(sp.rate_text(&r, 800.0).unwrap().contains("Mbps"));
+        assert!(eta_secs(r.size, r.bytes, r.rate_bps).is_some());
+        // Nothing but the bar: the extras line needs the daemon's stats.
+        assert!(r.stats.is_none());
+    }
+
+    #[test]
+    fn the_transfers_section_opens_once_when_the_first_transfer_starts() {
+        assert!(should_open_transfers(false, true));
+        assert!(!should_open_transfers(true, true));
+        assert!(!should_open_transfers(true, false));
+        assert!(!should_open_transfers(false, false));
+
+        let mut ui = ContactsUi {
+            board: vec![t("a", Direction::In, "bob", PushState::Preparing, 1)],
+            ..Default::default()
+        };
+        ui.rebuild_rows();
+        assert!(ui.open_transfers, "an arriving file opens the section");
+        ui.open_transfers = false; // the page drew it open
+        ui.board = vec![t("a", Direction::In, "bob", PushState::Sending, 1)];
+        ui.rebuild_rows();
+        assert!(!ui.open_transfers, "a running transfer does not reopen it");
+        ui.board = vec![t("a", Direction::In, "bob", PushState::Done, 1)];
+        ui.rebuild_rows();
+        ui.board = vec![t("b", Direction::In, "bob", PushState::Preparing, 2)];
+        ui.rebuild_rows();
+        assert!(ui.open_transfers, "the next arrival opens it again");
+    }
+
+    #[test]
+    fn the_active_fixture_draws_a_receiving_card_with_its_numbers_in_every_language() {
+        for l in Locale::ALL {
+            let c = contact_strings(l);
+            let ui = ContactsUi::fixture("active", c).unwrap();
+            let rx = ui
+                .rows
+                .iter()
+                .find(|r| !r.outbound && !r.finished())
+                .unwrap();
+            assert_eq!(rx.stats.as_ref().and_then(|s| s.rtt_ms), Some(9));
+            for width in [420.0_f32, 700.0, 1200.0] {
+                let (used, avail, _) = draw_page("active", l, width);
+                assert!(
+                    used.right() <= avail.right() + 1.0,
+                    "{l:?} {width}: overflow"
+                );
+            }
+        }
+    }
+
+    // ─── A picture of a QR code fills the add form ──────────────────────────
+
+    /// Load `bytes` as a picture through the window's own path and wait for the answer.
+    fn load_picture(ui: &mut ContactsUi, bytes: &[u8]) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("picture.png");
+        std::fs::write(&path, bytes).unwrap();
+        ui.load_qr_image(&egui::Context::default(), path);
+        assert!(ui.qr_img_busy, "the picture is read in the background");
+        for _ in 0..500 {
+            ui.collect_qr_image();
+            if !ui.qr_img_busy {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        panic!("the picture was not read in 10 s");
+    }
+
+    #[test]
+    fn a_picture_of_a_code_fills_the_form_like_a_paste_and_adds_normally() {
+        let code = crate::qr_image::tests::fresh_code();
+        let mut ui = ContactsUi::default();
+        ui.open_add_dialog();
+        ui.add_text = "old text".into();
+        load_picture(
+            &mut ui,
+            &crate::qr_image::tests::png_of(&qr_payload(&code), 4),
+        );
+        assert_eq!(ui.add_text, code);
+        assert!(ui.qr_img_error.is_none() && !ui.add_is_from_suggestion());
+        assert!(miasma_core::push::extract_contact_code(&ui.add_text).is_some());
+        // Adding goes the same way as for a pasted code: permissions are not switched off.
+        ui.queue_add("Ken".into());
+        assert!(matches!(
+            ui.out.back(),
+            Some(PushRequest::ContactAdd { code: c, .. }) if *c == code
+        ));
+    }
+
+    #[test]
+    fn a_picture_that_is_no_code_leaves_the_form_alone_and_says_why() {
+        let mut ui = ContactsUi::default();
+        ui.open_add_dialog();
+        ui.add_text = "typed by hand".into();
+        load_picture(
+            &mut ui,
+            &crate::qr_image::tests::png_of("https://example.org/", 4),
+        );
+        assert_eq!(ui.add_text, "typed by hand");
+        assert_eq!(ui.qr_img_error, Some(QrImageError::NotMiasma));
+        load_picture(&mut ui, b"not an image at all");
+        assert_eq!(ui.qr_img_error, Some(QrImageError::NotImage));
+        assert!(!ui.qr_img_busy);
+        // Every reason has its sentence in every language.
+        for lang in Locale::ALL {
+            let c = contact_strings(lang);
+            for e in [
+                QrImageError::Unreadable,
+                QrImageError::NotImage,
+                QrImageError::TooLarge,
+                QrImageError::NoQr,
+                QrImageError::NotMiasma,
+            ] {
+                assert!(!qr_image_error_text(c, e).trim().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn a_picture_read_for_a_closed_form_is_dropped_and_a_closed_form_reads_nothing() {
+        let ctx = egui::Context::default();
+        let mut ui = ContactsUi::default();
+        // No form open: nothing is started.
+        ui.load_qr_image(&ctx, PathBuf::from("picture.png"));
+        assert!(!ui.qr_img_busy);
+        // An answer that belongs to an earlier form is not used.
+        ui.open_add_dialog();
+        let code = crate::qr_image::tests::fresh_code();
+        ui.qr_img_busy = true;
+        ui.qr_img_tx.send((ui.qr_img_seq + 1, Ok(code))).unwrap();
+        ui.collect_qr_image();
+        assert!(ui.add_text.is_empty() && ui.qr_img_busy);
+    }
+
+    #[test]
+    fn the_add_form_with_the_picture_button_draws_in_every_language() {
+        let ctx = egui::Context::default();
+        crate::ui_kit::apply_theme(&ctx, false);
+        for l in Locale::ALL {
+            let c = contact_strings(l);
+            let mut ui_state = ContactsUi::default();
+            ui_state.open_add_dialog();
+            ui_state.qr_img_error = Some(QrImageError::NoQr);
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(700.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| ui_state.add_dialog(ctx, c));
+            assert!(ui_state.add_open, "{l:?}: the form closed itself");
+        }
+    }
+
+    // ─── The camera in the add form ─────────────────────────────────────────
+
+    fn run_frame(ui: &mut ContactsUi, ctx: &egui::Context, focused: bool) {
+        let c = contact_strings(Locale::En);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(700.0, 900.0),
+            )),
+            focused,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| ui.add_dialog(ctx, c));
+    }
+
+    fn wait_released(flag: &std::sync::atomic::AtomicBool) -> bool {
+        for _ in 0..500 {
+            if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    fn form_with_camera(cam: crate::qr_camera::tests::FakeCamera) -> (ContactsUi, egui::Context) {
+        let ctx = egui::Context::default();
+        crate::ui_kit::apply_theme(&ctx, false);
+        let mut ui = ContactsUi::default();
+        ui.camera = Some(Arc::new(cam));
+        ui.open_add_dialog();
+        (ui, ctx)
+    }
+
+    #[test]
+    fn a_code_shown_to_the_camera_fills_the_form_and_the_camera_is_let_go() {
+        use crate::qr_camera::tests::{frame_of, FakeCamera};
+        let code = crate::qr_image::tests::fresh_code();
+        let cam = FakeCamera::new(vec![frame_of(&qr_payload(&code), 4)]);
+        let released = cam.released.clone();
+        let (mut ui, ctx) = form_with_camera(cam);
+        run_frame(&mut ui, &ctx, true);
+        ui.start_camera(&ctx);
+        for _ in 0..500 {
+            run_frame(&mut ui, &ctx, true);
+            if ui.add_text == code {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(ui.add_text, code);
+        assert!(!ui.add_is_from_suggestion());
+        assert!(!ui.scanner.running());
+        assert!(wait_released(&released), "the camera was not let go");
+        // Adding goes the same way as for a pasted code.
+        ui.queue_add("Ken".into());
+        assert!(matches!(
+            ui.out.back(),
+            Some(PushRequest::ContactAdd { code: c, .. }) if *c == code
+        ));
+    }
+
+    #[test]
+    fn leaving_the_window_or_closing_the_form_turns_the_camera_off() {
+        use crate::qr_camera::tests::FakeCamera;
+        let blank = crate::qr_camera::Frame {
+            width: 160,
+            height: 120,
+            luma: vec![200; 160 * 120],
+        };
+        // The window loses the focus while scanning.
+        let cam = FakeCamera::new(vec![blank.clone()]);
+        let released = cam.released.clone();
+        let (mut ui, ctx) = form_with_camera(cam);
+        ui.start_camera(&ctx);
+        for _ in 0..500 {
+            run_frame(&mut ui, &ctx, true);
+            if ui.scanner.state() == ScanState::Scanning {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(ui.scanner.state(), ScanState::Scanning);
+        run_frame(&mut ui, &ctx, false);
+        assert!(ui.cam_left && !ui.scanner.running());
+        assert!(wait_released(&released));
+        // The form is closed while scanning.
+        let cam = FakeCamera::new(vec![blank]);
+        let released = cam.released.clone();
+        let (mut ui, ctx) = form_with_camera(cam);
+        ui.start_camera(&ctx);
+        for _ in 0..500 {
+            run_frame(&mut ui, &ctx, true);
+            if ui.scanner.state() == ScanState::Scanning {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        ui.add_open = false;
+        run_frame(&mut ui, &ctx, true);
+        assert!(!ui.scanner.running() && ui.cam_texture.is_none());
+        assert!(wait_released(&released));
+    }
+
+    #[test]
+    fn no_camera_switches_the_button_off_and_no_support_hides_it() {
+        use crate::qr_camera::tests::FakeCamera;
+        let mut cam = FakeCamera::new(Vec::new());
+        cam.open_error = Some(crate::qr_camera::CameraError::NoCamera);
+        let (mut ui, ctx) = form_with_camera(cam);
+        for _ in 0..500 {
+            run_frame(&mut ui, &ctx, true);
+            if ui.cam_avail == CamAvail::Missing {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(ui.cam_avail, CamAvail::Missing);
+        // Where there is no camera support the form still draws, without the button.
+        ui.camera = None;
+        run_frame(&mut ui, &ctx, true);
+        assert!(ui.add_open);
+    }
+
+    #[test]
+    fn camera_failures_are_told_in_every_language() {
+        for lang in Locale::ALL {
+            let c = contact_strings(lang);
+            for text in [
+                c.cam_btn,
+                c.cam_stop,
+                c.cam_starting,
+                c.cam_scanning,
+                c.cam_preview,
+                c.cam_none,
+                c.cam_denied,
+                c.cam_busy,
+                c.cam_failed,
+                c.cam_timeout,
+                c.cam_left,
+            ] {
+                assert!(!text.trim().is_empty(), "{lang:?}");
+            }
+            let mut ui = ContactsUi::default();
+            for (state, want) in [
+                (ScanState::Denied, c.cam_denied),
+                (ScanState::NoCamera, c.cam_none),
+                (ScanState::Busy, c.cam_busy),
+                (ScanState::Failed, c.cam_failed),
+                (ScanState::TimedOut, c.cam_timeout),
+            ] {
+                ui.scanner.set_state_for_test(state);
+                assert_eq!(ui.camera_note(c), Some(want), "{lang:?} {state:?}");
+            }
         }
     }
 }

@@ -26,6 +26,7 @@ use tokio::sync::{watch, Notify, Semaphore};
 use tracing::{debug, info, warn};
 
 use super::{
+    activity::ChatActivity,
     crypto::Identity,
     engine::{now_ms, ChatCore, EnqueueError, MarkOutcome, PrepareError},
     outbox::{OutKind, Outbox},
@@ -104,6 +105,8 @@ impl Default for ChatSettings {
             inbound_burst: 20.0,
             inbound_per_minute: 30.0,
             group_auto_join: true,
+            // Baseline for tests and embedders; the daemon takes the mode from
+            // `privacy.pqc_mode` (default `prefer`) when it starts.
             pqc_mode: PqcMode::Off,
             anchor_dir: None,
         }
@@ -214,16 +217,32 @@ pub fn start_for_daemon(
     let settings = ChatSettings {
         max_message_bytes: cfg.chat.max_message_bytes.clamp(1, proto::MAX_TEXT_BYTES),
         group_auto_join: cfg.chat.group_auto_join,
-        pqc_mode: cfg.privacy.pqc_mode,
+        pqc_mode: cfg.privacy.pqc_mode(),
         anchor_dir: crate::paths::anchor_dir(data_dir),
         ..ChatSettings::default()
     };
-    if cfg.privacy.pqc_mode != PqcMode::Off && !PqcMode::available() {
+    // Only a value somebody set is worth a warning; the default is not a request.
+    if cfg.privacy.pqc_mode.is_some_and(|m| m != PqcMode::Off) && !PqcMode::available() {
         // Said once, plainly: the setting is on but this build cannot do it.
         warn!(
             "privacy.pqc_mode is {} but this build has no advanced encryption; \
              private conversations stay standard",
-            cfg.privacy.pqc_mode
+            cfg.privacy.pqc_mode()
+        );
+    }
+    // The default is `require` (no classical fallback). A value set explicitly
+    // to `off` or `prefer` lowers that and allows the classical session; warn
+    // while one is in force so the weaker guarantee is visible.
+    if cfg
+        .privacy
+        .pqc_mode
+        .is_some_and(|m| m.allows_classical_fallback())
+        && PqcMode::available()
+    {
+        warn!(
+            "privacy.pqc_mode is {}: a classical fallback is allowed for private \
+             conversations instead of the required post-quantum exchange",
+            cfg.privacy.pqc_mode()
         );
     }
     let svc = ChatService::start(
@@ -265,6 +284,9 @@ pub struct ChatService {
     slots: Arc<Semaphore>,
     workers: Mutex<HashMap<[u8; 32], Worker>>,
     shutdown: watch::Sender<bool>,
+    /// Node-wide count of chat sends in flight, shared with group chat and the
+    /// push send loop so the latter can pace itself while chat is sending.
+    activity: ChatActivity,
     groups: OnceLock<Arc<super::group::service::GroupService>>,
 }
 
@@ -336,6 +358,7 @@ impl ChatService {
             slots: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
             workers: Mutex::new(HashMap::new()),
             shutdown,
+            activity: ChatActivity::new(),
             groups: OnceLock::new(),
         });
         node.set_chat_handler(Arc::new(Handler(svc.clone())));
@@ -396,6 +419,12 @@ impl ChatService {
 
     pub fn settings(&self) -> &ChatSettings {
         &self.settings
+    }
+
+    /// The node-wide count of chat sends in flight. Shared with group chat and
+    /// read by the push send loop so it can pace itself while chat is sending.
+    pub fn chat_activity(&self) -> &ChatActivity {
+        &self.activity
     }
 
     pub fn own_endpoint_id(&self) -> [u8; 32] {
@@ -673,6 +702,8 @@ impl ChatService {
         id: &[u8; 16],
         conn_slot: &mut Option<Connection>,
     ) -> Outcome {
+        // Held while one delivery attempt (dial, send, wait for the ack) runs.
+        let _awake = crate::power::ActivityGuard::acquire("Delivering a message");
         // Permission is read again for every attempt.
         match self.contacts.by_endpoint(peer) {
             None => return Outcome::Permanent(fail::CONTACT_REMOVED),
@@ -718,6 +749,10 @@ impl ChatService {
             Err(PrepareError::Storage(_)) => return Outcome::Retry("storage"),
         };
         self.core.outbox.update(id, |e| e.sending = true);
+        // Raised while this send holds the uplink, so the push loop paces
+        // itself; lowered as soon as the acknowledgement is in. Dropped on
+        // every path out of this scope, including the early returns below.
+        let send_guard = self.activity.enter();
         let result = tokio::time::timeout(self.settings.ack_timeout, async {
             let (mut tx, mut rx) = conn.open_bi().await.map_err(|_| "connection_lost")?;
             proto::write_frame(&mut tx, &Frame::Deliver(wire))
@@ -731,6 +766,8 @@ impl ChatService {
             }
         })
         .await;
+        // The uplink is free once the send and its acknowledgement are done.
+        drop(send_guard);
         let status = match result {
             Ok(Ok(s)) => s,
             Ok(Err(why)) => {
@@ -998,11 +1035,16 @@ impl ChatService {
                 }
                 PqLoop::Again
             }
-            Pass::Refuse(reason) => {
+            Pass::Refuse(refusal) => {
                 // `require`: nothing goes out in the classical session. The
                 // message stays in the history as failed, with the reason.
+                debug!(
+                    peer = %fingerprint(refusal.peer()),
+                    "private conversation refused (no classical fallback): {}",
+                    refusal.reason_str()
+                );
                 if let Some(e) = first {
-                    self.core.mark_failed(&e.id, reason, now_ms());
+                    self.core.mark_failed(&e.id, refusal.reason_str(), now_ms());
                 }
                 PqLoop::Again
             }

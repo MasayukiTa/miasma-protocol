@@ -586,12 +586,33 @@ pub struct DeliveryLine {
 /// one short word (the exact count is in `full`) until it has waited [`STUCK_MS`]; every other
 /// state shows its sentence.
 pub fn delivery_line(g: &GroupStrings, d: GroupDelivery, age_ms: u64) -> Option<DeliveryLine> {
-    let text = delivery_text(g, d)?;
-    if matches!(d, GroupDelivery::Waiting { .. }) && age_ms < STUCK_MS {
-        return Some(DeliveryLine {
-            shown: g.state_waiting_short.to_owned(),
-            full: Some(text),
-        });
+    delivery_line_for(g, d, age_ms, false)
+}
+
+/// [`delivery_line`] for the mode: Easy mode words the waiting sentence in plain terms.
+pub fn delivery_line_for(
+    g: &GroupStrings,
+    d: GroupDelivery,
+    age_ms: u64,
+    easy: bool,
+) -> Option<DeliveryLine> {
+    let text = delivery_text_for(g, d, easy)?;
+    if let GroupDelivery::Waiting { delivered, total } = d {
+        if age_ms < STUCK_MS {
+            // One short phrase with the count ("Waiting 0/2"), so it is clear how far the
+            // message got without reading the hover text.
+            return Some(DeliveryLine {
+                shown: fill(
+                    if easy {
+                        g.state_waiting_short_easy
+                    } else {
+                        g.state_waiting_short
+                    },
+                    &[("d", &delivered.to_string()), ("n", &total.to_string())],
+                ),
+                full: Some(text),
+            });
+        }
     }
     Some(DeliveryLine {
         shown: text,
@@ -601,12 +622,21 @@ pub fn delivery_line(g: &GroupStrings, d: GroupDelivery, age_ms: u64) -> Option<
 
 /// The sentence for a delivery state (none for a message that is not mine).
 pub fn delivery_text(g: &GroupStrings, d: GroupDelivery) -> Option<String> {
+    delivery_text_for(g, d, false)
+}
+
+/// [`delivery_text`] for the mode (only the waiting sentence differs in Easy mode).
+pub fn delivery_text_for(g: &GroupStrings, d: GroupDelivery, easy: bool) -> Option<String> {
     let n = |v: u32| v.to_string();
     match d {
         GroupDelivery::None => None,
         GroupDelivery::Alone => Some(g.state_alone.to_owned()),
         GroupDelivery::Waiting { delivered, total } => Some(fill(
-            g.state_waiting,
+            if easy {
+                g.state_waiting_easy
+            } else {
+                g.state_waiting
+            },
             &[("d", &n(delivered)), ("n", &n(total))],
         )),
         GroupDelivery::All { total } => Some(fill(g.state_all, &[("n", &n(total))])),
@@ -1599,7 +1629,12 @@ mod tests {
                 total: 2,
             };
             let quick = delivery_line(gs, waiting, 30_000).expect("a line");
-            assert_eq!(quick.shown, gs.state_waiting_short);
+            // The short phrase carries the count: how many of the 2 got it so far (0).
+            assert_eq!(
+                quick.shown,
+                fill(gs.state_waiting_short, &[("d", "0"), ("n", "2")])
+            );
+            assert!(quick.shown.contains('0') && quick.shown.contains('2'));
             let full = quick.full.expect("the exact count is kept for the hover");
             assert!(full.contains('2') && full.contains('0'), "{full}");
             assert!(full.chars().count() > quick.shown.chars().count());
@@ -1889,6 +1924,73 @@ mod tests {
             ] {
                 let r = contrast(c, bg);
                 assert!(r >= 4.5, "{name}: {tok} on {bg_name} = {r:.2}");
+            }
+        }
+    }
+
+    #[test]
+    fn easy_mode_words_the_waiting_line_in_plain_terms() {
+        for l in [Locale::En, Locale::Ja, Locale::ZhCn] {
+            let gs = group_strings(l);
+            let waiting = GroupDelivery::Waiting {
+                delivered: 1,
+                total: 3,
+            };
+            let easy = delivery_text_for(gs, waiting, true).expect("a line");
+            let tech = delivery_text_for(gs, waiting, false).expect("a line");
+            assert_ne!(easy, tech, "{l:?}");
+            assert_eq!(Some(tech), delivery_text(gs, waiting), "{l:?}");
+            assert!(easy.contains('1') && easy.contains('3'), "{l:?}: {easy}");
+            assert!(!easy.contains('{'), "{l:?}: {easy}");
+            // The other states are the same in both modes.
+            let all = GroupDelivery::All { total: 3 };
+            assert_eq!(
+                delivery_text_for(gs, all, true),
+                delivery_text_for(gs, all, false),
+                "{l:?}"
+            );
+            // A fresh waiting message shows a short plain phrase, not "waiting 1/3".
+            let quick = delivery_line_for(gs, waiting, 1_000, true).expect("a line");
+            assert_eq!(
+                quick.shown,
+                fill(gs.state_waiting_short_easy, &[("d", "1"), ("n", "3")]),
+                "{l:?}"
+            );
+            assert!(!quick.shown.contains('/'), "{l:?}: {}", quick.shown);
+            assert_ne!(quick.shown, easy, "{l:?}");
+            // The stuck line shows the plain sentence in Easy mode.
+            let stuck = delivery_line_for(gs, waiting, STUCK_MS, true).expect("a line");
+            assert_eq!(stuck.shown, easy, "{l:?}");
+        }
+    }
+
+    #[test]
+    fn the_easy_group_sentences_keep_their_holes_and_avoid_technical_words() {
+        for l in [Locale::En, Locale::Ja, Locale::ZhCn] {
+            let gs = group_strings(l);
+            for hole in ["{d}", "{n}"] {
+                assert!(
+                    gs.state_waiting_short_easy.contains(hole),
+                    "{l:?} short {hole}"
+                );
+                assert!(gs.state_waiting_easy.contains(hole), "{l:?} {hole}");
+            }
+            for text in [
+                gs.state_waiting_easy,
+                gs.unsupported_easy,
+                gs.state_waiting_short_easy,
+            ] {
+                let lower = text.to_lowercase();
+                for w in [
+                    "background service",
+                    "バックグラウンド",
+                    "待機中",
+                    "后台",
+                    "relay",
+                    "リレー",
+                ] {
+                    assert!(!lower.contains(w), "{l:?} has {w:?}: {text}");
+                }
             }
         }
     }

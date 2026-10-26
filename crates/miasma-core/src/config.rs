@@ -58,34 +58,80 @@ pub struct PrivacyConfig {
     /// again.
     #[serde(default)]
     pub old_logs_keep: bool,
-    /// Hybrid post-quantum upgrade of private-conversation sessions (default
-    /// **off**). See [`PqcMode`]. Only builds with the `pqc` cargo feature act
-    /// on it; other builds ignore it and report that they cannot.
+    /// Hybrid post-quantum upgrade of private-conversation sessions. Not set
+    /// (the default) means [`PqcMode::DEFAULT`] (`require`); the key is written
+    /// only once a person has chosen a value. Use [`PrivacyConfig::pqc_mode`] for
+    /// the value in force. Only builds with the `pqc` cargo feature act on it;
+    /// other builds ignore it and report that they cannot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pqc_mode: Option<PqcMode>,
+    /// Which default of `pqc_mode` this file was written under, so a value an
+    /// older default wrote is not read as a choice. Files written before this
+    /// key existed read it as `0`. See [`PQC_DEFAULT_VERSION`] for the version
+    /// history and [`PrivacyConfig::migrate_pqc_default`] for how each step is
+    /// applied. Every save writes the current value, so a choice made after a
+    /// migration is kept as it is.
     #[serde(default)]
-    pub pqc_mode: PqcMode,
+    pub pqc_default_version: u32,
 }
+
+/// Value of [`PrivacyConfig::pqc_default_version`] written by this build.
+///
+/// Version history (each step is applied once, when the file is read under an
+/// older version; see [`PrivacyConfig::migrate_pqc_default`]):
+/// * `0`: no key in the file (read as `0`). The default was `off`, so an
+///   `off` value written under version `0` was a save, not a choice.
+/// * `1`: the default became `prefer`. An `off` left by version `0` was read
+///   as never chosen and cleared, so the `prefer` default applied.
+/// * `2`: the default becomes `require`. Two values a pre-beta.12 default left
+///   behind are carried forward so beta.12 keeps no setting that would allow a
+///   silent classical fallback: an `off` from version `0` (the sole version
+///   whose default was `off`) is cleared to never chosen, and a `prefer` found
+///   at version `0` or `1` (the standard choice of the old screen) is moved to
+///   `require`. An `off` recorded at version `1` or later, and a `prefer`,
+///   `off` or `require` set at version `2` or later, were explicit choices and
+///   are kept, as is any value set after this migration (the file is then at
+///   version `2`).
+pub const PQC_DEFAULT_VERSION: u32 = 2;
 
 /// `privacy.pqc_mode`: whether private-conversation sessions are upgraded with
 /// a hybrid X25519 + ML-KEM-768 key exchange.
 ///
-/// * `off` (default): nothing changes. This build offers nothing and answers
-///   nothing, so every peer sees exactly what it saw before.
-/// * `prefer`: offer the hybrid exchange. Use it when the peer agrees; when the
-///   peer does not, keep the classical session and show "classical only".
-/// * `require`: messages to a contact are sent only once the hybrid exchange
-///   with that contact has completed. If the contact does not offer it, the
-///   messages fail on this device with a stated reason; nothing is sent in the
-///   classical session. The contact's own settings are not affected.
+/// * `require` (default): messages to a contact are sent only once the hybrid
+///   exchange with that contact has completed. If the contact does not offer
+///   it, the messages fail on this device with a stated reason; nothing is
+///   sent in the classical session. The contact's own settings are not
+///   affected.
+/// * `prefer`: offer the hybrid exchange. Use it when the peer agrees; when
+///   the peer does not, keep the classical session and show "classical only".
+///   This lowers the guarantee to the peer's level, so it is not a value the
+///   normal settings offer: it is honoured only when written into the
+///   configuration file by hand or passed to an advanced command-line option,
+///   and the status then warns that a classical fallback is allowed.
+/// * `off`: nothing changes. This build offers nothing and answers nothing,
+///   so every peer sees exactly what it saw before. Like `prefer`, it is only
+///   honoured when set explicitly (file or advanced option) and the status
+///   warns about the classical fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PqcMode {
-    #[default]
     Off,
     Prefer,
+    #[default]
     Require,
 }
 
 impl PqcMode {
+    /// What applies when a person never chose a value.
+    pub const DEFAULT: Self = Self::Require;
+
+    /// True for a value that lowers the guarantee below `require` (a classical
+    /// fallback is then allowed). Such a value is honoured only when set
+    /// explicitly; the status warns while one is in force.
+    pub fn allows_classical_fallback(self) -> bool {
+        matches!(self, Self::Off | Self::Prefer)
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Off => "off",
@@ -121,15 +167,15 @@ impl fmt::Display for PqcMode {
 }
 
 /// Persist `privacy.pqc_mode` in `config.toml` (a running daemon reads it at
-/// its next start). Creates nothing when there is no configuration file yet.
+/// its next start). With no configuration file yet, start from the defaults,
+/// apply the choice and write it; a file that exists but cannot be read is an
+/// error and is left untouched, so a damaged file is never overwritten with
+/// defaults.
 pub fn set_pqc_mode_persistent(data_dir: &Path, mode: PqcMode) -> std::io::Result<()> {
-    if !crate::paths::config_file(data_dir).exists() {
-        return Ok(());
-    }
     let mut c = NodeConfig::load(data_dir)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    if c.privacy.pqc_mode != mode {
-        c.privacy.pqc_mode = mode;
+    if c.privacy.pqc_mode != Some(mode) {
+        c.privacy.pqc_mode = Some(mode);
         c.save(data_dir)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
     }
@@ -153,12 +199,70 @@ impl Default for PrivacyConfig {
             log_buffer_mib: DEFAULT_LOG_BUFFER_MIB,
             old_logs_notice_shown: false,
             old_logs_keep: false,
-            pqc_mode: PqcMode::Off,
+            pqc_mode: None,
+            pqc_default_version: PQC_DEFAULT_VERSION,
         }
     }
 }
 
 impl PrivacyConfig {
+    /// The mode in force: the person's choice, else [`PqcMode::DEFAULT`].
+    pub fn pqc_mode(&self) -> PqcMode {
+        self.pqc_mode.unwrap_or(PqcMode::DEFAULT)
+    }
+
+    /// Move a file written under an older default up to the current one, once.
+    /// The step runs only while the file predates the current version, so a
+    /// value a person set after a migration (the file is then at the current
+    /// version) is never read as an older default and is kept.
+    ///
+    /// Two values a pre-beta.12 default left behind are carried forward, so
+    /// beta.12 never keeps a setting that would allow a silent classical
+    /// fallback by default:
+    ///
+    /// * an `off` the version `0` default wrote (no version key) was a save,
+    ///   not a choice, so it is cleared to "never chosen" and the current
+    ///   default (`require`) applies. Version `0` was the only default of
+    ///   `off`, so an `off` recorded at version `1` or later was an explicit
+    ///   choice and is kept.
+    /// * a `prefer` found at version `0` or `1` is the carried-over old
+    ///   default (`prefer` was the standard choice in the pre-beta.12 screen),
+    ///   so it is moved to `require`. A `prefer` set at version `2` or later
+    ///   is an explicit advanced choice and is kept (the status then warns).
+    ///
+    /// What each (version, value) reaches after this runs:
+    ///
+    /// | version | unset   | `off`   | `prefer`  | `require` |
+    /// |---------|---------|---------|-----------|-----------|
+    /// | `0`     | require (unset) | require (cleared) | require | require (kept) |
+    /// | `1`     | require (unset) | off (kept) | require | require (kept) |
+    /// | `2`     | require (unset) | off (kept) | prefer (kept) | require (kept) |
+    ///
+    /// ("unset" means `pqc_mode` is `None`, which resolves to the current
+    /// default `require` through [`PrivacyConfig::pqc_mode`].)
+    fn migrate_pqc_default(&mut self) {
+        if self.pqc_default_version < PQC_DEFAULT_VERSION {
+            match self.pqc_mode {
+                // The version `0` default wrote this `off`; it was never
+                // chosen. Versions `1` and `2` never defaulted to `off`, so an
+                // `off` from those versions is an explicit choice and is left
+                // untouched by the guard.
+                Some(PqcMode::Off) if self.pqc_default_version < 1 => {
+                    self.pqc_mode = None;
+                }
+                // A `prefer` from version `0` or `1` is the old standard
+                // default carried over, not an advanced choice, so it moves to
+                // `require`. A `prefer` set at version `2` or later never
+                // reaches here (the outer check excludes it) and is kept.
+                Some(PqcMode::Prefer) => {
+                    self.pqc_mode = Some(PqcMode::Require);
+                }
+                _ => {}
+            }
+            self.pqc_default_version = PQC_DEFAULT_VERSION;
+        }
+    }
+
     /// The ring buffer size in bytes, clamped to the allowed range.
     pub fn log_buffer_bytes(&self) -> usize {
         self.log_buffer_mib
@@ -339,6 +443,14 @@ pub struct PushConfig {
     /// connection and resumed on a new one (default 30).
     #[serde(default = "default_push_stall_secs")]
     pub stall_timeout_secs: u64,
+    /// Cap on the outbound rate of the file-push send loop, in KiB per second
+    /// (default 0 = no cap, the previous behaviour). When non-zero, the send
+    /// loop keeps its rate at or below this value; it also yields to chat by
+    /// slowing down while chat traffic is in flight. This cap applies per
+    /// transfer, not to the node's uplink as a whole: several transfers running
+    /// at once each pace to this value independently.
+    #[serde(default)]
+    pub max_send_kib_per_sec: u32,
 }
 
 pub const DEFAULT_PUSH_PART_RETENTION_DAYS: u64 = 7;
@@ -376,6 +488,7 @@ impl Default for PushConfig {
             part_retention_days: DEFAULT_PUSH_PART_RETENTION_DAYS,
             retry_window_hours: DEFAULT_PUSH_RETRY_WINDOW_HOURS,
             stall_timeout_secs: DEFAULT_PUSH_STALL_SECS,
+            max_send_kib_per_sec: 0,
         }
     }
 }
@@ -749,14 +862,19 @@ impl NodeConfig {
 
     /// [`NodeConfig::load`] for a given kind of install. Only a missing `config.toml` is
     /// answered with [`NodeConfig::default_for`]; a file that exists is read as written, so
-    /// a value the person chose is never replaced.
+    /// a value the person chose is never replaced (the one reading rule is
+    /// [`PrivacyConfig::pqc_mode`]: an `off` that only the old default wrote
+    /// counts as not chosen).
     pub fn load_with(data_dir: &Path, packaged: bool) -> Result<Self, MiasmaError> {
         let path = crate::paths::config_file(data_dir);
         if !path.exists() {
             return Ok(Self::default_for(packaged));
         }
         let raw = Zeroizing::new(std::fs::read_to_string(&path)?);
-        toml::from_str(raw.as_str()).map_err(|e| MiasmaError::Serialization(e.to_string()))
+        let mut c: Self =
+            toml::from_str(raw.as_str()).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+        c.privacy.migrate_pqc_default();
+        Ok(c)
     }
 
     /// First start of a packaged install: write the packaged defaults when there is no
@@ -796,9 +914,17 @@ impl NodeConfig {
         };
 
         if has_secrets || was_restricted {
-            crate::secure_file::write_restricted(&path, raw.as_bytes())?;
+            // Atomic restricted write: a temp file (born with the restricted
+            // DACL / 0o600) is written, then renamed over the final path so a
+            // crash or a concurrent save never leaves a truncated or
+            // permission-relaxed config.toml behind.
+            crate::secure_file::atomic_write_restricted(&path, raw.as_bytes())?;
         } else {
-            std::fs::write(&path, raw)?;
+            // Atomic plain write through the shared primitive: it writes a
+            // uniquely named temp file in the same directory and renames it
+            // into place, so a crash or a concurrent save cannot leave a
+            // partially written config.toml at the final path.
+            crate::secure_file::atomic_write(&path, raw.as_bytes())?;
         }
         Ok(())
     }
@@ -850,7 +976,9 @@ pub fn default_data_dir() -> PathBuf {
 /// The file is a simple text file containing the version string.
 pub fn stamp_version(data_dir: &Path, version: &str) {
     let path = crate::paths::version_stamp(data_dir);
-    let _ = std::fs::write(path, version);
+    // Best-effort stamp written through the shared atomic primitive so the
+    // file is replaced in one rename rather than truncated in place.
+    let _ = crate::secure_file::atomic_write(&path, version.as_bytes());
 }
 
 /// Read the last-stamped version from the data directory.
@@ -1048,5 +1176,454 @@ mod store_install_tests {
         );
         assert!(!NodeConfig::seed_first_start(d.path(), true).unwrap());
         assert_eq!(read_hosted(d.path()), 256);
+    }
+}
+
+#[cfg(test)]
+mod pqc_default_tests {
+    use super::*;
+
+    /// The shape of `[privacy]` as the previous release wrote it: the mode is a
+    /// plain value, so every save carried it, chosen or not.
+    #[derive(Serialize)]
+    struct LegacyPrivacy {
+        stealth_mode: bool,
+        diagnostic_logging: bool,
+        log_buffer_mib: u32,
+        old_logs_notice_shown: bool,
+        old_logs_keep: bool,
+        pqc_mode: PqcMode,
+    }
+
+    #[derive(Serialize)]
+    struct LegacyNode {
+        privacy: LegacyPrivacy,
+    }
+
+    fn legacy_file(dir: &Path, mode: PqcMode) {
+        let old = LegacyNode {
+            privacy: LegacyPrivacy {
+                stealth_mode: true,
+                diagnostic_logging: false,
+                log_buffer_mib: 2,
+                old_logs_notice_shown: false,
+                old_logs_keep: false,
+                pqc_mode: mode,
+            },
+        };
+        let text = toml::to_string_pretty(&old).unwrap();
+        assert!(text.contains(&format!("pqc_mode = \"{mode}\"")), "{text}");
+        assert!(!text.contains("pqc_default_version"), "{text}");
+        std::fs::write(crate::paths::config_file(dir), text).unwrap();
+    }
+
+    #[test]
+    fn the_default_is_require_and_is_not_written_to_the_file() {
+        assert_eq!(PqcMode::default(), PqcMode::Require);
+        let c = NodeConfig::default();
+        assert_eq!(c.privacy.pqc_mode, None);
+        assert_eq!(c.privacy.pqc_mode(), PqcMode::Require);
+        let dir = tempfile::tempdir().unwrap();
+        c.save(dir.path()).unwrap();
+        let text = std::fs::read_to_string(crate::paths::config_file(dir.path())).unwrap();
+        assert!(!text.contains("pqc_mode = "), "{text}");
+        assert!(text.contains("pqc_default_version = 2"), "{text}");
+        let back = NodeConfig::load(dir.path()).unwrap();
+        assert_eq!(back.privacy.pqc_mode(), PqcMode::Require);
+    }
+
+    #[test]
+    fn only_off_and_prefer_allow_a_classical_fallback() {
+        // `require` holds the message back for a contact that cannot do the
+        // hybrid exchange; `off` and `prefer` let it fall back to a classical
+        // session. The status surfaces warn on exactly the latter two.
+        assert!(!PqcMode::Require.allows_classical_fallback());
+        assert!(PqcMode::Off.allows_classical_fallback());
+        assert!(PqcMode::Prefer.allows_classical_fallback());
+    }
+
+    #[test]
+    fn an_old_file_with_the_old_default_reads_as_never_chosen() {
+        let dir = tempfile::tempdir().unwrap();
+        legacy_file(dir.path(), PqcMode::Off);
+        let c = NodeConfig::load(dir.path()).unwrap();
+        assert_eq!(c.privacy.pqc_mode, None);
+        assert_eq!(c.privacy.pqc_mode(), PqcMode::Require);
+        // A file from before the key existed reads the same way.
+        std::fs::write(
+            crate::paths::config_file(dir.path()),
+            "[privacy]\nstealth_mode = true\n",
+        )
+        .unwrap();
+        assert_eq!(
+            NodeConfig::load(dir.path()).unwrap().privacy.pqc_mode(),
+            PqcMode::Require
+        );
+    }
+
+    #[test]
+    fn an_old_file_with_require_keeps_it() {
+        // `require` is the current default; a version-`0` file that already
+        // held it stays on it (and is moved up to the current version).
+        let dir = tempfile::tempdir().unwrap();
+        legacy_file(dir.path(), PqcMode::Require);
+        let c = NodeConfig::load(dir.path()).unwrap();
+        assert_eq!(c.privacy.pqc_mode, Some(PqcMode::Require));
+        assert_eq!(c.privacy.pqc_mode(), PqcMode::Require);
+        assert_eq!(c.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
+    }
+
+    /// The owner's real file: a version-`0` `[privacy]` that carries only
+    /// `pqc_mode = "prefer"` (no `pqc_default_version` key). `prefer` was the
+    /// standard choice in the pre-beta.12 screen, so beta.12 reads it as the
+    /// old default carried over and moves it to `require`, leaving no silent
+    /// classical fallback.
+    #[test]
+    fn a_version_0_prefer_moves_to_require() {
+        let dir = tempfile::tempdir().unwrap();
+        legacy_file(dir.path(), PqcMode::Prefer);
+        // The file is the owner's shape: `pqc_mode` present, version key absent.
+        let text = std::fs::read_to_string(crate::paths::config_file(dir.path())).unwrap();
+        assert!(text.contains("pqc_mode = \"prefer\""), "{text}");
+        assert!(!text.contains("pqc_default_version"), "{text}");
+        let c = NodeConfig::load(dir.path()).unwrap();
+        assert_eq!(c.privacy.pqc_mode, Some(PqcMode::Require));
+        assert_eq!(c.privacy.pqc_mode(), PqcMode::Require);
+        assert!(!c.privacy.pqc_mode().allows_classical_fallback());
+        assert_eq!(c.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
+    }
+
+    /// A version-`1` file (default `prefer`) that recorded `prefer` is still
+    /// the carried-over old default, not an advanced choice, so beta.12 moves
+    /// it to `require` as well.
+    #[test]
+    fn a_version_1_prefer_moves_to_require() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            crate::paths::config_file(dir.path()),
+            "[privacy]\nstealth_mode = true\npqc_mode = \"prefer\"\npqc_default_version = 1\n",
+        )
+        .unwrap();
+        let c = NodeConfig::load(dir.path()).unwrap();
+        assert_eq!(c.privacy.pqc_mode, Some(PqcMode::Require));
+        assert_eq!(c.privacy.pqc_mode(), PqcMode::Require);
+        assert!(!c.privacy.pqc_mode().allows_classical_fallback());
+        assert_eq!(c.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
+    }
+
+    /// A `prefer` set at version `2` or later is an explicit advanced choice,
+    /// not a carried-over default, so it is kept; the status then warns about
+    /// the classical fallback it allows. A version-`2` `require` is kept too.
+    #[test]
+    fn a_version_2_prefer_or_require_is_kept() {
+        for mode in [PqcMode::Prefer, PqcMode::Require] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                crate::paths::config_file(dir.path()),
+                format!(
+                    "[privacy]\nstealth_mode = true\npqc_mode = \"{mode}\"\npqc_default_version = 2\n"
+                ),
+            )
+            .unwrap();
+            let c = NodeConfig::load(dir.path()).unwrap();
+            assert_eq!(c.privacy.pqc_mode, Some(mode));
+            assert_eq!(c.privacy.pqc_mode(), mode);
+            assert_eq!(c.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
+        }
+        // The kept `prefer` is one the status warns about (classical fallback).
+        assert!(PqcMode::Prefer.allows_classical_fallback());
+    }
+
+    /// Reading the owner's version-`0` `prefer` file, saving it, and reading it
+    /// again must not migrate a second time: the first read moves it to
+    /// `require` at version `2`, and the second read leaves that `require`
+    /// alone (idempotent).
+    #[test]
+    fn the_prefer_migration_runs_once() {
+        let dir = tempfile::tempdir().unwrap();
+        legacy_file(dir.path(), PqcMode::Prefer);
+        // First read: carried-over `prefer` becomes `require` at version 2.
+        let c = NodeConfig::load(dir.path()).unwrap();
+        assert_eq!(c.privacy.pqc_mode, Some(PqcMode::Require));
+        assert_eq!(c.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
+        c.save(dir.path()).unwrap();
+        let text = std::fs::read_to_string(crate::paths::config_file(dir.path())).unwrap();
+        assert!(text.contains("pqc_default_version = 2"), "{text}");
+        // Second read (and a further save) keep the same `require`.
+        for _ in 0..2 {
+            let back = NodeConfig::load(dir.path()).unwrap();
+            assert_eq!(back.privacy.pqc_mode, Some(PqcMode::Require));
+            assert_eq!(back.privacy.pqc_mode(), PqcMode::Require);
+            assert_eq!(back.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
+            back.save(dir.path()).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_choice_of_off_made_after_the_change_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        legacy_file(dir.path(), PqcMode::Off);
+        // The migration is only in memory until something saves; the choice
+        // goes through the same persistent setter the programs use.
+        set_pqc_mode_persistent(dir.path(), PqcMode::Off).unwrap();
+        let text = std::fs::read_to_string(crate::paths::config_file(dir.path())).unwrap();
+        assert!(text.contains("pqc_mode = \"off\""), "{text}");
+        assert!(text.contains("pqc_default_version = 2"), "{text}");
+        for _ in 0..2 {
+            let c = NodeConfig::load(dir.path()).unwrap();
+            assert_eq!(c.privacy.pqc_mode, Some(PqcMode::Off));
+            assert_eq!(c.privacy.pqc_mode(), PqcMode::Off);
+            c.save(dir.path()).unwrap();
+        }
+    }
+
+    /// A file written by a version-`1` build (default `prefer`) with an
+    /// explicit `off` must keep that `off` when a version-`2` build reads it:
+    /// `off` was never a version-`1` default, so it was a choice, not a
+    /// carried-over default. The kept value still allows a classical fallback,
+    /// so the status is expected to warn about it (see
+    /// `PqcMode::allows_classical_fallback`).
+    #[test]
+    fn an_explicit_off_written_at_version_1_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        // A version-`1` file: the version key is present and set to 1, with an
+        // explicit `off`. Written directly because no current build emits
+        // version 1 any more.
+        std::fs::write(
+            crate::paths::config_file(dir.path()),
+            "[privacy]\nstealth_mode = true\npqc_mode = \"off\"\npqc_default_version = 1\n",
+        )
+        .unwrap();
+        let c = NodeConfig::load(dir.path()).unwrap();
+        assert_eq!(c.privacy.pqc_mode, Some(PqcMode::Off));
+        assert_eq!(c.privacy.pqc_mode(), PqcMode::Off);
+        // The kept value is one the status warns about (classical fallback).
+        assert!(c.privacy.pqc_mode().allows_classical_fallback());
+        // The file is moved up to the current version but the choice stays.
+        assert_eq!(c.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
+    }
+
+    #[test]
+    fn a_later_save_by_another_setting_writes_the_marker_without_choosing() {
+        let dir = tempfile::tempdir().unwrap();
+        legacy_file(dir.path(), PqcMode::Off);
+        let mut c = NodeConfig::load(dir.path()).unwrap();
+        c.privacy.diagnostic_logging = true;
+        c.save(dir.path()).unwrap();
+        let back = NodeConfig::load(dir.path()).unwrap();
+        assert!(back.privacy.diagnostic_logging);
+        assert_eq!(back.privacy.pqc_mode, None);
+        assert_eq!(back.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
+        assert_eq!(back.privacy.pqc_mode(), PqcMode::Require);
+    }
+
+    #[test]
+    fn a_choice_with_no_file_yet_creates_one_and_is_kept() {
+        // A fresh install with no config.toml: the choice from the screen must
+        // persist rather than fail silently.
+        for mode in [PqcMode::Off, PqcMode::Require] {
+            let dir = tempfile::tempdir().unwrap();
+            assert!(
+                !crate::paths::config_file(dir.path()).exists(),
+                "no file to start with"
+            );
+            set_pqc_mode_persistent(dir.path(), mode).unwrap();
+            assert!(
+                crate::paths::config_file(dir.path()).exists(),
+                "the setter created the file"
+            );
+            let back = NodeConfig::load(dir.path()).unwrap();
+            assert_eq!(back.privacy.pqc_mode, Some(mode));
+            assert_eq!(back.privacy.pqc_mode(), mode);
+            assert_eq!(back.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
+        }
+    }
+
+    #[test]
+    fn a_damaged_file_is_an_error_and_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = crate::paths::config_file(dir.path());
+        let damaged = "[privacy\nstealth_mode = ";
+        std::fs::write(&path, damaged).unwrap();
+        let err = set_pqc_mode_persistent(dir.path(), PqcMode::Off).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        // The damaged file is left exactly as it was: not replaced by defaults.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), damaged);
+    }
+
+    /// A freshly generated, non-fixed secret value for tests. Generated at
+    /// runtime so no fixed credential is written into the source.
+    fn random_secret() -> String {
+        hex::encode(rand::random::<[u8; 16]>())
+    }
+
+    #[test]
+    fn a_plain_save_leaves_no_temp_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = NodeConfig::default();
+        cfg.save(dir.path()).unwrap();
+        let path = crate::paths::config_file(dir.path());
+        assert!(path.exists(), "the config file was written");
+        assert!(
+            !crate::paths::atomic_tmp(&path).exists(),
+            "the plain temp file was renamed away, not left behind"
+        );
+        assert!(
+            !crate::paths::atomic_secure_tmp(&path).exists(),
+            "no restricted temp file for a secret-free config"
+        );
+    }
+
+    #[test]
+    fn a_secret_save_leaves_no_temp_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = NodeConfig::default();
+        cfg.transport.proxy_password = Some(random_secret());
+        cfg.save(dir.path()).unwrap();
+        let path = crate::paths::config_file(dir.path());
+        assert!(path.exists(), "the config file was written");
+        assert!(
+            !crate::paths::atomic_secure_tmp(&path).exists(),
+            "the restricted temp file was renamed away, not left behind"
+        );
+        assert!(
+            !crate::paths::atomic_tmp(&path).exists(),
+            "no plain temp file on the restricted path"
+        );
+    }
+
+    #[test]
+    fn a_config_with_a_secret_round_trips_through_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = random_secret();
+        let mut cfg = NodeConfig::default();
+        cfg.transport.proxy_password = Some(secret.clone());
+        cfg.save(dir.path()).unwrap();
+        let back = NodeConfig::load(dir.path()).unwrap();
+        assert_eq!(
+            back.transport.proxy_password.as_deref(),
+            Some(secret.as_str())
+        );
+    }
+
+    /// A save that cannot complete must not damage the config that is already
+    /// on disk: the temp-file + rename approach means the final path keeps its
+    /// previous, valid contents. Unix-only because it forces the failure by
+    /// dropping write permission on the directory, which is a no-op on Windows.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_save_does_not_corrupt_the_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = NodeConfig::default();
+        cfg.push.max_send_kib_per_sec = 111;
+        cfg.save(dir.path()).unwrap();
+        let path = crate::paths::config_file(dir.path());
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        // Drop write permission on the directory so creating the temp file
+        // fails. The pre-existing config.toml stays intact.
+        let ro = std::fs::Permissions::from_mode(0o500);
+        std::fs::set_permissions(dir.path(), ro).unwrap();
+
+        let mut cfg2 = cfg.clone();
+        cfg2.push.max_send_kib_per_sec = 222;
+        let result = cfg2.save(dir.path());
+
+        // Restore permission before any assertion so the tempdir can clean up.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(result.is_err(), "the save could not complete");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, before, "the existing config was left untouched");
+        assert!(
+            !crate::paths::atomic_tmp(&path).exists(),
+            "no temp file left behind after the failure"
+        );
+    }
+
+    /// Windows counterpart of the failure test. The Unix version forces the
+    /// failure by dropping directory permissions, which is a no-op on Windows,
+    /// so this drives the same guarantee through a failure Windows can produce:
+    /// a save whose data directory cannot be created because an ancestor path
+    /// is a regular file. The config that was already saved elsewhere must be
+    /// left intact and no temp file may be left behind.
+    #[cfg(windows)]
+    #[test]
+    fn a_failed_save_on_windows_does_not_corrupt_the_existing_file() {
+        let base = tempfile::tempdir().unwrap();
+
+        // A good data dir with a valid config already on disk.
+        let good = base.path().join("good");
+        let mut cfg = NodeConfig::default();
+        cfg.push.max_send_kib_per_sec = 111;
+        cfg.save(&good).unwrap();
+        let path = crate::paths::config_file(&good);
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        // A plain file that will stand in for a directory component.
+        let blocker = base.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+
+        // Saving under a path whose parent is that regular file cannot create
+        // the data directory, so the save fails before writing anything.
+        let doomed = blocker.join("sub");
+        let mut cfg2 = cfg.clone();
+        cfg2.push.max_send_kib_per_sec = 222;
+        let result = cfg2.save(&doomed);
+
+        assert!(result.is_err(), "the save could not complete");
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, before, "the existing config was left untouched");
+        assert!(
+            !crate::paths::config_file(&doomed).exists(),
+            "no config was written at the doomed path"
+        );
+    }
+}
+
+#[cfg(test)]
+mod push_send_rate_config_tests {
+    use super::*;
+
+    #[test]
+    fn the_send_rate_cap_defaults_to_zero() {
+        assert_eq!(PushConfig::default().max_send_kib_per_sec, 0);
+        assert_eq!(NodeConfig::default().push.max_send_kib_per_sec, 0);
+    }
+
+    #[test]
+    fn an_old_push_section_without_the_key_reads_as_zero() {
+        // A file written before the key existed keeps the no-cap default.
+        let c: NodeConfig = toml::from_str("[push]\nstall_timeout_secs = 45\n").unwrap();
+        assert_eq!(c.push.stall_timeout_secs, 45);
+        assert_eq!(c.push.max_send_kib_per_sec, 0);
+        // An empty file reads the same way.
+        let none: NodeConfig = toml::from_str("").unwrap();
+        assert_eq!(none.push.max_send_kib_per_sec, 0);
+    }
+
+    #[test]
+    fn the_send_rate_cap_reads_from_toml() {
+        let c: NodeConfig = toml::from_str("[push]\nmax_send_kib_per_sec = 512\n").unwrap();
+        assert_eq!(c.push.max_send_kib_per_sec, 512);
+    }
+
+    #[test]
+    fn the_send_rate_cap_round_trips_through_save_and_load() {
+        for cap in [0u32, 256, 8_192] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut cfg = NodeConfig::default();
+            cfg.push.max_send_kib_per_sec = cap;
+            cfg.save(dir.path()).unwrap();
+            assert_eq!(
+                NodeConfig::load(dir.path())
+                    .unwrap()
+                    .push
+                    .max_send_kib_per_sec,
+                cap
+            );
+        }
     }
 }

@@ -467,7 +467,7 @@ enum Commands {
     ///
     /// Both sides register each other (`contact code` -> `contact add`); the
     /// receiver then accepts files from registered contacts only, with no
-    /// Share ID, password or confirmation code per file.
+    /// Share ID, password or one-time code per file.
     Contact {
         #[command(subcommand)]
         action: push_cmd::ContactCmd,
@@ -997,10 +997,7 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
             print_logging_status(data_dir);
             println!(
                 "  Advanced encryption: {}",
-                pqc_line(
-                    miasma_core::logging::load_privacy(data_dir).pqc_mode,
-                    Some(&s.pqc)
-                )
+                pqc_line(&miasma_core::logging::load_privacy(data_dir), Some(&s.pqc))
             );
             if s.wss_port > 0 {
                 let tls_tag = if s.wss_tls_enabled {
@@ -1146,26 +1143,32 @@ fn print_logging_status(data_dir: &std::path::Path) {
 /// the configured mode, whether this build can do it, and (while the
 /// background service runs) what came of it so far.
 fn pqc_line(
-    configured: miasma_core::config::PqcMode,
+    privacy: &miasma_core::config::PrivacyConfig,
     running: Option<&miasma_core::chat::ipc::PqcStatus>,
 ) -> String {
     pqc_line_for(
-        configured,
+        privacy.pqc_mode(),
+        privacy.pqc_mode.is_none(),
         miasma_core::config::PqcMode::available(),
         running,
     )
 }
 
 /// `pqc_line` with the availability of this build given, so both builds can be
-/// tested from one.
+/// tested from one. `by_default` is true when nobody set `privacy.pqc_mode`.
 fn pqc_line_for(
     configured: miasma_core::config::PqcMode,
+    by_default: bool,
     available: bool,
     running: Option<&miasma_core::chat::ipc::PqcStatus>,
 ) -> String {
     use miasma_core::config::PqcMode;
     let mut s = configured.to_string();
     if !available {
+        if by_default {
+            // Nobody asked for it; do not make it sound like a request.
+            return "off (not in this build: private conversations stay standard)".to_owned();
+        }
         if configured != PqcMode::Off {
             s.push_str(
                 " (this build has no advanced encryption: private conversations stay standard)",
@@ -1173,8 +1176,27 @@ fn pqc_line_for(
         }
         return s;
     }
-    if configured == PqcMode::Off {
-        s.push_str(" (available in this build; turn it on with `privacy.pqc_mode`)");
+    match configured {
+        PqcMode::Off => {
+            // `off` and `prefer` both lower the guarantee below the `require`
+            // default: a classical session is then allowed. Say so plainly.
+            s.push_str(
+                " (warning: classical fallback allowed; the default is `require`, \
+                 which sends only over the advanced exchange)",
+            );
+        }
+        PqcMode::Prefer => {
+            s.push_str(
+                " (on when the contact supports it; warning: classical fallback \
+                 allowed when it does not. The default is `require`)",
+            );
+        }
+        PqcMode::Require if by_default => {
+            // `require` is the default: no classical fallback. Say it is the
+            // default, since the person did not set it.
+            s.push_str(" (required; this is the default)");
+        }
+        PqcMode::Require => {}
     }
     if let Some(p) = running.filter(|p| p.available && p.mode != "off") {
         let c = &p.counts;
@@ -1461,7 +1483,7 @@ async fn cmd_diagnostics(data_dir: &std::path::Path, json_out: bool) -> Result<(
         );
         println!(
             "Advanced encryption: {}",
-            pqc_line(privacy.pqc_mode, daemon_status.as_ref().map(|s| &s.pqc))
+            pqc_line(&privacy, daemon_status.as_ref().map(|s| &s.pqc))
         );
 
         if let Ok((quota_mb, hosted_quota_mb, listen_addr)) = &config_info {
@@ -1937,7 +1959,7 @@ fn cmd_config_loaded(
                     println!("{}", config.privacy.diagnostic_logging)
                 }
                 "privacy.log_buffer_mib" => println!("{}", config.privacy.log_buffer_mib),
-                "privacy.pqc_mode" => println!("{}", config.privacy.pqc_mode),
+                "privacy.pqc_mode" => println!("{}", config.privacy.pqc_mode()),
                 "update.mode" => println!("{}", config.update.mode),
                 "update.channel" => println!("{}", config.update.channel),
                 "update.check_at_start" => println!("{}", config.update.check_at_start),
@@ -1991,6 +2013,9 @@ fn cmd_config_loaded(
                         .as_deref()
                         .unwrap_or("")
                 ),
+                "push.max_send_kib_per_sec" => {
+                    println!("{}", config.push.max_send_kib_per_sec)
+                }
                 _ => bail!("unknown config key: {k}"),
             }
         }
@@ -2070,7 +2095,18 @@ fn cmd_config_loaded(
                              stay standard"
                         );
                     }
-                    config.privacy.pqc_mode = mode;
+                    if mode.allows_classical_fallback() {
+                        // The default is `require` (no classical fallback). `off`
+                        // and `prefer` lower that: a classical session is then
+                        // allowed. This is an advanced choice; warn so the weaker
+                        // guarantee is visible.
+                        eprintln!(
+                            "warning: privacy.pqc_mode = {mode} allows a classical fallback \
+                             for private conversations. The default is `require`, which \
+                             sends only once the advanced exchange has succeeded."
+                        );
+                    }
+                    config.privacy.pqc_mode = Some(mode);
                     eprintln!("takes effect the next time the background service starts");
                 }
                 "update.mode" => {
@@ -2173,6 +2209,11 @@ fn cmd_config_loaded(
                 "transport.obfuscated_quic_secret" => {
                     config.transport.obfuscated_quic_secret =
                         if v.is_empty() { None } else { Some(v.into()) };
+                }
+                "push.max_send_kib_per_sec" => {
+                    config.push.max_send_kib_per_sec = v
+                        .parse()
+                        .context("expected a number of KiB per second (0 = no cap)")?;
                 }
                 _ => bail!("unknown config key: {k}"),
             }
@@ -3829,6 +3870,66 @@ mod transfer_password_tests {
 }
 
 #[cfg(test)]
+mod retention_entry_tests {
+    use super::parse_retention;
+    use miasma_core::directed::RetentionPeriod;
+
+    /// The seconds the CLI would hand the daemon for a `--retention` string.
+    fn secs_for(arg: &str) -> u64 {
+        parse_retention(arg).unwrap()
+    }
+
+    /// A retention that comes in through the CLI is bounded at the same gate the
+    /// daemon uses (`RetentionPeriod::checked_secs`). The CLI's own parser only
+    /// turns a string into seconds; the range check lives in the core, so this
+    /// pins that a CLI string of each out-of-range value is refused there.
+    #[test]
+    fn a_cli_retention_out_of_range_is_refused() {
+        // u64::MAX, 0, one below the minimum, and 30 days + 1: the values a
+        // person would type on the command line, derived from the presets rather
+        // than written as fixed digits.
+        let thirty_days_plus_one = (RetentionPeriod::ThirtyDays.as_secs() + 1).to_string();
+        let below_min = (RetentionPeriod::TenMinutes.as_secs() - 1).to_string();
+        for arg in [
+            u64::MAX.to_string(),
+            "0".to_string(),
+            below_min,
+            thirty_days_plus_one,
+        ] {
+            let secs = secs_for(&arg);
+            let refused = RetentionPeriod::Custom(secs).checked_secs();
+            assert!(
+                refused.is_err(),
+                "--retention {arg} ({secs}s) should be refused"
+            );
+            assert!(refused
+                .unwrap_err()
+                .to_string()
+                .contains("invalid retention"));
+        }
+        // 30 days + 1 expressed in the CLI's own unit suffixes is the same reject.
+        let over_max_hours = format!("{}h", RetentionPeriod::ThirtyDays.as_secs() / 3600 + 1);
+        let over_max_mins = format!("{}m", RetentionPeriod::ThirtyDays.as_secs() / 60 + 1);
+        for arg in [over_max_hours, over_max_mins] {
+            let secs = secs_for(&arg);
+            assert!(secs > RetentionPeriod::ThirtyDays.as_secs());
+            assert!(RetentionPeriod::Custom(secs).checked_secs().is_err());
+        }
+    }
+
+    /// The ends of the allowed range, arriving as CLI strings, are accepted.
+    #[test]
+    fn a_cli_retention_at_the_bounds_is_accepted() {
+        assert_eq!(secs_for("10m"), RetentionPeriod::TenMinutes.as_secs());
+        assert_eq!(secs_for("30d"), RetentionPeriod::ThirtyDays.as_secs());
+        for arg in ["10m", "30d"] {
+            let secs = secs_for(arg);
+            assert_eq!(RetentionPeriod::Custom(secs).checked_secs().unwrap(), secs);
+        }
+    }
+}
+
+#[cfg(test)]
 mod transfer_progress_tests {
     use super::{format_progress_in, human_bytes, human_duration, Lang};
     use miasma_core::transfer::{Phase, TransferKind, TransferState, TransferStatus};
@@ -4406,22 +4507,43 @@ mod pqc_status_line_tests {
 
     #[test]
     fn a_build_with_the_feature_says_advanced_encryption_is_available() {
-        let off = pqc_line_for(PqcMode::Off, true, None);
+        // The default is now `require` (no classical fallback): it says it is
+        // the default and warns nothing, because nothing is lowered.
+        let dflt = pqc_line_for(PqcMode::Require, true, true, None);
+        assert!(dflt.starts_with("require"), "{dflt}");
+        assert!(dflt.contains("default"), "{dflt}");
+        assert!(!dflt.contains("warning"), "{dflt}");
+        // A chosen `require` describes nothing further.
+        assert_eq!(pqc_line_for(PqcMode::Require, false, true, None), "require");
+        // `off` and `prefer` lower the guarantee below the default: both warn
+        // that a classical fallback is allowed and point back to `require`.
+        let off = pqc_line_for(PqcMode::Off, false, true, None);
         assert!(off.starts_with("off"), "{off}");
-        assert!(off.contains("available in this build"), "{off}");
-        // Once on, the line is the mode itself (the counters follow when the
-        // background service runs).
-        assert_eq!(pqc_line_for(PqcMode::Prefer, true, None), "prefer");
-        assert_eq!(pqc_line_for(PqcMode::Require, true, None), "require");
+        assert!(off.contains("warning"), "{off}");
+        assert!(off.contains("classical fallback allowed"), "{off}");
+        assert!(off.contains("require"), "{off}");
+        let prefer = pqc_line_for(PqcMode::Prefer, false, true, None);
+        assert!(
+            prefer.starts_with("prefer (on when the contact supports it"),
+            "{prefer}"
+        );
+        assert!(prefer.contains("warning"), "{prefer}");
+        assert!(prefer.contains("classical fallback"), "{prefer}");
+        assert!(prefer.contains("require"), "{prefer}");
     }
 
     #[test]
     fn a_build_without_the_feature_says_so_only_when_it_matters() {
-        assert_eq!(pqc_line_for(PqcMode::Off, false, None), "off");
+        assert_eq!(pqc_line_for(PqcMode::Off, false, false, None), "off");
         for mode in [PqcMode::Prefer, PqcMode::Require] {
-            let s = pqc_line_for(mode, false, None);
+            let s = pqc_line_for(mode, false, false, None);
             assert!(s.contains("no advanced encryption"), "{s}");
             assert!(!s.contains("available"), "{s}");
         }
+        // The untouched default is not reported as a setting this build ignores.
+        // Under the `require` default the configured value at by_default is
+        // `require`, and a build without the feature says it plainly.
+        let d = pqc_line_for(PqcMode::Require, true, false, None);
+        assert!(d.starts_with("off (not in this build"), "{d}");
     }
 }

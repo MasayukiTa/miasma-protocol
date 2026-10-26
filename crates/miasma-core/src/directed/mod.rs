@@ -55,6 +55,9 @@ pub mod challenge;
 pub mod envelope;
 pub mod inbox;
 pub mod protocol;
+pub mod state;
+mod state_step;
+pub mod v2;
 
 pub use challenge::{
     generate_challenge, verify_challenge, CHALLENGE_MAX_ATTEMPTS, CHALLENGE_TTL_SECS,
@@ -67,3 +70,7 @@ pub use envelope::{
 };
 pub use inbox::{DirectedInbox, EnvelopeSummary};
 pub use protocol::{DirectedCodec, DirectedRequest, DirectedResponse};
+pub use state::{
+    ChallengeLocal, Effects, Illegal, IncomingEvent, IncomingLocal, IncomingRecord, InviteExtV2,
+    MonoDeadline, Now, OutgoingEvent, OutgoingPhase, OutgoingRecord, Protection, LEGACY_SENDER,
+};

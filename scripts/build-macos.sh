@@ -13,6 +13,14 @@ cargo build --release --locked -p miasma-desktop -p miasma-cli -p miasma-bridge
 APP="${MIASMA_MACOS_OUTPUT:-$PWD/dist}/Miasma.app"
 BIN="${CARGO_TARGET_DIR:-$PWD/target}/release"
 VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+# Apple requires CFBundleShortVersionString and CFBundleVersion to be numeric
+# (up to three integers), so they keep the plain version. The full label, for
+# example 0.3.2-beta.12, goes in the custom MiasmaVersion key.
+FULL_VERSION="$VERSION"
+if [ -n "${MIASMA_PRERELEASE:-}" ]; then
+    LABEL="${MIASMA_PRERELEASE#-}"
+    FULL_VERSION="$VERSION-$LABEL"
+fi
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 for name in miasma-desktop miasma miasma-bridge; do
     cp "$BIN/$name" "$APP/Contents/MacOS/$name"
@@ -29,7 +37,9 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundleVersion</key><string>$VERSION</string>
+    <key>MiasmaVersion</key><string>$FULL_VERSION</string>
     <key>NSHighResolutionCapable</key><true/>
+    <key>NSCameraUsageDescription</key><string>Miasma uses the camera only to read a contact QR code.</string>
     <key>NSLocalNetworkUsageDescription</key><string>Miasma discovers and connects to nearby peers to store and retrieve content.</string>
 </dict></plist>
 EOF

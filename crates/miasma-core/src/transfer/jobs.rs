@@ -146,6 +146,7 @@ impl TransferRegistry {
         let for_wipe = progress.clone();
         let store = coord.share_store().clone();
         let task = tokio::spawn(async move {
+            let _awake = crate::power::ActivityGuard::acquire("Receiving a file");
             // Registered with the wipe gate: a wipe drops this whole job (and
             // with it every open file), and a job that starts after a wipe
             // began is refused.
@@ -255,6 +256,7 @@ impl TransferRegistry {
         let store = coord.share_store().clone();
         let hold = store.clone();
         let task = tokio::spawn(async move {
+            let _awake = crate::power::ActivityGuard::acquire("Sending a file");
             // Registered with the wipe gate: a wipe drops the job (and the
             // segment buffer and open files with it), and a job that starts
             // after a wipe began is refused.

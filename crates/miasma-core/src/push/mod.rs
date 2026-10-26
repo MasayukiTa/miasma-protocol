@@ -8,6 +8,7 @@ pub mod contact;
 pub mod disk;
 pub mod ipc;
 pub mod outbox;
+pub mod pacer;
 pub mod proto;
 pub mod retry;
 pub mod speed_fmt;

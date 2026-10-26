@@ -897,6 +897,10 @@ pub struct IrohStatus {
 /// Snapshot of daemon state — returned for `miasma status` and IPC calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
+    /// The daemon is holding the OS request that keeps the computer awake
+    /// (a transfer or message delivery is in flight).
+    #[serde(default)]
+    pub keeping_awake: bool,
     /// The iroh direct transport; `None` when it is off or not compiled in.
     #[serde(default)]
     pub iroh: Option<IrohStatus>,
@@ -1240,6 +1244,13 @@ pub struct DaemonStatus {
     /// dumps (Linux/Android only; `false` elsewhere).
     #[serde(default)]
     pub key_memory_dump_excluded: bool,
+
+    // ── Trusted-contact push pacing ─────────────────────────────────────
+    /// Total time the push send loops spent waiting to yield the uplink to
+    /// chat, in milliseconds, since the daemon started. Zero when no send has
+    /// yielded (or an older daemon did not report it). Diagnostic only.
+    #[serde(default)]
+    pub push_yielded_ms: u64,
 }
 
 /// Per-transport readiness info for IPC/CLI display.

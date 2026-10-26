@@ -478,6 +478,28 @@ spec!(
     "D18",
     "Outgoing envelopes (<id>.json) and their .peer sidecars."
 );
+spec!(
+    DIRECTED_V2_INCOMING,
+    "directed/v2/incoming",
+    Dir,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D18",
+    "v2 incoming records (<id>.json): one file per envelope, challenge and sender PeerId and ephemeral secret inline."
+);
+spec!(
+    DIRECTED_V2_OUTGOING,
+    "directed/v2/outgoing",
+    Dir,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D18",
+    "v2 outgoing records (<id>.json): one file per envelope, sender secrets inline until delivery is acknowledged."
+);
 
 spec!(
     CHAT_DIR,
@@ -1034,6 +1056,8 @@ pub const REGISTRY: &[PathSpec] = &[
     DIRECTED_DIR,
     DIRECTED_INCOMING,
     DIRECTED_OUTGOING,
+    DIRECTED_V2_INCOMING,
+    DIRECTED_V2_OUTGOING,
     CHAT_DIR,
     CHAT_SESSION,
     CHAT_HISTORY,
@@ -1191,6 +1215,14 @@ pub fn directed_incoming_dir(data_dir: &Path) -> PathBuf {
 pub fn directed_outgoing_dir(data_dir: &Path) -> PathBuf {
     DIRECTED_OUTGOING.in_dir(data_dir)
 }
+/// `<data>/directed/v2/incoming`
+pub fn directed_v2_incoming_dir(data_dir: &Path) -> PathBuf {
+    DIRECTED_V2_INCOMING.in_dir(data_dir)
+}
+/// `<data>/directed/v2/outgoing`
+pub fn directed_v2_outgoing_dir(data_dir: &Path) -> PathBuf {
+    DIRECTED_V2_OUTGOING.in_dir(data_dir)
+}
 /// Default push inbox: `<data>/inbox`.
 pub fn default_push_inbox(data_dir: &Path) -> PathBuf {
     PUSH_INBOX.in_dir(data_dir)
@@ -1264,6 +1296,31 @@ pub fn atomic_tmp(path: &Path) -> PathBuf {
 /// `<path>.sec.tmp` as written by `secure_file::atomic_write_restricted`.
 pub fn atomic_secure_tmp(path: &Path) -> PathBuf {
     path.with_extension(ATOMIC_SECURE_TMP_EXT)
+}
+/// Per-write temp name that includes the process id and a caller-supplied
+/// random suffix, so two writers staging the same final path never pick the
+/// same temp: `<name>.<pid>.<suffix-hex>.tmp`. The suffix is passed in
+/// (drawn from a random source by the caller) to keep this function pure
+/// and testable.
+pub fn atomic_tmp_unique(path: &Path, pid: u32, suffix: u64) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    let mut unique = name;
+    unique.push(format!(".{pid}.{suffix:016x}.{ATOMIC_TMP_EXT}"));
+    path.with_file_name(unique)
+}
+/// Restricted counterpart of `atomic_tmp_unique`:
+/// `<name>.<pid>.<suffix-hex>.sec.tmp`.
+pub fn atomic_secure_tmp_unique(path: &Path, pid: u32, suffix: u64) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    let mut unique = name;
+    unique.push(format!(".{pid}.{suffix:016x}.{ATOMIC_SECURE_TMP_EXT}"));
+    path.with_file_name(unique)
 }
 /// Where the contacts loader sets an unreadable file aside.
 pub fn contacts_corrupt_aside(contacts_file: &Path, unix_secs: u64) -> PathBuf {
@@ -1569,6 +1626,50 @@ mod tests {
             retrieve_tmp_unique(3, 4).file_name().unwrap(),
             "miasma-retrieve-3-4.tmp"
         );
+    }
+
+    #[test]
+    fn unique_atomic_tmp_names_stay_in_the_same_dir_and_vary_between_writes() {
+        let target = Path::new("d/config.toml");
+
+        // Two writers draw their own random suffix; the value is never fixed in
+        // the source, it comes from the same random source the callers use.
+        let a = atomic_tmp_unique(target, 7, rand::random::<u64>());
+        // Same directory as the final file, so the rename is same-volume.
+        assert_eq!(a.parent(), target.parent());
+        let a_name = a.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(a_name.starts_with("config.toml."), "keeps the base name");
+        assert!(a_name.ends_with(".tmp"), "ends with the tmp extension");
+        assert!(a_name.contains(".7."), "carries the process id");
+        // The suffix is sixteen hex digits between the pid and the extension:
+        // `config.toml.7.<16 hex>.tmp`.
+        let suffix_hex = a_name
+            .strip_prefix("config.toml.7.")
+            .and_then(|r| r.strip_suffix(".tmp"))
+            .expect("name is config.toml.<pid>.<suffix>.tmp");
+        assert_eq!(suffix_hex.len(), 16, "suffix is sixteen hex digits");
+        assert!(
+            suffix_hex.bytes().all(|b| b.is_ascii_hexdigit()),
+            "suffix is hexadecimal"
+        );
+        // It is not the old fixed `config.tmp` another path could also pick.
+        assert_ne!(a, atomic_tmp(target));
+
+        // Drawing a fresh suffix almost always yields a different temp name, so
+        // two writers do not collide. Retry a few times to keep the test from
+        // ever flaking on the rare equal draw.
+        let differs = (0..8).any(|_| {
+            atomic_tmp_unique(target, 7, rand::random::<u64>())
+                != atomic_tmp_unique(target, 7, rand::random::<u64>())
+        });
+        assert!(differs, "independent random suffixes should differ");
+
+        // The restricted variant keeps the secure extension, same rules.
+        let s = atomic_secure_tmp_unique(Path::new("d/master.key"), 7, rand::random::<u64>());
+        assert_eq!(s.parent(), Path::new("d/master.key").parent());
+        let s_name = s.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(s_name.starts_with("master.key."));
+        assert!(s_name.ends_with(".sec.tmp"));
     }
 
     #[test]

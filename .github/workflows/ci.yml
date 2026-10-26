@@ -3,8 +3,16 @@ name: CI
 on:
   push:
     branches: [main, develop]
+    # A pre-release tag such as v0.3.2-beta.12 builds with that label.
+    tags: ['v*-*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: 'Pre-release label for the macOS builds, e.g. beta.12 (empty: none)'
+        type: string
+        default: ''
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -214,6 +222,17 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Set pre-release label
+        env:
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          label="$INPUT_PRERELEASE"
+          if [ -z "$label" ] && [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            case "$tag" in *-*) label="${tag#*-}" ;; esac
+          fi
+          if [ -n "$label" ]; then echo "MIASMA_PRERELEASE=$label" >> "$GITHUB_ENV"; fi
+
       - name: Build Apple-relevant crates
         run: cargo build -p miasma-core -p miasma-ffi -p miasma-wasm --locked
 
@@ -260,6 +279,17 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Set pre-release label
+        env:
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          label="$INPUT_PRERELEASE"
+          if [ -z "$label" ] && [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            case "$tag" in *-*) label="${tag#*-}" ;; esac
+          fi
+          if [ -n "$label" ]; then echo "MIASMA_PRERELEASE=$label" >> "$GITHUB_ENV"; fi
+
       # Release build: the same binaries that are handed to a person who has no
       # Rust toolchain (see the artifact step below). Both packages include the
       # hybrid upgrade by their default features.
@@ -299,17 +329,31 @@ jobs:
   # The released command-line program must stop, and leave the data directory
   # alone, when master.key is not a plain 32-byte key (see
   # crates/miasma-core/tests/root_key_downgrade_compat.rs for the copied readers).
+  # The released program is downloaded from the GitHub release. Every download
+  # is counted in that release's public download count, and this job runs on
+  # every push, so the count was inflated by CI. The files are kept in the
+  # Actions cache and verified against a SHA-256 pinned in the script, so the
+  # release is downloaded once per cache entry instead of once per run.
   older-release-key-file:
     name: Released CLI against a 64-byte key file (macOS)
     runs-on: macos-latest
     timeout-minutes: 15
+    env:
+      RELEASE_TAG: v0.3.2-beta.11
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cache the released CLI archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/released-cli
+          key: released-cli-macos-${{ env.RELEASE_TAG }}-v1
 
       - name: Run the released CLI against the data directory
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash scripts/check-older-release-key-file.sh v0.3.2-beta.11
+          MIASMA_RELEASE_CACHE: ${{ runner.temp }}/released-cli
+        run: bash scripts/check-older-release-key-file.sh "$RELEASE_TAG"
 
   cross-compile-arm64:
     name: Cross-compile ARM64

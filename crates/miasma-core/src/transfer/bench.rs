@@ -125,7 +125,7 @@ fn bench_one(
     // HKDF, so it does not skew the comparison.
     // The password is throwaway (nothing is stored or shared), so use a random one.
     let password = format!("bench-1{:032x}", rand::random::<u128>());
-    let (_, key) = PasswordProtection::create_with_cost(&password, 64, 1, 1)?;
+    let (_, key) = PasswordProtection::create_for_bench(&password)?;
 
     // Stage attribution on the first segment (the real dissolve below is what is
     // reported as the total).

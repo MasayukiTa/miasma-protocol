@@ -8,11 +8,11 @@ license.workspace = true
 
 [features]
 # Hybrid upgrade of private conversations, included in release builds (the
-# setting `privacy.pqc_mode` is off by default). See
-# docs/pqc-session-upgrade.md.
+# setting `privacy.pqc_mode` defaults to `require`: the hybrid exchange must
+# succeed or no message is sent). See docs/pqc-session-upgrade.md.
 pqc = ["miasma-core/pqc"]
-# Release builds include the hybrid upgrade; `privacy.pqc_mode` is still off
-# until a person turns it on.
+# Release builds include the hybrid upgrade; `privacy.pqc_mode` defaults to
+# `require` (the exchange must succeed) until a person sets `off` or `prefer`.
 default = ["pqc"]
 
 [[bin]]

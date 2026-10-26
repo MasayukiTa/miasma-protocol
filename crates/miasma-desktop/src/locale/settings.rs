@@ -56,7 +56,7 @@ static SE_JA: SettingsStrings = SettingsStrings {
     cat_updates: "アップデート",
     cat_about: "このアプリについて",
     cat_danger: "危険な操作",
-    danger_intro: "端末上のMiasmaデータを削除する操作です。",
+    danger_intro: "ここにある操作はデータを削除し、元に戻せません。どの操作も、実行前に何が消えるかを示して確認を求めます。",
     utc: "UTC",
 };
 

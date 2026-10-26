@@ -78,6 +78,9 @@ pub struct PushSettings {
     /// Unfinished `.part` files older than this are removed (at start and once
     /// a day). `Duration::ZERO` keeps them forever.
     pub part_retention: Duration,
+    /// Ceiling on the send rate in KiB per second (`0` = no cap). Passed to the
+    /// [`SendPacer`](super::pacer::SendPacer) of each outbound transfer.
+    pub max_send_kib_per_sec: u32,
     /// Replaces the real disk query (tests).
     pub free_space: Option<FreeSpaceFn>,
 }
@@ -94,6 +97,7 @@ impl PushSettings {
             reply_timeout: Duration::from_secs(600),
             retry: RetryPolicy::from_config(cfg),
             part_retention: Duration::from_secs(cfg.part_retention_days.saturating_mul(86_400)),
+            max_send_kib_per_sec: cfg.max_send_kib_per_sec,
             free_space: None,
         }
     }
@@ -217,6 +221,12 @@ pub struct PushService {
     limiter: Mutex<Limiter>,
     queues: Mutex<HashMap<String, ContactQueue>>,
     shutdown: watch::Sender<bool>,
+    /// This daemon's data dir, used to find the node's chat service so the send
+    /// loop can read the shared in-flight chat count and pace itself.
+    data_dir: PathBuf,
+    /// Total time the send loops spent waiting to yield the uplink to chat,
+    /// in milliseconds. Diagnostic only; read by the daemon status.
+    yielded_ms: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Why one attempt to send failed.
@@ -304,6 +314,8 @@ impl PushService {
             limiter: Mutex::new(Limiter::new()),
             queues: Mutex::new(HashMap::new()),
             shutdown,
+            data_dir: data_dir.to_path_buf(),
+            yielded_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         });
         // Old partial files of transfers the sender never resumed: once now, then daily.
         {
@@ -371,6 +383,19 @@ impl PushService {
             n += 1;
         }
         n
+    }
+
+    /// Total time the send loops spent waiting to yield the uplink to chat, in
+    /// milliseconds. Diagnostic only; `0` until a yield has happened.
+    pub fn yielded_ms(&self) -> u64 {
+        self.yielded_ms.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The node-wide count of chat sends in flight, if this daemon runs a chat
+    /// service. The send loop reads it to pace itself; `None` means no chat
+    /// service (no pacing for chat, only the configured fixed cap applies).
+    fn chat_activity(&self) -> Option<crate::chat::activity::ChatActivity> {
+        crate::chat::service::service_for(&self.data_dir).map(|s| s.chat_activity().clone())
     }
 
     /// Follow the endpoint: when the home relay connects, or the network the
@@ -1112,6 +1137,7 @@ impl PushService {
         stop: &mut watch::Receiver<bool>,
         stats: &mut AttemptStats,
     ) -> Result<Option<String>, AttemptError> {
+        let _awake = crate::power::ActivityGuard::acquire("Sending a file");
         let stall = self.settings.stall_timeout;
         let broken = |conn: &dyn Link, what: &str, e: String| {
             if Self::closed_as_not_allowed(conn) {
@@ -1203,6 +1229,17 @@ impl PushService {
             self.block_probe(),
             true,
         );
+        // Rate limiting: a fixed cap from the config, tightened while chat is in
+        // flight so the small chat acknowledgements that share the uplink are
+        // not delayed. The pacer is pure (it is told the time); the waiting and
+        // the writing happen here. With no cap configured and no chat in
+        // flight the pacer never asks for a wait, so the common path is
+        // unchanged.
+        let mut pacer = super::pacer::SendPacer::new(
+            self.settings.max_send_kib_per_sec,
+            std::time::Instant::now(),
+        );
+        let chat_activity = self.chat_activity();
         while sent < size {
             let want = (size - sent).min(CHUNK as u64) as usize;
             let n = file
@@ -1213,6 +1250,21 @@ impl PushService {
                 return Err(AttemptError::Fatal(
                     "the file changed while it was being sent".into(),
                 ));
+            }
+            // Wait, if the pacer asks, before the write. Cancellation and
+            // shutdown still win over the wait so a paced send stops promptly.
+            let chat_busy = chat_activity.as_ref().is_some_and(|a| a.is_active());
+            let delay = pacer.delay_before_send(std::time::Instant::now(), n, chat_busy);
+            if !delay.is_zero() {
+                let waited = tokio::select! {
+                    _ = wait_cancel(cancel) => return Err(AttemptError::Cancelled),
+                    _ = stop.changed() => return Err(AttemptError::Shutdown),
+                    _ = tokio::time::sleep(delay) => delay,
+                };
+                self.yielded_ms.fetch_add(
+                    waited.as_millis() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
             }
             tokio::select! {
                 _ = wait_cancel(cancel) => return Err(AttemptError::Cancelled),
@@ -1226,6 +1278,7 @@ impl PushService {
                     )),
                 }
             }
+            pacer.record_sent(std::time::Instant::now(), n);
             sent += n as u64;
             progress.store(sent, std::sync::atomic::Ordering::Relaxed);
             let rate = meter.sample(sent);
@@ -1278,6 +1331,7 @@ impl PushService {
         mut tx: BoxTx,
         mut rx: BoxRx,
     ) -> bool {
+        let _awake = crate::power::ActivityGuard::acquire("Receiving a file");
         let header: Header =
             match tokio::time::timeout(Duration::from_secs(30), proto::read_frame(&mut rx)).await {
                 Ok(Ok(h)) => h,
