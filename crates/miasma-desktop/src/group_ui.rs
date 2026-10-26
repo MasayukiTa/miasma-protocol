@@ -22,10 +22,13 @@ use miasma_core::chat::{ChatRequest, ChatResponse};
 use miasma_core::push::ContactInfo;
 
 use crate::chat::{
-    cap_text, composer_cap, counter, elide, prepare_send, when_list, when_message, Clock,
-    CounterLevel, SendBlock, MAX_PREVIEWS,
+    cap_text, composer_cap, counter, elide, prepare_send, when_list, Clock, CounterLevel,
+    SendBlock, MAX_PREVIEWS,
 };
-use crate::chat_ui::ChatAction;
+use crate::chat_ui::{
+    bubble_text, day_heading, day_separator, fill_height, note_below, starts_new_day, time_of_day,
+    ChatAction, LIST_MIN_H,
+};
 use crate::group::*;
 use crate::locale::{
     chat_strings, compose_strings, group_strings, ChatStrings, GroupStrings, Locale,
@@ -51,8 +54,6 @@ const RETRY_UNSUPPORTED: Duration = Duration::from_secs(30);
 const STALE: Duration = Duration::from_secs(20);
 /// Height of a row of the conversation list (the same as a one-to-one row).
 const ROW_H: f32 = 62.0;
-/// Room kept under the message list for the composer and its hints.
-const COMPOSER_RESERVE: f32 = 220.0;
 /// Drafts remembered while another group is open.
 const MAX_DRAFTS: usize = 20;
 
@@ -999,9 +1000,8 @@ impl GroupUi {
                 (base, pal().muted)
             }
         };
-        // The only extra of a group conversation is its information, so the header has one "i"
-        // button for it and no popup (a one-item menu covered the first messages). When a second
-        // action appears, a menu is worth it again.
+        // The header has the same "..." menu as a one-to-one conversation, so the two screens
+        // are operated alike; its one item opens the group information.
         let with_info = !info_open && status != GroupStatus::Invited;
         // Beside the list there is no way back to the list; the details still go back to the
         // messages.
@@ -1012,20 +1012,30 @@ impl GroupUi {
         } else {
             Some(cs.a11y_back)
         };
+        let mut open_info = false;
+        let mut menu = |ui: &mut egui::Ui| {
+            if kit::menu_item(ui, gs.info_button, false) {
+                open_info = true;
+            }
+        };
+        let menu_ref: &mut dyn FnMut(&mut egui::Ui) = &mut menu;
         let head = kit::conversation_header_ex(
             ui,
             back_name,
             &elide(&name, NAME_CHARS),
             Some((subtitle.as_str(), subtitle_color)),
             if with_info {
-                kit::HeaderEnd::Info {
-                    name: gs.info_button,
+                kit::HeaderEnd::Menu {
+                    name: ks.a11y_menu,
+                    key: "group",
+                    open: false,
+                    menu: menu_ref,
                 }
             } else {
                 kit::HeaderEnd::None
             },
         );
-        if head.info {
+        if head.info || open_info {
             self.info_open = true;
         }
         let back = head.back;
@@ -1051,11 +1061,13 @@ impl GroupUi {
             self.info_view(ui);
         } else {
             self.thread_view(ui, &o, clock);
+            let below_start = ui.min_rect().bottom();
             if can_send(status) {
                 self.composer_view(ui, max_bytes);
             } else {
                 kit::notice(ui, Level::Warn, gs.not_joined_note);
             }
+            note_below(ui, "group_thread", below_start);
         }
         self.action.take()
     }
@@ -1096,7 +1108,7 @@ impl GroupUi {
         if !self.thread_loaded {
             ui.label(RichText::new(cs.loading).color(pal().muted));
         }
-        let height = (ui.available_height() - COMPOSER_RESERVE).max(140.0);
+        let height = fill_height(ui, "group_thread", LIST_MIN_H);
         let can_more = self.thread_loaded
             && self.messages.len() as u32 >= self.limit
             && self.limit < MAX_WINDOW;
@@ -1106,6 +1118,9 @@ impl GroupUi {
         let added_line = detail.and_then(|d| added_by_line(gs, d));
         let messages = &self.messages;
         let loaded = self.thread_loaded;
+        let locale = self.locale;
+        // Only under my newest message: what waiting means, once, not under every message.
+        let latest_own = messages.iter().rposition(|m| m.outgoing);
         egui::ScrollArea::vertical()
             .id_source(("group_thread", o.id.as_str()))
             .max_height(height)
@@ -1129,10 +1144,20 @@ impl GroupUi {
                 if messages.is_empty() && loaded {
                     kit::paragraph_muted(ui, cs.empty_thread);
                 }
-                for m in messages {
+                let mut prev_ms: Option<u64> = None;
+                for (i, m) in messages.iter().enumerate() {
+                    if starts_new_day(prev_ms, m.at_ms, clock) {
+                        day_separator(ui, &day_heading(cs, m.at_ms, clock, locale));
+                    }
+                    prev_ms = Some(m.at_ms);
                     let sender = sender_of(gs, m);
                     let code = detail.and_then(|d| contact_code_of(d, &m.sender));
-                    if message_row(ui, gs, cs, m, &sender, code.is_some(), clock, bubble_w) {
+                    let row = Row {
+                        sender: &sender,
+                        can_add: code.is_some(),
+                        explain_waiting: latest_own == Some(i),
+                    };
+                    if message_row(ui, gs, cs, m, &row, clock, bubble_w) {
                         add_code = code.map(str::to_owned);
                     }
                 }
@@ -1152,11 +1177,16 @@ impl GroupUi {
         let spec = kit::ComposerSpec {
             id: "group_composer",
             hint: cs.composer_hint,
-            a11y_input: gs.a11y_composer,
-            a11y_send: gs.a11y_send,
+            // Named in the same pattern as the one-to-one composer ("Message input", "Send
+            // message"), with the group said at the end.
+            a11y_input: gs.a11y_group_composer,
+            a11y_send: gs.a11y_group_send,
             send_label: cs.send,
             keys_hint: cs.composer_keys,
-            attach: None,
+            // The paperclip is where it is in a one-to-one conversation. A group cannot take a
+            // file, so it opens the one place that sends a file to a contact; the note under
+            // the composer says so.
+            attach: Some((cs.a11y_attach, true)),
         };
         let view = |text: &str| crate::chat_ui::composer_state(cs, text, max_bytes);
         let out = kit::composer(
@@ -1167,6 +1197,9 @@ impl GroupUi {
             &mut self.focus_composer,
             &view,
         );
+        if out.attach {
+            self.action = Some(ChatAction::OpenSendFlow);
+        }
         if out.changed && cap_text(&mut self.composer, composer_cap(max_bytes)) {
             self.page_msg = Some(cs.too_long_note.to_owned());
         }
@@ -1223,7 +1256,7 @@ impl GroupUi {
         egui::ScrollArea::vertical()
             .id_source("group_info")
             .auto_shrink([false, false])
-            .max_height((ui.available_height() - 20.0).max(160.0))
+            .max_height(fill_height(ui, "group_info", 120.0))
             .show(ui, |ui| {
                 kit::section(
                     ui,
@@ -1287,43 +1320,42 @@ impl GroupUi {
                     .clone(),
                     _ => ui.label(""),
                 };
-                ui.add_space(kit::SP_3);
-                kit::divider(ui);
-                ui.add_space(kit::SP_2);
-                kit::button_row(ui, |ui| {
-                    let r = crate::form_check::add_enabled(
-                        ui,
-                        can_leave(status) && !busy,
-                        kit::danger_button(gs.leave),
-                    );
-                    r.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Button, gs.a11y_leave)
-                    });
-                    if r.clicked() {
-                        ask_leave = true;
-                    }
-                    let allowed = can_delete_history(status) && !busy;
-                    let r = crate::form_check::add_enabled(
-                        ui,
-                        allowed,
-                        kit::danger_button(gs.delete_history),
-                    );
-                    r.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::WidgetType::Button, gs.a11y_delete_history)
-                    });
-                    let r = if can_delete_history(status) {
-                        r
-                    } else {
-                        r.on_disabled_hover_text(gs.delete_history_hint)
-                    };
-                    if r.clicked() {
-                        ask_delete = true;
-                    }
-                });
-                if !can_delete_history(status) {
-                    kit::hint(ui, gs.delete_history_hint);
-                }
             });
+        // Leaving and deleting the history stay under the list, always in view: with a
+        // long member list they were below the fold, behind a thin scroll bar.
+        let footer_start = ui.min_rect().bottom();
+        ui.add_space(kit::SP_2);
+        kit::divider(ui);
+        ui.add_space(kit::SP_2);
+        kit::button_row(ui, |ui| {
+            let r = crate::form_check::add_enabled(
+                ui,
+                can_leave(status) && !busy,
+                kit::danger_button(gs.leave),
+            );
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, gs.a11y_leave));
+            if r.clicked() {
+                ask_leave = true;
+            }
+            let allowed = can_delete_history(status) && !busy;
+            let r =
+                crate::form_check::add_enabled(ui, allowed, kit::danger_button(gs.delete_history));
+            r.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, gs.a11y_delete_history)
+            });
+            let r = if can_delete_history(status) {
+                r
+            } else {
+                r.on_disabled_hover_text(gs.delete_history_hint)
+            };
+            if r.clicked() {
+                ask_delete = true;
+            }
+        });
+        if !can_delete_history(status) {
+            kit::hint(ui, gs.delete_history_hint);
+        }
+        note_below(ui, "group_info", footer_start);
         if ask_add {
             self.add = Some(Picks::default());
             self.add_msg = None;
@@ -1373,20 +1405,24 @@ impl GroupUi {
         };
         let mut out = MemberOut::default();
         let mut toggle = false;
-        kit::list_row(
-            ui,
-            kit::ListRow {
-                avatar: Some(&shown),
-                title: &shown,
-                subtitle: Some((&subtitle, level)),
-            },
-            |ui| {
-                if m.you {
-                    return;
-                }
+        // The status line is written out in full, wrapped, not cut with an ellipsis: why a member
+        // does not receive the messages is the thing to read here.
+        let sub_color = if level == Level::Muted {
+            pal().muted
+        } else {
+            kit::level_color(level)
+        };
+        kit::divider(ui);
+        ui.add_space(kit::SP_2);
+        let row_w = ui.available_width();
+        ui.allocate_ui_with_layout(vec2(row_w, 0.0), Layout::right_to_left(Align::Min), |ui| {
+            ui.set_min_width(row_w);
+            ui.spacing_mut().item_spacing.x = kit::SP_2;
+            if !m.you {
                 let mut items = vec![kit::MenuItem::new(toggle_label)];
                 if can_remove(d, m) {
-                    items.push(kit::MenuItem::danger(gs.remove).enabled(!busy));
+                    // Says what is removed and from where, not only "Remove".
+                    items.push(kit::MenuItem::danger(gs.remove_from_group).enabled(!busy));
                 }
                 if let Some(i) = kit::row_menu(ui, ("member", &m.endpoint_id), &more, &items) {
                     if i == 0 {
@@ -1405,8 +1441,21 @@ impl GroupUi {
                         out.add_contact = Some(m.contact_code.clone());
                     }
                 }
-            },
-        );
+            }
+            ui.with_layout(Layout::left_to_right(Align::Min), |ui| {
+                ui.spacing_mut().item_spacing.x = kit::SP_3;
+                kit::avatar(ui, &shown, kit::AVATAR_PX);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.add(
+                        egui::Label::new(RichText::new(&shown).color(pal().text)).truncate(true),
+                    )
+                    .on_hover_text(shown.as_str());
+                    ui.add(egui::Label::new(RichText::new(&subtitle).color(sub_color)).wrap(true));
+                });
+            });
+        });
+        ui.add_space(kit::SP_2);
         if toggle && !self.shown_codes.remove(&m.endpoint_id) {
             self.shown_codes.insert(m.endpoint_id.clone());
         }
@@ -1904,20 +1953,28 @@ fn group_row(
     resp
 }
 
+/// What a message row needs to know besides the message.
+struct Row<'a> {
+    sender: &'a Sender,
+    /// "Add as contact" can be offered (the member's code is known).
+    can_add: bool,
+    /// This is my newest message: when it is still waiting, say what that means.
+    explain_waiting: bool,
+}
+
 /// One message of a group as an aligned bubble: for an incoming one the sender above it (with the
 /// unverified badge and, when the code is known, "Add as contact"), under it the time and how far
 /// my own message got. Returns true when "Add as contact" was pressed.
-#[allow(clippy::too_many_arguments)]
 fn message_row(
     ui: &mut egui::Ui,
     gs: &GroupStrings,
     cs: &ChatStrings,
     m: &GroupMessageInfo,
-    sender: &Sender,
-    can_add: bool,
+    row: &Row<'_>,
     clock: Clock,
     bubble_w: f32,
 ) -> bool {
+    let (sender, can_add) = (row.sender, row.can_add);
     let p = pal();
     let own = m.outgoing;
     let layout = if own {
@@ -1967,10 +2024,10 @@ fn message_row(
             .inner_margin(egui::Margin::symmetric(kit::SP_3, kit::SP_2))
             .show(ui, |ui| {
                 ui.set_max_width(bubble_w);
-                ui.add(egui::Label::new(RichText::new(&m.text).color(p.text)).wrap(true));
+                bubble_text(ui, &m.text, p.text, own);
             });
     });
-    let when = when_message(cs, m.at_ms, clock);
+    let when = time_of_day(m.at_ms, clock);
     let delivery = delivery_of(m);
     // A message that is only waiting shows one short word; the exact count is in the hover text
     // and in what a screen reader is told. The sentence is shown in full once it is stuck.
@@ -1992,6 +2049,14 @@ fn message_row(
             ui.label(kit::meta_text(when, p.muted));
         }
     });
+    // The same help as under a one-to-one message that has not arrived: why it is not there yet,
+    // and that it will be.
+    if row.explain_waiting && matches!(delivery, GroupDelivery::Waiting { .. }) {
+        ui.with_layout(layout, |ui| {
+            ui.set_max_width(bubble_w);
+            ui.add(egui::Label::new(kit::meta_text(gs.waiting_note, p.muted)).wrap(true));
+        });
+    }
     if m.gap_before > 0 {
         ui.with_layout(layout, |ui| {
             ui.add(
