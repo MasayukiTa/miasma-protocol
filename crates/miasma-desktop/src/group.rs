@@ -587,11 +587,18 @@ pub struct DeliveryLine {
 /// state shows its sentence.
 pub fn delivery_line(g: &GroupStrings, d: GroupDelivery, age_ms: u64) -> Option<DeliveryLine> {
     let text = delivery_text(g, d)?;
-    if matches!(d, GroupDelivery::Waiting { .. }) && age_ms < STUCK_MS {
-        return Some(DeliveryLine {
-            shown: g.state_waiting_short.to_owned(),
-            full: Some(text),
-        });
+    if let GroupDelivery::Waiting { delivered, total } = d {
+        if age_ms < STUCK_MS {
+            // One short phrase with the count ("Waiting 0/2"), so it is clear how far the
+            // message got without reading the hover text.
+            return Some(DeliveryLine {
+                shown: fill(
+                    g.state_waiting_short,
+                    &[("d", &delivered.to_string()), ("n", &total.to_string())],
+                ),
+                full: Some(text),
+            });
+        }
     }
     Some(DeliveryLine {
         shown: text,
@@ -1599,7 +1606,12 @@ mod tests {
                 total: 2,
             };
             let quick = delivery_line(gs, waiting, 30_000).expect("a line");
-            assert_eq!(quick.shown, gs.state_waiting_short);
+            // The short phrase carries the count: how many of the 2 got it so far (0).
+            assert_eq!(
+                quick.shown,
+                fill(gs.state_waiting_short, &[("d", "0"), ("n", "2")])
+            );
+            assert!(quick.shown.contains('0') && quick.shown.contains('2'));
             let full = quick.full.expect("the exact count is kept for the hover");
             assert!(full.contains('2') && full.contains('0'), "{full}");
             assert!(full.chars().count() > quick.shown.chars().count());
