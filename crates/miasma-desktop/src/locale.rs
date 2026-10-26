@@ -252,8 +252,14 @@ pub struct Strings {
     pub home_send_action: &'static str,
     pub home_receive_action: &'static str,
     pub home_save_action: &'static str,
+    /// Shown on the Home screen as a card when the user has no contacts yet.
+    pub home_no_contacts: &'static str,
+    /// Button on that card; opens the Contacts tab (same destination as the chat empty state).
+    pub home_open_contacts: &'static str,
     pub files_heading_easy: &'static str,
     pub files_desc_easy: &'static str,
+    /// Inbox: a link to the page where a share ID or invite code is entered to receive.
+    pub inbox_receive_by_code: &'static str,
 
     // ── Easy dashboard (store tab quick stats) ──
     pub dashboard_quick_status: &'static str,
@@ -546,8 +552,11 @@ impl Strings {
             ("home_send_action", self.home_send_action),
             ("home_receive_action", self.home_receive_action),
             ("home_save_action", self.home_save_action),
+            ("home_no_contacts", self.home_no_contacts),
+            ("home_open_contacts", self.home_open_contacts),
             ("files_heading_easy", self.files_heading_easy),
             ("files_desc_easy", self.files_desc_easy),
+            ("inbox_receive_by_code", self.inbox_receive_by_code),
             ("dashboard_quick_status", self.dashboard_quick_status),
             ("dashboard_storage_label", self.dashboard_storage_label),
             ("dashboard_peers_label", self.dashboard_peers_label),
@@ -854,6 +863,8 @@ static EN: Strings = Strings {
     home_send_action: "Send a file",
     home_receive_action: "Receive a file",
     home_save_action: "Save securely",
+    home_no_contacts: "You have no one to send to yet. Add a contact or send an invite on the Contacts tab, and you can start sending files.",
+    home_open_contacts: "Open Contacts",
     files_heading_easy: "Files",
     files_desc_easy: "Send, receive, recover, and review your file activity here.",
 
@@ -897,6 +908,7 @@ static EN: Strings = Strings {
     inbox_desc: "Private files other users have sent to you.",
     inbox_desc_easy: "Files people have sent to you.",
     inbox_empty: "Inbox is empty.",
+    inbox_receive_by_code: "Receive with a code…",
     inbox_from: "From:",
     inbox_state: "State:",
     inbox_challenge: "Challenge:",
@@ -1149,6 +1161,8 @@ static JA: Strings = Strings {
     home_send_action: "ファイルを送る",
     home_receive_action: "ファイルを受け取る",
     home_save_action: "安全に保存する",
+    home_no_contacts: "まだ相手がいません。「連絡先」タブで相手を追加するか、招待を送るとファイルを送れます。",
+    home_open_contacts: "連絡先を開く",
     files_heading_easy: "ファイル",
     files_desc_easy: "送受信、復元、保存中のファイルをここで確認できます。",
 
@@ -1192,6 +1206,7 @@ static JA: Strings = Strings {
     inbox_desc: "他のユーザーから届いたプライベートなファイル。",
     inbox_desc_easy: "あなた宛に送られたファイル。",
     inbox_empty: "受信箱は空です。",
+    inbox_receive_by_code: "コードで受け取る…",
     inbox_from: "送信者:",
     inbox_state: "状態:",
     inbox_challenge: "チャレンジ:",
@@ -1444,6 +1459,8 @@ static ZH_CN: Strings = Strings {
     home_send_action: "发送文件",
     home_receive_action: "接收文件",
     home_save_action: "安全保存",
+    home_no_contacts: "你还没有可发送的对象。在“联系人”页添加联系人或发送邀请后，即可开始发送文件。",
+    home_open_contacts: "打开联系人",
     files_heading_easy: "文件",
     files_desc_easy: "在这里发送、接收、恢复并查看文件活动。",
 
@@ -1487,6 +1504,7 @@ static ZH_CN: Strings = Strings {
     inbox_desc: "其他用户私密发送给你的文件。",
     inbox_desc_easy: "别人发给你的文件。",
     inbox_empty: "收件箱为空。",
+    inbox_receive_by_code: "用代码接收…",
     inbox_from: "发送者：",
     inbox_state: "状态：",
     inbox_challenge: "验证码：",
@@ -4639,6 +4657,37 @@ mod tests {
         assert!(Locale::ALL.contains(&Locale::En));
         assert!(Locale::ALL.contains(&Locale::Ja));
         assert!(Locale::ALL.contains(&Locale::ZhCn));
+    }
+
+    // The three strings added for the empty-state guidance (Home "no contacts" card and the
+    // Inbox "receive by code" link). The zh-CN side of each is already covered by the strings
+    // translation-parity test; this guards the Japanese side and the shared wiring.
+    #[test]
+    fn the_empty_state_guidance_strings_are_filled_and_translated() {
+        for lang in Locale::ALL {
+            let s = strings(lang);
+            for (idx, v) in [
+                s.home_no_contacts,
+                s.home_open_contacts,
+                s.inbox_receive_by_code,
+                // The Easy Inbox title reuses this label, so it must be present too.
+                s.home_receive_action,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                assert!(!v.trim().is_empty(), "{lang:?} string #{idx} is empty");
+            }
+        }
+        // Japanese is a real translation, not the English left in place.
+        let (en, ja) = (strings(Locale::En), strings(Locale::Ja));
+        assert_ne!(en.home_no_contacts, ja.home_no_contacts);
+        assert_ne!(en.home_open_contacts, ja.home_open_contacts);
+        assert_ne!(en.inbox_receive_by_code, ja.inbox_receive_by_code);
+        // The Japanese points to the same place the card's button opens: the Contacts tab.
+        assert!(ja.home_no_contacts.contains("連絡先"));
+        assert_eq!(ja.home_open_contacts, "連絡先を開く");
+        assert_eq!(ja.inbox_receive_by_code, "コードで受け取る…");
     }
 
     #[test]

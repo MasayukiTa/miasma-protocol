@@ -1461,6 +1461,22 @@ impl MiasmaApp {
             ui.horizontal(actions);
         }
 
+        // When there is no one to send to yet, point to Contacts — the same destination as the
+        // chat empty state. Without this the three actions lead nowhere useful on first run.
+        if self.contacts.contact_list().is_empty() {
+            ui.add_space(kit::SP_3);
+            kit::surface(ui, |ui| {
+                kit::paragraph(ui, s.home_no_contacts);
+                ui.add_space(kit::SP_2);
+                if ui
+                    .add(kit::secondary_button(s.home_open_contacts))
+                    .clicked()
+                {
+                    self.tab = Tab::Contacts;
+                }
+            });
+        }
+
         // Status is one muted line; the numbers are behind "Details".
         ui.add_space(kit::SP_3);
         let (_, state_text) = header_chip(
@@ -1969,8 +1985,10 @@ impl MiasmaApp {
         let s = self.s();
         let easy = self.mode.is_easy();
         let connected = self.daemon_state == DaemonState::Connected;
+        // Easy mode reuses the Home "Receive a file" label so the button that brings the user
+        // here and the page title are the same words (and stay the same if either is retranslated).
         let title = if easy {
-            s.inbox_heading_easy
+            s.home_receive_action
         } else {
             s.inbox_heading
         };
@@ -2002,6 +2020,16 @@ impl MiasmaApp {
                 }
                 if items.is_empty() {
                     ui.label(kit::muted_text(s.inbox_empty));
+                    // The code/invite receive form lives on the Transfers screen; without this
+                    // link an empty inbox gives no way to receive by code. Same destination as
+                    // the "File transfer" link on the Files tab.
+                    ui.add_space(kit::SP_2);
+                    if ui
+                        .add(kit::secondary_button(s.inbox_receive_by_code))
+                        .clicked()
+                    {
+                        self.tab = Tab::Transfers;
+                    }
                     return;
                 }
                 for item in &items {
@@ -4366,6 +4394,9 @@ mod tests {
             LaunchIntent::Normal,
         );
         app.daemon_state = state;
+        // This test measures the layout of the three actions and the status line. The
+        // "no contacts yet" card is covered by its own test, so give the app a contact here.
+        app.contacts = ContactsUi::fixture("two", locale::contact_strings(Locale::En)).unwrap();
         let mut used = egui::Rect::NOTHING;
         for _ in 0..3 {
             let input = egui::RawInput {
@@ -5193,5 +5224,59 @@ mod tests {
             rig.walk_and_close();
             rig.frames(2);
         }
+    }
+
+    // Home: with no contacts, the three large actions lead nowhere useful, so a card points the
+    // way to Contacts — the same destination as the chat empty state. With contacts, the card is
+    // gone. (H3)
+    #[test]
+    fn the_home_card_offers_contacts_only_when_there_are_none() {
+        let s = locale::strings(Locale::En);
+        // No contacts: the card and its button are drawn.
+        let mut rig = A11yRig::new(Tab::Home);
+        assert!(rig.app.contacts.contact_list().is_empty());
+        rig.frames(3);
+        assert!(
+            rig.buttons().iter().any(|b| b == s.home_open_contacts),
+            "no {:?} on an empty Home; buttons: {:?}",
+            s.home_open_contacts,
+            rig.buttons()
+        );
+        // Pressing it lands on the Contacts tab.
+        rig.invoke(s.home_open_contacts);
+        rig.frames(3);
+        assert_eq!(rig.app.tab, Tab::Contacts);
+
+        // With contacts, the card is not drawn.
+        let c = locale::contact_strings(Locale::En);
+        let mut rig = A11yRig::new(Tab::Home);
+        rig.app.contacts = ContactsUi::fixture("two", c).unwrap();
+        rig.frames(3);
+        assert!(
+            !rig.buttons().iter().any(|b| b == s.home_open_contacts),
+            "{:?} still on Home with contacts; buttons: {:?}",
+            s.home_open_contacts,
+            rig.buttons()
+        );
+    }
+
+    // Inbox: an empty inbox used to give no way to receive by code. The empty state now offers a
+    // link to the Transfers screen, where the share ID / invite code form lives — the same
+    // destination as the "File transfer" link on the Files tab. (H2)
+    #[test]
+    fn the_empty_inbox_links_to_the_receive_by_code_form() {
+        let s = locale::strings(Locale::En);
+        let mut rig = A11yRig::new(Tab::Inbox);
+        assert!(rig.app.inbox_items.is_empty());
+        rig.frames(3);
+        assert!(
+            rig.buttons().iter().any(|b| b == s.inbox_receive_by_code),
+            "no {:?} on an empty Inbox; buttons: {:?}",
+            s.inbox_receive_by_code,
+            rig.buttons()
+        );
+        rig.invoke(s.inbox_receive_by_code);
+        rig.frames(3);
+        assert_eq!(rig.app.tab, Tab::Transfers);
     }
 }
