@@ -4211,14 +4211,8 @@ mod tests {
             );
         }
         assert_eq!(fill(ja.eta, &[("t", &eta_text(ja, 5))]), "あと5秒");
-        assert_eq!(
-            fill(ja.eta, &[("t", &eta_text(ja, 192))]),
-            "あと3分12秒"
-        );
-        assert_eq!(
-            fill(ja.eta, &[("t", &eta_text(ja, 3900))]),
-            "あと1時間5分"
-        );
+        assert_eq!(fill(ja.eta, &[("t", &eta_text(ja, 192))]), "あと3分12秒");
+        assert_eq!(fill(ja.eta, &[("t", &eta_text(ja, 3900))]), "あと1時間5分");
     }
 
     #[test]
