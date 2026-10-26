@@ -73,11 +73,18 @@ pub struct NetworkUi {
     report: Option<MatrixReport>,
     view: Option<MatrixView>,
     report_note: Option<(Level, String)>,
+    /// Easy mode: the public service is the default and is not explained by name.
+    easy: bool,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
 }
 
 impl NetworkUi {
+    /// Easy mode leaves the name of the public relay service out of the page.
+    pub fn set_easy(&mut self, easy: bool) {
+        self.easy = easy;
+    }
+
     pub fn new(data_dir: PathBuf) -> Self {
         let (settings, load_failed) = match load_settings(&data_dir) {
             Ok(s) => (s, false),
@@ -98,6 +105,7 @@ impl NetworkUi {
             report: None,
             view: None,
             report_note: None,
+            easy: false,
             tx,
             rx,
         }
@@ -302,13 +310,14 @@ impl NetworkUi {
             }
 
             // Connection mode.
-            let desc = match self.edit.mode {
-                IrohMode::N0 => s.mode_desc_public,
-                IrohMode::Custom => s.mode_desc_own,
-                IrohMode::Off => s.mode_desc_direct,
+            let desc: Option<&str> = match self.edit.mode {
+                IrohMode::N0 if self.easy => None,
+                IrohMode::N0 => Some(s.mode_desc_public),
+                IrohMode::Custom => Some(s.mode_desc_own),
+                IrohMode::Off => Some(s.mode_desc_direct),
             };
             let mut mode = self.edit.mode;
-            kit::form_row(ui, s.mode_label, Some(desc), |ui| {
+            kit::form_row(ui, s.mode_label, desc, |ui| {
                 kit::segmented(
                     ui,
                     &mut mode,

@@ -160,6 +160,55 @@ pub fn advanced(l: Locale) -> &'static str {
     pick(l, "Advanced", "詳細設定", "高级")
 }
 
+/// Shown in the header while the relay has not been reached yet, right after the start.
+pub fn relay_connecting(l: Locale) -> &'static str {
+    pick(l, "Connecting...", "接続しています…", "正在连接…")
+}
+
+/// A "Details" header that says what it is the details of, so two of them on one screen differ.
+pub fn details_of(l: Locale, topic: &str) -> String {
+    match l {
+        Locale::En => format!("{}: {topic}", details(l)),
+        Locale::Ja => format!("{}（{topic}）", details(l)),
+        Locale::ZhCn => format!("{}（{topic}）", details(l)),
+    }
+}
+
+/// Under the ID field of the restore screen: where a content ID comes from.
+pub fn restore_id_hint(l: Locale) -> &'static str {
+    pick(
+        l,
+        "You get a content ID when you save something on the Save screen, or from the person who saved it.",
+        "コンテンツIDは、「保存」画面で保存したときに表示されます。ほかの人が保存したものは、その人に教えてもらってください。",
+        "在“保存”页面保存内容后会显示内容 ID，也可以向保存该内容的人索取。",
+    )
+}
+
+/// Technical mode: the entry of the second row that holds the inbox and the restore screen.
+pub fn receive_group(l: Locale) -> &'static str {
+    pick(l, "Receive", "受け取り", "接收")
+}
+
+/// The restore screen as a segment next to the inbox.
+pub fn retrieve_by_id(l: Locale) -> &'static str {
+    pick(l, "Retrieve by ID", "IDで取得", "按 ID 恢复")
+}
+
+/// Settings > About, Technical mode: the report buttons live on the Status screen.
+pub fn diagnostics_live_in_status(l: Locale) -> &'static str {
+    pick(
+        l,
+        "Copy or save the diagnostics report on the Status screen.",
+        "診断情報のコピーとレポートの保存は、ステータス画面にあります。",
+        "复制诊断信息和保存报告的功能在“状态”页面。",
+    )
+}
+
+/// First column of the transport table on the Status screen (the section above has the heading).
+pub fn transport_column(l: Locale) -> &'static str {
+    pick(l, "Method", "方式", "方式")
+}
+
 /// Closed header that holds the longer explanation of a setting or a dialog.
 pub fn details(l: Locale) -> &'static str {
     pick(l, "Details", "詳細", "详情")

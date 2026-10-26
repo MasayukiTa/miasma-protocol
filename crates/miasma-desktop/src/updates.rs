@@ -577,7 +577,8 @@ impl UpdatesUi {
                 UpdateMode::Notify => u.mode_desc_notify,
                 UpdateMode::Auto => u.mode_desc_auto,
             };
-            kit::form_row(ui, u.mode_label, Some(desc), |ui| {
+            // No label: the section heading above already says "Updates".
+            kit::form_row(ui, "", Some(desc), |ui| {
                 let mut mode = self.cfg.mode;
                 let options = [
                     (UpdateMode::Off, u.mode_off),
