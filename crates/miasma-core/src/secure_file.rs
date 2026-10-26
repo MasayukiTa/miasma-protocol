@@ -64,6 +64,41 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), MiasmaError> {
     })
 }
 
+/// Atomic restricted write that never replaces an existing file. The bytes go
+/// to a uniquely named, owner-only temp file in the same directory (Unix mode
+/// `0600`, Windows DACL granting only the current user), and are then linked
+/// into place only if nothing already holds the final name; the temp file is
+/// always removed, including on failure. The final name shares the temp file's
+/// restricted permissions through the hard link. Returns `Ok(true)` when this
+/// call created `path`, `Ok(false)` when a file was already there (left
+/// untouched). A reader sees either no file or the whole file, never a partial
+/// one.
+///
+/// Use this for secrets that must not be replaced: it keeps the no-clobber
+/// temp+link guarantee and the restricted permissions in one audited place.
+/// The temp name includes the process id and a fresh random suffix to avoid
+/// colliding with another writer in the same directory.
+pub fn atomic_write_new(path: &Path, data: &[u8]) -> Result<bool, MiasmaError> {
+    let tmp = crate::paths::atomic_secure_tmp_unique(path, std::process::id(), rand::random());
+    // The temp file is born restricted to the current user, so the bytes are
+    // never readable by other users, even briefly at the temp path.
+    write_restricted(&tmp, data).inspect_err(|_e| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
+    // A hard link fails with AlreadyExists rather than overwriting, so an
+    // existing file at the final path is never lost. The link shares the temp
+    // file's inode and so its restricted permissions.
+    let linked = std::fs::hard_link(&tmp, path);
+    let _ = std::fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(MiasmaError::Io(std::io::Error::other(format!(
+            "failed to place file: {e}"
+        )))),
+    }
+}
+
 /// Verify that `path` is restricted to the current user (best-effort).
 ///
 /// Returns `Ok(true)` if the file is restricted, `Ok(false)` if it is not
@@ -833,6 +868,51 @@ mod tests {
     }
 
     #[test]
+    fn atomic_write_new_creates_the_file_and_reads_back_the_same_bytes() {
+        // A fresh path is created and holds exactly the bytes given. The bytes
+        // are drawn at run time, never a fixed literal.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fresh.dat");
+        let payload: [u8; 32] = rand::random();
+        assert!(atomic_write_new(&path, &payload).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), payload);
+    }
+
+    #[test]
+    fn atomic_write_new_refuses_to_replace_an_existing_file() {
+        // An existing file at the path is never overwritten: the call reports
+        // `false` and the earlier bytes are left exactly as they were.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exists.dat");
+        let existing: [u8; 16] = rand::random();
+        std::fs::write(&path, existing).unwrap();
+        // `rand::random::<[u8; N]>()` only implements N <= 32; build the 48
+        // bytes one at a time so no zero-filled array stands in for the bytes.
+        let other: Vec<u8> = (0..48).map(|_| rand::random::<u8>()).collect();
+        assert!(!atomic_write_new(&path, &other).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), existing);
+    }
+
+    #[test]
+    fn atomic_write_new_leaves_no_temp_file_behind() {
+        // After a successful create the directory holds only the final file:
+        // the temporary staging file is always removed.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("only.dat");
+        let payload: [u8; 24] = rand::random();
+        atomic_write_new(&path, &payload).unwrap();
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .filter(|n| n != "only.dat")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no temp file left behind: {leftovers:?}"
+        );
+    }
+
+    #[test]
     fn write_restricted_is_actually_readable() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("readable.key");
@@ -954,5 +1034,23 @@ mod tests {
         write_restricted(&path, b"v2").unwrap();
         assert!(verify_restricted(&path).unwrap());
         assert_eq!(std::fs::read(&path).unwrap(), b"v2");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_new_creates_an_owner_only_file() {
+        // The file a fresh create leaves behind is restricted to its owner from
+        // the start: mode 0o600, readable and writable by nobody else. The
+        // bytes are drawn at run time, never a fixed literal.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("owner-only.dat");
+        let payload: [u8; 32] = rand::random();
+        assert!(atomic_write_new(&path, &payload).unwrap());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "backup must be owner-only, got {mode:o}");
+        // The stricter owner-only check (regular file, 0o600, owned by us) also
+        // holds for the placed file.
+        verify_owner_only(&path).unwrap();
     }
 }

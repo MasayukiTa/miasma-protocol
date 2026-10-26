@@ -21,7 +21,7 @@ miasma-core/src/logging/diag.rs | 4 | opt-in diagnostic log files: lg folder, ro
 miasma-core/src/directed/inbox.rs | 4 | directed/ folders including the v2 incoming and outgoing dirs (the envelope and sidecar files themselves are written through state_crypto)
 miasma-core/src/push/service.rs | 4 | push inbox: .part files and final placement
 miasma-core/src/push/store.rs | 2 | setting an unreadable contacts file aside (contents are written through state_crypto)
-miasma-core/src/secure_file.rs | 10 | restricted-permission write primitives used by the stores, plus the plain atomic_write temp+rename primitive that config.rs now routes its non-secret and version-stamp writes through
+miasma-core/src/secure_file.rs | 11 | restricted-permission write primitives used by the stores, the plain atomic_write temp+rename primitive config.rs routes non-secret and version-stamp writes through, and the atomic_write_new temp+link no-clobber primitive the recovery backup export routes through
 miasma-core/src/store.rs | 6 | share blobs and the atomic-write helper the wipe reuses (the index is written through state_crypto)
 miasma-core/src/transfer/receive.rs | 6 | resumable receive: .part file and final rename
 miasma-core/src/update/apply.rs | 15 | self-update: progress journal, the rename-swap of the program files (*.new, *.old.<id>, *.prev) and the write probe
