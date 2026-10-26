@@ -1934,7 +1934,7 @@ impl ContactsUi {
             if self.contacts_loaded {
                 let mut invite = false;
                 let add = kit::empty_state_with(ui, c.empty_line, c.add_title, |ui| {
-                    invite = ui.add(kit::quiet_button(c.invite_btn)).clicked();
+                    invite = ui.add(kit::secondary_button(c.invite_btn)).clicked();
                 });
                 if add {
                     self.open_add_dialog();
@@ -2049,12 +2049,12 @@ impl ContactsUi {
                 } else {
                     c.copy_code
                 };
-                if ui.add(kit::quiet_button(l)).clicked() {
+                if ui.add(kit::secondary_button(l)).clicked() {
                     ui.output_mut(|o| o.copied_text = code.clone());
                     self.copied_at = Some(Instant::now());
                 }
                 let l = if self.show_qr { c.hide_qr } else { c.show_qr };
-                if ui.add(kit::quiet_button(l)).clicked() {
+                if ui.add(kit::secondary_button(l)).clicked() {
                     self.show_qr = !self.show_qr;
                 }
             });
@@ -2088,9 +2088,12 @@ impl ContactsUi {
                     hint(ui, c.my_fp_hint);
                 });
             ui.add_space(kit::SP_3);
-            if ui.add(kit::quiet_button(c.done_btn)).clicked() {
-                close = true;
-            }
+            // Closing is a real button, at the right like the other dialogs'.
+            kit::dialog_actions(ui, |ui| {
+                if ui.add(kit::secondary_button(c.done_btn)).clicked() {
+                    close = true;
+                }
+            });
         });
         if shown.is_none() || close {
             self.invite_open = false;
@@ -2265,7 +2268,7 @@ impl ContactsUi {
                         self.queue_add(label);
                     }
                 }
-                if ui.add(kit::quiet_button(c.cancel)).clicked() {
+                if ui.add(kit::secondary_button(c.cancel)).clicked() {
                     close = true;
                 }
             });
@@ -2482,7 +2485,7 @@ impl ContactsUi {
                     {
                         commit = true;
                     }
-                    if ui.add(kit::quiet_button(c.cancel)).clicked() {
+                    if ui.add(kit::secondary_button(c.cancel)).clicked() {
                         close = true;
                     }
                 });
@@ -2567,7 +2570,7 @@ impl ContactsUi {
                     if ui.add(kit::secondary_button(c.sugg_add)).clicked() {
                         add = Some(s.endpoint_id.clone());
                     }
-                    if ui.add(kit::quiet_button(c.sugg_ignore)).clicked() {
+                    if ui.add(kit::compact_button(c.sugg_ignore)).clicked() {
                         ignore = Some(s.endpoint_id.clone());
                     }
                 },
@@ -2637,7 +2640,7 @@ impl ContactsUi {
                     let send = crate::form_check::add_enabled(
                         ui,
                         ct.allow_send,
-                        kit::quiet_button(c.send_short),
+                        kit::compact_button(c.send_short),
                     )
                     .on_hover_text(c.send_files)
                     .on_disabled_hover_text(c.send_disabled_note);
@@ -2730,7 +2733,7 @@ impl ContactsUi {
                     ui.label(egui::RichText::new(t).color(pal().muted));
                 }
                 if self.rows.iter().any(|r| r.finished())
-                    && ui.add(kit::quiet_button(c.btn_clear_finished)).clicked()
+                    && ui.add(kit::compact_button(c.btn_clear_finished)).clicked()
                 {
                     self.clear_confirm = true;
                 }

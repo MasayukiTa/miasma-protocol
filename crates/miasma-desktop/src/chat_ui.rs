@@ -16,7 +16,7 @@ use miasma_core::push::ContactInfo;
 
 use crate::chat::*;
 use crate::contacts::{ContactsUi, FileStatus, SentFile};
-use crate::group::split_by_kind;
+use crate::group::{split_by_kind, PICKER_SEARCH_MIN};
 use crate::group_ui::GroupUi;
 use crate::locale::{group_strings, ChatStrings, ContactStrings, Locale};
 use crate::theme::{self, Palette};
@@ -39,8 +39,14 @@ const RETRY_CLOSED: Duration = Duration::from_secs(30);
 const STALE: Duration = Duration::from_secs(20);
 /// Height of a conversation row.
 const ROW_H: f32 = 62.0;
-/// Room kept under the message list for the composer (one row, growing to a few lines).
-const COMPOSER_RESERVE: f32 = 120.0;
+/// Room assumed under the message list in the first frame, before the composer (one row, growing
+/// to a few lines) has been measured. Every later frame uses the measured height.
+const BELOW_FIRST: f32 = 76.0;
+/// The message list is never shorter than this, however small the window.
+pub(crate) const LIST_MIN_H: f32 = 140.0;
+/// The conversation list shows a search field from this many conversations on: with fewer the
+/// whole list fits in the default window without scrolling (a row is [`ROW_H`] high).
+const LIST_SEARCH_MIN: usize = 8;
 /// A row this far outside the visible part of the list is skipped, not laid out.
 const CULL_MARGIN: f32 = 240.0;
 /// The service's default limit of one message, until its status says otherwise.
@@ -87,6 +93,102 @@ enum ConversationAction {
     Verify,
     /// The menu's "Delete this conversation's history" (opens the confirmation).
     Delete,
+}
+
+fn below_id(key: &str) -> egui::Id {
+    egui::Id::new(("height_below_list", key))
+}
+
+/// Height for the scroll area drawn next: all that is left of `ui` less what is drawn under it
+/// (measured in the previous frame by [`note_below`], so the list fills the window whatever the
+/// composer, its notes and its length counter take), and not less than `min`. Both panes of the
+/// Chat area use it, so a group and a one-to-one conversation get the same room.
+pub(crate) fn fill_height(ui: &egui::Ui, key: &str, min: f32) -> f32 {
+    let below = ui
+        .ctx()
+        .data(|d| d.get_temp::<f32>(below_id(key)))
+        .unwrap_or(BELOW_FIRST);
+    (ui.available_height() - below).max(min)
+}
+
+/// Remember how tall everything drawn since `start_y` (the bottom of the scroll area) is.
+pub(crate) fn note_below(ui: &egui::Ui, key: &str, start_y: f32) {
+    let h = (ui.min_rect().bottom() - start_y + 2.0).max(0.0);
+    let id = below_id(key);
+    let old = ui.ctx().data(|d| d.get_temp::<f32>(id));
+    if old.map_or(true, |o| (o - h).abs() > 0.5) {
+        ui.ctx().data_mut(|d| d.insert_temp(id, h));
+        ui.ctx().request_repaint();
+    }
+}
+
+/// The time under a message: hour and minute only. The day is said once by [`day_heading`].
+pub(crate) fn time_of_day(at_ms: u64, clock: Clock) -> String {
+    if at_ms == 0 {
+        String::new()
+    } else {
+        hhmm(at_ms, clock.utc_offset_secs)
+    }
+}
+
+/// Whether the message at `at_ms` is the first of its day: the first one shown, or one on another
+/// day than the message before it (`prev_ms`).
+pub(crate) fn starts_new_day(prev_ms: Option<u64>, at_ms: u64, clock: Clock) -> bool {
+    if at_ms == 0 {
+        return false;
+    }
+    match prev_ms {
+        Some(p) if p != 0 => {
+            day_index(p, clock.utc_offset_secs) != day_index(at_ms, clock.utc_offset_secs)
+        }
+        _ => true,
+    }
+}
+
+/// The heading over the first message of a day: "Today", "Yesterday" or the date.
+pub(crate) fn day_heading(c: &ChatStrings, at_ms: u64, clock: Clock, locale: Locale) -> String {
+    let gs = group_strings(locale);
+    let day = day_index(at_ms, clock.utc_offset_secs);
+    let today = day_index(clock.now_ms, clock.utc_offset_secs);
+    if day == today {
+        gs.day_today.to_owned()
+    } else if day == today - 1 {
+        gs.day_yesterday.to_owned()
+    } else {
+        when_list(c, at_ms, clock)
+    }
+}
+
+/// The text of a bubble. The bubble of my own message sits at the right, but its lines are read
+/// from the left, as in the other person's bubble: the box is first made as wide as the longest
+/// line, so the bubble stays at the right and hugs its text.
+pub(crate) fn bubble_text(ui: &mut egui::Ui, text: &str, color: egui::Color32, own: bool) {
+    if !own {
+        ui.add(egui::Label::new(RichText::new(text).color(color)).wrap(true));
+        return;
+    }
+    let avail = ui.available_width();
+    let mut job = egui::text::LayoutJob::single_section(
+        text.to_owned(),
+        egui::TextFormat::simple(egui::TextStyle::Body.resolve(ui.style()), color),
+    );
+    job.wrap.max_width = avail;
+    let widest = ui.fonts(|f| f.layout_job(job)).size().x;
+    // A little slack, so a line that just fits is not wrapped by a rounding difference.
+    ui.set_max_width((widest + 2.0).min(avail));
+    ui.with_layout(Layout::top_down(Align::Min), |ui| {
+        // Fill the box, so the bubble ends exactly at the right edge.
+        ui.set_min_width(ui.available_width());
+        ui.add(egui::Label::new(RichText::new(text).color(color)).wrap(true));
+    });
+}
+
+/// The day heading in the message list: one muted line, centred.
+pub(crate) fn day_separator(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(kit::SP_1);
+    ui.vertical_centered(|ui| {
+        ui.add(egui::Label::new(kit::meta_text(text, pal().muted)).wrap(true));
+    });
 }
 
 /// What the composer shows for `text`: whether Send works, and the length note when the text is
@@ -158,6 +260,9 @@ pub struct ChatUi {
     focus_composer: bool,
     ime_composing: bool,
     picker_open: bool,
+    /// The search over the conversation list and over the contacts of the picker.
+    list_query: String,
+    picker_query: String,
     delete_target: Option<Open>,
     /// Which open dialog appeared last (only that one stays open).
     modals: crate::modal::Order,
@@ -257,6 +362,8 @@ impl Default for ChatUi {
             focus_composer: false,
             ime_composing: false,
             picker_open: false,
+            list_query: String::new(),
+            picker_query: String::new(),
             delete_target: None,
             modals: crate::modal::Order::default(),
             verify_target: None,
@@ -1290,16 +1397,38 @@ impl ChatUi {
             }
             return;
         }
-        let (group_ix, direct_ix) = split_by_kind(&self.rows, self.group.rows());
+        let (mut group_ix, mut direct_ix) = split_by_kind(&self.rows, self.group.rows());
         let gs = group_strings(self.locale);
         kit::section(ui, c.list_title, |_| {});
+        // From a few conversations on, a search by name; with fewer the list needs none.
+        if self.rows.len() + self.group.rows().len() >= LIST_SEARCH_MIN {
+            let r = ui.add(
+                kit::input(&mut self.list_query)
+                    .hint_text(gs.search_conversations)
+                    .desired_width(ui.available_width()),
+            );
+            r.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, gs.search_conversations)
+            });
+            let q = self.list_query.trim().to_lowercase();
+            if !q.is_empty() {
+                let groups = self.group.rows();
+                group_ix.retain(|&j| groups[j].name.to_lowercase().contains(&q));
+                direct_ix.retain(|&i| self.rows[i].label.to_lowercase().contains(&q));
+                if group_ix.is_empty() && direct_ix.is_empty() {
+                    kit::paragraph_muted(ui, gs.search_conversations_none);
+                }
+            }
+        }
         egui::ScrollArea::vertical()
             .id_source("chat_list")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                // Two headings, groups then people, each newest first. The heading and the
-                // shape of the avatar say which kind a row is, not only its colour.
+                // Two headings, groups then people, each newest first. Groups come first because
+                // the invitations above belong to them and a group is the busier conversation;
+                // the heading and the shape of the avatar say which kind a row is, not only its
+                // colour.
                 if !group_ix.is_empty() {
                     section_heading(ui, gs.section_groups);
                     for &j in &group_ix {
@@ -1445,6 +1574,7 @@ impl ChatUi {
         }
 
         self.thread_view(ui, c, o);
+        let below_start = ui.min_rect().bottom();
         if self.window.is_detached() {
             ui.horizontal(|ui| {
                 if ui.add(kit::secondary_button(c.jump_latest)).clicked() {
@@ -1471,6 +1601,7 @@ impl ChatUi {
         } else {
             kit::notice(ui, Level::Warn, c.send_off_note);
         }
+        note_below(ui, "chat_thread", below_start);
     }
 
     /// What a press in the header, its menu or the composer does. Nothing here deletes without
@@ -1546,7 +1677,7 @@ impl ChatUi {
         if !self.thread_loaded {
             ui.label(RichText::new(c.loading).color(pal().muted));
         }
-        let height = (ui.available_height() - COMPOSER_RESERVE).max(140.0);
+        let height = fill_height(ui, "chat_thread", LIST_MIN_H);
         let mut area = egui::ScrollArea::vertical()
             .id_source(("chat_thread", o.endpoint_id.as_str()))
             .max_height(height)
@@ -1576,6 +1707,7 @@ impl ChatUi {
         let mut moved = false;
         // Messages whose rows really overlap the visible part (not the culling margin).
         let mut in_view: Vec<usize> = Vec::new();
+        let locale = self.locale;
         let out = area.show_viewport(ui, |ui, viewport| {
             ui.spacing_mut().item_spacing.y = kit::SP_2;
             let spacing = kit::SP_2;
@@ -1586,7 +1718,14 @@ impl ChatUi {
                 kit::paragraph_muted(ui, c.empty_thread);
             }
             let mut y = 0.0f32;
+            let mut prev_ms: Option<u64> = None;
             for e in timeline {
+                let at_ms = match *e {
+                    Entry::Msg(i) => msgs[i].at_ms,
+                    Entry::File(i) => notes[i].at_ms,
+                };
+                let new_day = starts_new_day(prev_ms, at_ms, clock);
+                prev_ms = Some(at_ms);
                 let (key, est) = match *e {
                     Entry::Msg(i) => {
                         let m = &msgs[i];
@@ -1611,25 +1750,30 @@ impl ChatUi {
                             in_view.push(i);
                         }
                     }
-                    let r = ui.vertical(|ui| match *e {
-                        Entry::Msg(i) => message_row(
-                            ui,
-                            c,
-                            &msgs[i],
-                            clock,
-                            bubble_w,
-                            relay_down,
-                            latest_own == Some(i),
-                        ),
-                        Entry::File(i) => {
-                            let st = file_states
-                                .get(&notes[i].id)
-                                .cloned()
-                                .unwrap_or(FileStatus::Waiting);
-                            if file_row(ui, c, &notes[i], &st, clock) {
-                                file_retry = Some((contact_id.clone(), notes[i].path.clone()));
+                    let r = ui.vertical(|ui| {
+                        if new_day {
+                            day_separator(ui, &day_heading(c, at_ms, clock, locale));
+                        }
+                        match *e {
+                            Entry::Msg(i) => message_row(
+                                ui,
+                                c,
+                                &msgs[i],
+                                clock,
+                                bubble_w,
+                                relay_down,
+                                latest_own == Some(i),
+                            ),
+                            Entry::File(i) => {
+                                let st = file_states
+                                    .get(&notes[i].id)
+                                    .cloned()
+                                    .unwrap_or(FileStatus::Waiting);
+                                if file_row(ui, c, &notes[i], &st, clock) {
+                                    file_retry = Some((contact_id.clone(), notes[i].path.clone()));
+                                }
+                                None
                             }
-                            None
                         }
                     });
                     let measured = r.response.rect.height();
@@ -1822,14 +1966,36 @@ impl ChatUi {
                 if contacts.is_empty() {
                     kit::paragraph(ui, c.pick_none);
                 }
+                let gs = group_strings(self.locale);
+                let mut offered = picker_order(contacts);
+                if contacts.len() >= PICKER_SEARCH_MIN {
+                    let r = ui.add(
+                        kit::input(&mut self.picker_query)
+                            .hint_text(gs.ng_search_hint)
+                            .desired_width(ui.available_width()),
+                    );
+                    r.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, gs.ng_search_hint)
+                    });
+                    let q = self.picker_query.trim().to_lowercase();
+                    if !q.is_empty() {
+                        offered.retain(|ct| ct.label.to_lowercase().contains(&q));
+                        if offered.is_empty() {
+                            kit::paragraph_muted(ui, gs.ng_no_match);
+                        }
+                    }
+                }
                 egui::ScrollArea::vertical()
                     .max_height(320.0)
                     .show(ui, |ui| {
-                        for ct in picker_order(contacts) {
+                        // Every contact button is as wide as the list, not as wide as its name.
+                        let button_w = ui.available_width();
+                        for ct in offered {
                             let r = crate::form_check::add_enabled(
                                 ui,
                                 ct.allow_send,
-                                kit::secondary_button(elide(&ct.label, NAME_CHARS)),
+                                kit::secondary_button(elide(&ct.label, NAME_CHARS))
+                                    .min_size(vec2(button_w, 0.0)),
                             );
                             let r = if ct.allow_send {
                                 r
@@ -2043,10 +2209,10 @@ fn message_row(
             .inner_margin(egui::Margin::symmetric(kit::SP_3, kit::SP_2))
             .show(ui, |ui| {
                 ui.set_max_width(bubble_w);
-                ui.add(egui::Label::new(RichText::new(&m.text).color(p.text)).wrap(true));
+                bubble_text(ui, &m.text, p.text, own);
             });
     });
-    let when = when_message(c, m.at_ms, clock);
+    let when = time_of_day(m.at_ms, clock);
     let state = state_label(c, delivery);
     let state_color = match delivery {
         Delivery::Failed => p.danger,
@@ -2126,7 +2292,7 @@ fn file_row(
                     retry = true;
                 }
             }
-            let when = when_message(c, note.at_ms, clock);
+            let when = time_of_day(note.at_ms, clock);
             if !when.is_empty() {
                 ui.label(kit::meta_text(when, p.muted));
             }
@@ -3656,7 +3822,7 @@ mod tests {
                         "{ctx}: the header {header:?} is not drawn"
                     );
                     assert!(
-                        !self.has_text(group_strings(Locale::En).a11y_composer),
+                        !self.has_text(group_strings(Locale::En).a11y_group_composer),
                         "{ctx}: the group composer is drawn"
                     );
                 }
@@ -3739,5 +3905,197 @@ mod tests {
     #[test]
     fn people_and_groups_open_in_turn_wide_by_automation() {
         people_and_groups_in_turn(1400.0, Press::Invoke);
+    }
+    // ── Layout and behaviour of the message list ──────────────────────────────────────────────
+
+    fn bounds_of(rig: &ChatRig, name: &str) -> accesskit::Rect {
+        rig.last
+            .iter()
+            .find(|(_, n)| n.name() == Some(name))
+            .and_then(|(_, n)| n.bounds())
+            .unwrap_or_else(|| panic!("no {name:?} with bounds"))
+    }
+
+    #[test]
+    fn both_conversation_kinds_give_the_list_all_the_room_the_composer_leaves() {
+        // A 900 px tall window: the composer sits at the foot of the pane in a one-to-one
+        // conversation and in a group alike (before, the list stopped 100 to 200 px short of it).
+        let cs = chat_strings(Locale::En);
+        let gs = group_strings(Locale::En);
+        let direct = ChatRig::new("thread", 1400.0);
+        let group = ChatRig::new("group", 1400.0);
+        let d = bounds_of(&direct, cs.a11y_composer);
+        let g = bounds_of(&group, gs.a11y_group_composer);
+        assert!(d.y1 > 900.0 - 150.0, "one-to-one composer ends at {}", d.y1);
+        assert!(g.y1 > 900.0 - 150.0, "group composer ends at {}", g.y1);
+        assert!(
+            (d.y1 - g.y1).abs() < 60.0,
+            "the two panes differ: {} and {}",
+            d.y1,
+            g.y1
+        );
+    }
+
+    #[test]
+    fn fill_height_uses_what_was_measured_under_the_list() {
+        let ctx = egui::Context::default();
+        kit::apply_theme(&ctx, false);
+        let mut seen: Vec<f32> = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    vec2(600.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    seen.push(fill_height(ui, "test_list", LIST_MIN_H));
+                    ui.allocate_space(vec2(10.0, 300.0));
+                    let start = ui.min_rect().bottom();
+                    ui.allocate_space(vec2(10.0, 30.0));
+                    note_below(ui, "test_list", start);
+                });
+            });
+        }
+        // The first frame assumes a default; the next ones use the 30 px really drawn under it.
+        assert!(seen[0] >= LIST_MIN_H);
+        assert!(seen[2] > seen[0], "{seen:?}");
+        assert!((seen[2] - seen[1]).abs() < 0.5, "{seen:?}");
+        assert_eq!(LIST_MIN_H, 140.0);
+    }
+
+    #[test]
+    fn the_group_composer_is_named_like_the_direct_one_and_has_the_paperclip_too() {
+        let cs = chat_strings(Locale::En);
+        let gs = group_strings(Locale::En);
+        let rig = ChatRig::new("group", 1400.0);
+        assert!(rig.has_text(gs.a11y_group_composer));
+        assert_eq!(gs.a11y_group_composer, "Message input for the group");
+        assert_eq!(gs.a11y_group_send, "Send message to the group");
+        // The paperclip carries the same name as in a one-to-one conversation.
+        let _ = rig.button(cs.a11y_attach);
+        // The send button, and the note that a group takes no file with the way to a contact.
+        let _ = rig.button(gs.a11y_group_send);
+        assert!(rig.has_text(gs.group_file_note));
+        let _ = rig.button(gs.a11y_group_file_button);
+        // The header has the "..." menu of the other conversations.
+        let _ = rig.button(crate::locale::compose_strings(Locale::En).a11y_menu);
+    }
+
+    #[test]
+    fn only_the_newest_waiting_group_message_explains_what_waiting_means() {
+        let gs = group_strings(Locale::En);
+        let rig = ChatRig::new("group", 1400.0);
+        let count = rig
+            .last
+            .iter()
+            .filter(|(_, n)| n.name() == Some(gs.waiting_note))
+            .count();
+        assert_eq!(count, 1, "the note under the newest message of mine, once");
+    }
+
+    #[test]
+    fn a_search_field_shows_up_with_many_conversations_and_filters_the_list() {
+        let gs = group_strings(Locale::En);
+        let has_search = |rig: &ChatRig| {
+            rig.last
+                .iter()
+                .any(|(_, n)| n.name() == Some(gs.search_conversations))
+        };
+        let few = ChatRig::new("list", 1400.0);
+        assert!(!has_search(&few), "no search for a short list");
+        let mut many = ChatRig::new("list", 1400.0);
+        let template = many.chat.rows[0].clone();
+        for k in 0..LIST_SEARCH_MIN {
+            let mut r = template.clone();
+            r.contact_id = format!("extra{k}");
+            r.endpoint_id = format!("extra-ep{k}");
+            r.label = format!("Extra {k}");
+            many.chat.rows.push(r);
+        }
+        many.chat.list_query = "Extra 3".to_owned();
+        many.frames(3);
+        assert!(has_search(&many));
+        let named = |rig: &ChatRig, part: &str| {
+            rig.last
+                .iter()
+                .any(|(_, n)| n.name().is_some_and(|x| x.contains(part)))
+        };
+        assert!(named(&many, "Extra 3"));
+        assert!(!named(&many, "Extra 5"));
+    }
+
+    #[test]
+    fn dates_are_said_once_per_day() {
+        let clock = Clock {
+            now_ms: 1_792_074_600_000, // 2026-10-15 14:30 UTC
+            utc_offset_secs: 0,
+        };
+        let day = 86_400_000u64;
+        let now = clock.now_ms;
+        // The first message shown starts a day; the next one on the same day does not.
+        assert!(starts_new_day(None, now, clock));
+        assert!(!starts_new_day(Some(now - 60_000), now, clock));
+        assert!(starts_new_day(Some(now - day), now, clock));
+        assert!(starts_new_day(Some(0), now, clock));
+        assert!(!starts_new_day(Some(now), 0, clock));
+        // Under a message only the time stays, whatever day it is.
+        assert_eq!(time_of_day(now, clock), "14:30");
+        assert_eq!(time_of_day(now - 3 * day, clock), "14:30");
+        assert_eq!(time_of_day(0, clock), "");
+        // The heading says "Today", "Yesterday", or the date.
+        for locale in Locale::ALL {
+            let c = chat_strings(locale);
+            let gs = group_strings(locale);
+            assert_eq!(day_heading(c, now, clock, locale), gs.day_today);
+            assert_eq!(day_heading(c, now - day, clock, locale), gs.day_yesterday);
+            assert_eq!(
+                day_heading(c, now - 5 * day, clock, locale),
+                when_list(c, now - 5 * day, clock)
+            );
+        }
+    }
+
+    #[test]
+    fn the_bubble_of_my_message_hugs_its_text_at_the_right() {
+        let ctx = egui::Context::default();
+        kit::apply_theme(&ctx, false);
+        let long = "A longer line of text that has to be wrapped at some point because it is long, long, long, long, long, long, long.";
+        let mut rects: Vec<(f32, f32, f32)> = Vec::new();
+        for _ in 0..2 {
+            rects.clear();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    vec2(600.0, 400.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let edge = ui.max_rect().right();
+                    for text in ["Hi", long] {
+                        let r = ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                            egui::Frame::none().show(ui, |ui| {
+                                ui.set_max_width(200.0);
+                                bubble_text(ui, text, egui::Color32::WHITE, true);
+                            })
+                        });
+                        let rect = r.inner.response.rect;
+                        rects.push((rect.left(), rect.right(), edge));
+                    }
+                });
+            });
+        }
+        let (short, wrapped) = (rects[0], rects[1]);
+        // Both stay at the right edge of the column.
+        assert!((short.1 - short.2).abs() < 1.5, "{short:?}");
+        assert!((wrapped.1 - wrapped.2).abs() < 1.5, "{wrapped:?}");
+        // The short one hugs its text; the long one is wrapped within its 200 px.
+        assert!(short.1 - short.0 < 60.0, "{short:?}");
+        assert!(wrapped.1 - wrapped.0 <= 201.0, "{wrapped:?}");
+        assert!(wrapped.1 - wrapped.0 > 100.0, "{wrapped:?}");
     }
 }
