@@ -114,28 +114,43 @@ have reached existing installs. The file carries
 as 0), and `pqc_mode` is written only when set. The default has moved twice:
 version 1 made it `prefer`, and **this release (beta.12) raises it to
 `require`** as version 2. Each step is applied once, when the file is first read
-under an older version, and the file is then rewritten by the next save:
+under an older version, and the file is then rewritten by the next save.
+beta.12 carries forward the two values a pre-beta.12 default left behind, so no
+install is left on a setting that would allow a silent classical fallback:
 
 * version 0 with `pqc_mode = "off"` (or without the key): the version-0 default
   wrote that `off`, so it was never chosen. It is cleared, and the current
   default (`require`) applies;
-* the `prefer` default that version 1 left in force was never written to the
-  file (it was the unset default), so a version-1 file with no `pqc_mode` moves
-  to the `require` default as well;
-* any `off`, `prefer` or `require` a person wrote at version 1 or later is a
-  choice and is kept as it is.
+* `pqc_mode = "prefer"` at version 0 or 1 is the old standard default carried
+  over: `prefer` was the standard choice in the pre-beta.12 screen, so a person
+  who left the screen alone ended up with it. beta.12 reads it as the carried
+  default, not an advanced choice, and moves it to `require`. This also covers
+  the version-1 default that was never written to the file (a version-1 file
+  with no `pqc_mode`), which resolves to `require` the same way;
+* an `off` recorded at version 1, and any `off`, `prefer` or `require` set at
+  version 2 or later, is an explicit choice and is kept as it is.
 
-So the migration to `require` happens **once, on the first start under beta.12**:
-an install that never chose a value moves from the old default to `require`,
-and an install that did choose keeps its choice (including `off` or `prefer`,
-which then warn about the classical fallback). No manual step is needed. Known
-limit: a version-0 file cannot show whether `off` was chosen or only saved as
-the old default (for example someone who tried a value and went back), so those
-people get `require` and can set `off` or `prefer` again by hand or with
+So the migration to `require` happens **once, on the first start under beta.12**.
+An install that never chose a value, and one that only carried the old `prefer`
+default (unset, or `prefer` written by the old screen), both move to `require`.
+An explicit `off` from version 1, and any value set at version 2 or later, stay
+as chosen (an `off` or `prefer` kept this way then warns about the classical
+fallback). No manual step is needed. Known limit: a version-0 file cannot show
+whether `off` was chosen or only saved as the old default (for example someone
+who tried a value and went back), so those people get `require` and can set
+`off` or `prefer` again by hand or with
 `miasma config --key privacy.pqc_mode --value off`. A choice made after the
 migration is kept. If an older build rewrites the file, it drops the version
 key and writes `off` again, and the next start of this build reads it as never
 chosen (so `require` applies).
+
+What each (version, value) reaches after the first beta.12 start:
+
+| version | unset     | `off`             | `prefer`  | `require`      |
+|---------|-----------|-------------------|-----------|----------------|
+| 0       | `require` | `require` (cleared) | `require` | `require` (kept) |
+| 1       | `require` | `off` (kept)      | `require` | `require` (kept) |
+| 2       | `require` | `off` (kept)      | `prefer` (kept) | `require` (kept) |
 
 ## Mobile
 
