@@ -1660,7 +1660,8 @@ pub fn conversation_header(
         },
         None => HeaderEnd::None,
     };
-    conversation_header_ex(ui, Some(back_name), title, subtitle, end).back
+    let lines: Vec<(&str, Color32)> = subtitle.into_iter().collect();
+    conversation_header_ex(ui, Some(back_name), title, &lines, end).back
 }
 
 /// What the right end of a conversation header holds.
@@ -1692,7 +1693,7 @@ pub fn conversation_header_ex(
     ui: &mut Ui,
     back_name: Option<&str>,
     title: &str,
-    subtitle: Option<(&str, Color32)>,
+    subtitles: &[(&str, Color32)],
     end: HeaderEnd<'_>,
 ) -> HeaderOut {
     let mut out = HeaderOut::default();
@@ -1712,8 +1713,8 @@ pub fn conversation_header_ex(
                 .truncate(true),
             )
             .on_hover_text(title);
-            if let Some((text, color)) = subtitle {
-                ui.add(Label::new(meta_text(text, color)).truncate(true));
+            for (text, color) in subtitles {
+                ui.add(Label::new(meta_text(*text, *color)).truncate(true));
             }
         });
         match end {

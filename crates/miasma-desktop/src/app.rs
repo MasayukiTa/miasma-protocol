@@ -2931,23 +2931,38 @@ impl MiasmaApp {
                                     self.set_msg(MsgKind::Info, s.settings_path_copied);
                                 }
                             });
-                            g.mono(
-                                s.settings_config_file,
-                                &format!("{}{sep}config.toml", &self.data_dir_display),
-                            );
+                            let config_path = format!("{}{sep}config.toml", &self.data_dir_display);
+                            g.row(s.settings_config_file, |ui| {
+                                if kit::mono_copy(ui, &config_path, s.copy) {
+                                    self.set_msg(MsgKind::Info, s.settings_path_copied);
+                                }
+                            });
                             let log_where = if self.logs.writes_files {
                                 format!("{}{sep}lg", &self.data_dir_display)
                             } else {
                                 self.lg().memory_only.to_owned()
                             };
-                            g.mono(s.settings_log, &log_where);
+                            if self.logs.writes_files {
+                                g.row(s.settings_log, |ui| {
+                                    if kit::mono_copy(ui, &log_where, s.copy) {
+                                        self.set_msg(MsgKind::Info, s.settings_path_copied);
+                                    }
+                                });
+                            } else {
+                                g.mono(s.settings_log, &log_where);
+                            }
                             g.mono(
                                 crate::buildinfo::build_row_label(self.locale),
                                 &crate::buildinfo::build_row_value(),
                             );
                             if let Ok(exe) = std::env::current_exe() {
                                 if let Some(dir) = exe.parent() {
-                                    g.mono(s.settings_install, &dir.to_string_lossy());
+                                    let install = dir.to_string_lossy().into_owned();
+                                    g.row(s.settings_install, |ui| {
+                                        if kit::mono_copy(ui, &install, s.copy) {
+                                            self.set_msg(MsgKind::Info, s.settings_path_copied);
+                                        }
+                                    });
                                 }
                             }
                         });
@@ -4097,10 +4112,15 @@ impl MiasmaApp {
                 let ct = locale::contact_strings(self.locale);
                 let contacts_label = match self.contacts.unseen() {
                     0 => ct.tab.to_owned(),
-                    n => format!("{} ({n} {})", ct.tab, ct.nav_new),
+                    n => {
+                        crate::uitext::tab_with_new(self.locale, ct.tab, &n.to_string(), ct.nav_new)
+                    }
                 };
-                let chat_label =
-                    crate::chat::nav_label(locale::chat_strings(self.locale), self.chat.unseen());
+                let chat_label = crate::chat::nav_label(
+                    self.locale,
+                    locale::chat_strings(self.locale),
+                    self.chat.unseen(),
+                );
                 let send_label = if easy { s.tab_send_easy } else { s.tab_send };
                 let inbox_label = if easy { s.tab_inbox_easy } else { s.tab_inbox };
                 let outbox_label = if easy {
@@ -5253,13 +5273,13 @@ mod tests {
     #[test]
     fn dialogs_opened_through_assistive_technology_never_break_the_platform_tree() {
         let c = locale::contact_strings(Locale::En);
-        // Chat: New conversation, Create a new group.
+        // Chat: New conversation, New group (the spoken name is the one on the button).
         let mut rig = A11yRig::new(Tab::Chat);
         rig.app.chat = ChatUi::fixture("list").unwrap();
         rig.app.contacts = ContactsUi::fixture("two", c).unwrap();
         rig.frames(3);
         invoke_opens_a_dialog(&mut rig, "New conversation");
-        invoke_opens_a_dialog(&mut rig, "Create a new group");
+        invoke_opens_a_dialog(&mut rig, "New group");
         // Contacts: Add a contact, My invitation.
         let mut rig = A11yRig::new(Tab::Contacts);
         rig.app.contacts = ContactsUi::fixture("two", c).unwrap();
@@ -5695,6 +5715,82 @@ mod tests {
                     right <= width,
                     "{l:?} {mode:?}: a tab ends at {right}, past {width}"
                 );
+            }
+        }
+    }
+
+    /// The smallest window the app allows is 700 px wide (see `main.rs`). No button, tab, radio
+    /// button or check box of any page may run past the right edge there, in every language and
+    /// in both modes, so the wording changed for the beta.12 review cannot clip a control.
+    #[test]
+    fn no_control_runs_past_the_right_edge_at_the_minimum_window_width() {
+        assert!(
+            include_str!("main.rs").contains("with_min_inner_size([700.0, 480.0])"),
+            "main.rs no longer has the 700 px minimum this test is about"
+        );
+        let (width, height) = (700.0_f32, 480.0_f32);
+        let pages = [
+            Tab::Home,
+            Tab::Files,
+            Tab::Contacts,
+            Tab::Chat,
+            Tab::Transfers,
+            Tab::Retrieve,
+            Tab::Send,
+            Tab::Inbox,
+            Tab::Outbox,
+            Tab::Status,
+            Tab::Settings,
+        ];
+        for l in Locale::ALL {
+            for mode in [ProductMode::Easy, ProductMode::Technical] {
+                for page in pages {
+                    let ctx = egui::Context::default();
+                    ctx.enable_accesskit();
+                    let data = tempfile::tempdir().unwrap();
+                    let mut app = MiasmaApp::new_with_ctx(
+                        &ctx,
+                        None,
+                        mode,
+                        l,
+                        ThemeMode::Light,
+                        data.path().to_path_buf(),
+                        LaunchIntent::Normal,
+                    );
+                    app.tab = page;
+                    let mut right = 0.0_f32;
+                    for _ in 0..4 {
+                        app.daemon_state = DaemonState::Connected;
+                        let raw = egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::pos2(0.0, 0.0),
+                                egui::vec2(width, height),
+                            )),
+                            ..Default::default()
+                        };
+                        let out = ctx.run(raw, |ctx| app.update_frame(ctx, None));
+                        let update = out.platform_output.accesskit_update.expect("a tree");
+                        right = 0.0;
+                        for (_, n) in &update.nodes {
+                            let control = matches!(
+                                n.role(),
+                                accesskit::Role::Button
+                                    | accesskit::Role::Tab
+                                    | accesskit::Role::RadioButton
+                                    | accesskit::Role::CheckBox
+                            );
+                            if control {
+                                if let Some(b) = n.bounds() {
+                                    right = right.max(b.x1 as f32);
+                                }
+                            }
+                        }
+                    }
+                    assert!(
+                        right <= width,
+                        "{l:?} {mode:?} {page:?}: a control ends at {right}, past {width}"
+                    );
+                }
             }
         }
     }

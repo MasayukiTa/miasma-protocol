@@ -467,7 +467,7 @@ enum Commands {
     ///
     /// Both sides register each other (`contact code` -> `contact add`); the
     /// receiver then accepts files from registered contacts only, with no
-    /// Share ID, password or confirmation code per file.
+    /// Share ID, password or one-time code per file.
     Contact {
         #[command(subcommand)]
         action: push_cmd::ContactCmd,

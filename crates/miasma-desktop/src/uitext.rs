@@ -12,16 +12,25 @@ fn pick(locale: Locale, en: &'static str, ja: &'static str, zh: &'static str) ->
     }
 }
 
+/// A tab name with the number of new arrivals. English and Chinese: `Chat (3 new)`; Japanese uses
+/// full-width brackets and puts the count after the word: `チャット（新着3）`.
+pub fn tab_with_new(l: Locale, name: &str, count: &str, new_word: &str) -> String {
+    match l {
+        Locale::Ja => format!("{name}（{new_word}{count}）"),
+        Locale::En | Locale::ZhCn => format!("{name} ({count} {new_word})"),
+    }
+}
+
 pub fn created_label(l: Locale) -> &'static str {
-    pick(l, "Created:", "作成:", "创建时间：")
+    pick(l, "Created:", "作成：", "创建时间：")
 }
 
 pub fn expires_label(l: Locale) -> &'static str {
-    pick(l, "Expires:", "期限:", "到期时间：")
+    pick(l, "Expires:", "期限：", "到期时间：")
 }
 
 pub fn envelope_id_label(l: Locale) -> &'static str {
-    pick(l, "Envelope ID:", "送付ID:", "信封 ID：")
+    pick(l, "Envelope ID:", "送付ID：", "信封 ID：")
 }
 
 pub fn text_files_filter(l: Locale) -> &'static str {
@@ -341,6 +350,33 @@ mod tests {
         for l in Locale::ALL {
             assert!(!unknown_sender(l).is_empty());
         }
+    }
+
+    #[test]
+    fn a_tab_with_new_arrivals_uses_the_brackets_of_its_language() {
+        assert_eq!(tab_with_new(Locale::En, "Chat", "3", "new"), "Chat (3 new)");
+        assert_eq!(
+            tab_with_new(Locale::Ja, "チャット", "3", "新着"),
+            "チャット（新着3）"
+        );
+        assert_eq!(tab_with_new(Locale::ZhCn, "聊天", "3", "新"), "聊天 (3 新)");
+    }
+
+    #[test]
+    fn japanese_labels_end_in_the_full_width_colon() {
+        for label in [created_label(Locale::Ja), expires_label(Locale::Ja)] {
+            assert!(label.ends_with('：'), "{label}");
+        }
+        assert!(envelope_id_label(Locale::Ja).ends_with('：'));
+    }
+
+    #[test]
+    fn the_restore_segment_uses_the_word_of_the_restore_tab_in_chinese() {
+        // One word for restoring in zh-CN: the tab, the button and the Technical segment.
+        let zh = crate::locale::strings(Locale::ZhCn);
+        assert!(zh.tab_retrieve.contains("恢复"));
+        assert!(retrieve_by_id(Locale::ZhCn).contains("恢复"));
+        assert!(!retrieve_by_id(Locale::ZhCn).contains("取得"));
     }
 
     #[test]
