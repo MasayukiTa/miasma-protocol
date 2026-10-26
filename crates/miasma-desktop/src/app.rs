@@ -3090,23 +3090,22 @@ impl MiasmaApp {
                 }
             });
             // What the protection is and what each choice does: opened on request.
-            egui::CollapsingHeader::new(kit::muted_text(crate::uitext::details_of(
-                locale, p.heading,
-            )))
-            .id_source("settings_pqc_details")
-            .default_open(false)
-            .show_a11y(ui, |ui| {
-                kit::paragraph_muted(ui, p.intro);
-                for (label, help) in [
-                    (p.off, p.off_help),
-                    (p.prefer, p.prefer_help),
-                    (p.require, p.require_help),
-                ] {
-                    ui.add_space(kit::SP_1);
-                    ui.label(RichText::new(label).strong());
-                    kit::hint(ui, help);
-                }
-            });
+            let details_title = crate::uitext::details_of(locale, p.heading);
+            egui::CollapsingHeader::new(kit::muted_text(details_title))
+                .id_source("settings_pqc_details")
+                .default_open(false)
+                .show_a11y(ui, |ui| {
+                    kit::paragraph_muted(ui, p.intro);
+                    for (label, help) in [
+                        (p.off, p.off_help),
+                        (p.prefer, p.prefer_help),
+                        (p.require, p.require_help),
+                    ] {
+                        ui.add_space(kit::SP_1);
+                        ui.label(RichText::new(label).strong());
+                        kit::hint(ui, help);
+                    }
+                });
             if available {
                 ui.add_space(kit::SP_1);
                 kit::hint(ui, p.restart_note);

@@ -182,14 +182,13 @@ impl HostingUi {
                 SaveState::Failed => kit::notice(ui, Level::Error, s.save_failed),
             }
             // What this setting does: opened on request.
-            egui::CollapsingHeader::new(kit::muted_text(crate::uitext::details_of(
-                locale, s.heading,
-            )))
-            .id_source("settings_hosting_details")
-            .default_open(false)
-            .show_a11y(ui, |ui| {
-                kit::paragraph_muted(ui, s.intro);
-            });
+            let details_title = crate::uitext::details_of(locale, s.heading);
+            egui::CollapsingHeader::new(kit::muted_text(details_title))
+                .id_source("settings_hosting_details")
+                .default_open(false)
+                .show_a11y(ui, |ui| {
+                    kit::paragraph_muted(ui, s.intro);
+                });
         });
     }
 }
