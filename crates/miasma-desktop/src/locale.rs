@@ -84,6 +84,7 @@ pub struct Strings {
     pub store_share_hint_easy: &'static str,
     pub store_busy: &'static str,
     pub store_not_connected_hint: &'static str,
+    pub files_not_connected_hint: &'static str,
 
     // ── Retrieve panel ──
     pub retrieve_heading: &'static str,
@@ -398,6 +399,7 @@ impl Strings {
             ("store_share_hint_easy", self.store_share_hint_easy),
             ("store_busy", self.store_busy),
             ("store_not_connected_hint", self.store_not_connected_hint),
+            ("files_not_connected_hint", self.files_not_connected_hint),
             ("retrieve_heading", self.retrieve_heading),
             ("retrieve_heading_easy", self.retrieve_heading_easy),
             ("retrieve_desc", self.retrieve_desc),
@@ -701,6 +703,7 @@ static EN: Strings = Strings {
     store_share_hint_easy: "Save this ID — you'll need it to get your content back.",
     store_busy: "Storing file...",
     store_not_connected_hint: "Start the app first to save content.",
+    files_not_connected_hint: "These actions need the background service. Follow the card at the top of the window to finish setup or wait for it to start.",
 
     retrieve_heading: "Retrieve Content",
     retrieve_heading_easy: "Restore Content",
@@ -995,6 +998,7 @@ static JA: Strings = Strings {
     store_share_hint_easy: "このIDを保存してください。取り出すときに必要です。",
     store_busy: "保存中...",
     store_not_connected_hint: "保存するにはアプリを起動してください。",
+    files_not_connected_hint: "これらの操作にはバックグラウンド機能が必要です。画面上部のカードに従って、セットアップを済ませるか起動を待ってください。",
 
     retrieve_heading: "コンテンツ取得",
     retrieve_heading_easy: "復元",
@@ -1289,6 +1293,7 @@ static ZH_CN: Strings = Strings {
     store_share_hint_easy: "请保存此 ID，恢复内容时需要使用。",
     store_busy: "正在存储...",
     store_not_connected_hint: "请先启动应用再保存内容。",
+    files_not_connected_hint: "这些操作需要后台服务。请按照窗口顶部的卡片完成设置或等待其启动。",
 
     retrieve_heading: "恢复内容",
     retrieve_heading_easy: "恢复内容",
@@ -1964,7 +1969,7 @@ static TR_EN: TransferStrings = TransferStrings {
     no_path_hint: "The save location is not known any more. Start the transfer again from the form below.",
 
     new_heading: "New transfer",
-    forms_offline: "Start the background service first (see the top of the window).",
+    forms_offline: "The background service is not ready yet. Finish setup or wait for it to start, then try again.",
     recv_path_label: "Save to",
     recv_path_hint: "Where to write the finished file",
     recv_name_lookup: "Looking up the file name...",
@@ -2120,7 +2125,7 @@ static TR_JA: TransferStrings = TransferStrings {
     no_path_hint: "保存先が分からなくなりました。下のフォームからもう一度転送を開始してください。",
 
     new_heading: "新しい転送",
-    forms_offline: "先にバックグラウンドのサービスを起動してください（画面の上部を参照）。",
+    forms_offline: "バックグラウンドのサービスがまだ準備できていません。セットアップを済ませるか、起動を待ってから、もう一度お試しください。",
     recv_path_label: "保存先",
     recv_path_hint: "完成したファイルの保存先",
     recv_name_lookup: "ファイル名を確認しています...",
@@ -2276,7 +2281,7 @@ static TR_ZH_CN: TransferStrings = TransferStrings {
     no_path_hint: "已不知道保存位置。请从下方表单重新开始传输。",
 
     new_heading: "新建传输",
-    forms_offline: "请先启动后台服务（见窗口顶部）。",
+    forms_offline: "后台服务尚未就绪。请先完成设置或等待其启动，然后重试。",
     recv_path_label: "保存到",
     recv_path_hint: "完成后文件的保存位置",
     recv_name_lookup: "正在查找文件名...",
@@ -2428,7 +2433,7 @@ static CT_EN: ContactStrings = ContactStrings {
     help_2: "2. Paste the message you got from them into \"Add a contact\" and press Add. Ask them to do the same.",
     help_3: "3. Once you have both added each other, press \"Send files\" on their row and pick the files.",
     loading: "Loading...",
-    daemon_down: "Miasma's background service is not running, so contacts are unavailable. Start it with the button at the top of the window.",
+    daemon_down: "Miasma's background service has stopped responding, so contacts are unavailable. Please wait a moment; if it does not recover, close Miasma completely and open it again.",
     push_unavailable: "Contacts are not available right now. Close Miasma and open it again. If that does not help, save the report in Settings and contact support.",
     old_daemon: "The background service does not answer contact requests. It is probably an older version. Close Miasma completely and start it again. If that does not help, update both the app and the background service.",
     retry_now: "Try again",
@@ -2610,7 +2615,7 @@ static CT_JA: ContactStrings = ContactStrings {
     help_2: "2. 相手から届いたメッセージを「連絡先を追加」に貼り付けて、「追加」を押します。相手にも同じようにしてもらいます。",
     help_3: "3. お互いに登録できたら、相手の行の「ファイルを送る」を押して、ファイルを選びます。",
     loading: "読み込み中です...",
-    daemon_down: "Miasmaのバックグラウンド機能が止まっているため、連絡先を使えません。画面上部のボタンで起動してください。",
+    daemon_down: "Miasmaのバックグラウンド機能が応答しなくなり、連絡先を使えません。少し待ってください。直らないときは、Miasmaを完全に閉じてから、もう一度開いてください。",
     push_unavailable: "連絡先はいま使えない状態です。Miasmaを閉じてから、もう一度開いてください。直らないときは、設定でレポートを保存して、サポートに送ってください。",
     old_daemon: "バックグラウンド機能が連絡先の要求に応答しません。古いバージョンかもしれません。Miasmaを完全に終了して、もう一度起動してください。直らないときは、アプリとバックグラウンド機能の両方を最新にしてください。",
     retry_now: "もう一度試す",
@@ -2793,7 +2798,7 @@ static CT_ZH_CN: ContactStrings = ContactStrings {
     help_2: "2. 把对方发来的消息粘贴到“添加联系人”中，然后点击“添加”。也请对方同样操作。",
     help_3: "3. 双方都添加完成后，点击对方那一行的“发送文件”，选择要发送的文件。",
     loading: "正在加载...",
-    daemon_down: "Miasma 的后台服务没有运行，因此无法使用联系人。请点击窗口顶部的按钮启动它。",
+    daemon_down: "Miasma 的后台服务已停止响应，因此无法使用联系人。请稍候；若未恢复，请完全关闭 Miasma 后再次打开。",
     push_unavailable: "联系人功能暂时无法使用。请关闭 Miasma 后重新打开。若仍然无法解决，请在设置中保存报告并联系支持。",
     old_daemon: "后台服务没有响应联系人请求，可能是旧版本。请完全退出 Miasma 后重新打开。若仍然无法解决，请将应用和后台服务都更新到最新版。",
     retry_now: "重试",
@@ -3057,7 +3062,7 @@ static CH_EN: ChatStrings = ChatStrings {
     heading: "Chat",
     desc: "Send short text messages to the contacts you have added. To send a file, use \"Send a file\".",
     loading: "Loading...",
-    daemon_down: "Miasma's background service is not running, so chat is unavailable. Start it with the button at the top of the window.",
+    daemon_down: "Miasma's background service has stopped responding, so chat is unavailable. Please wait a moment; if it does not recover, close Miasma completely and open it again.",
     unavailable: "Chat is not available right now. Check that contacts work, then restart Miasma.",
     old_daemon: "The background service does not answer chat requests. It is probably an older version. Close Miasma completely and start it again. If that does not help, update both the app and the background service.",
     retry_now: "Try again",
@@ -3154,7 +3159,7 @@ static CH_JA: ChatStrings = ChatStrings {
     heading: "チャット",
     desc: "登録した連絡先と、短い文字のメッセージをやり取りできます。ファイルは「ファイルを送る」から送れます。",
     loading: "読み込み中です...",
-    daemon_down: "Miasmaのバックグラウンド機能が止まっているため、チャットを使えません。画面上部のボタンで起動してください。",
+    daemon_down: "Miasmaのバックグラウンド機能が応答しなくなり、チャットを使えません。少し待ってください。直らないときは、Miasmaを完全に閉じてから、もう一度開いてください。",
     unavailable: "チャットはいま使えない状態です。連絡先が使えるか確認して、Miasmaを再起動してください。",
     old_daemon: "バックグラウンド機能がチャットに応答しません。古いバージョンかもしれません。Miasmaを完全に終了して、もう一度起動してください。直らないときは、アプリとバックグラウンド機能の両方を最新にしてください。",
     retry_now: "もう一度試す",
@@ -3252,7 +3257,7 @@ static CH_ZH_CN: ChatStrings = ChatStrings {
     heading: "聊天",
     desc: "可以与已添加的联系人互发简短的文字消息。发送文件请使用“发送文件”。",
     loading: "加载中...",
-    daemon_down: "Miasma 的后台服务未运行，无法使用聊天。请点击窗口顶部的按钮启动。",
+    daemon_down: "Miasma 的后台服务已停止响应，无法使用聊天。请稍候；若未恢复，请完全关闭 Miasma 后再次打开。",
     unavailable: "聊天目前不可用。请确认联系人功能正常，然后重启 Miasma。",
     old_daemon: "后台服务不响应聊天请求，可能是旧版本。请完全退出 Miasma 后重新启动。若仍不行，请将应用和后台服务都更新到最新版本。",
     retry_now: "重试",
@@ -3605,7 +3610,7 @@ static SG_EN: StorageStrings = StorageStrings {
     skipped: "Left in place (in use or unsafe): {ids}",
     nothing: "Nothing was deleted.",
     note_unsupported: "This background service is older and does not support storage management. Close Miasma completely and start it again.",
-    note_unavailable: "The background service is not running, so the stored shares cannot be listed. Start it with the button at the top of the window.",
+    note_unavailable: "The background service is not running, so the stored shares cannot be listed. Finish setup or wait for it to start, then try again.",
 };
 
 static SG_JA: StorageStrings = StorageStrings {
@@ -3632,7 +3637,7 @@ static SG_JA: StorageStrings = StorageStrings {
     skipped: "そのまま残しました(使用中または安全でないため): {ids}",
     nothing: "削除したものはありません。",
     note_unsupported: "このバックグラウンド機能は古く、ストレージ管理に対応していません。Miasmaを完全に終了して、もう一度起動してください。",
-    note_unavailable: "バックグラウンド機能が起動していないため、保存している共有を一覧できません。画面上部のボタンで起動してください。",
+    note_unavailable: "バックグラウンド機能が起動していないため、保存している共有を一覧できません。セットアップを済ませるか、起動を待ってから、もう一度お試しください。",
 };
 
 static SG_ZH_CN: StorageStrings = StorageStrings {
@@ -3659,7 +3664,7 @@ static SG_ZH_CN: StorageStrings = StorageStrings {
     skipped: "已保留（使用中或不安全）：{ids}",
     nothing: "没有删除任何内容。",
     note_unsupported: "此后台服务版本较旧，不支持存储管理。请完全退出 Miasma 后重新启动。",
-    note_unavailable: "后台服务未运行，无法列出已保存的共享。请点击窗口顶部的按钮启动。",
+    note_unavailable: "后台服务未运行，无法列出已保存的共享。请先完成设置或等待其启动，然后重试。",
 };
 
 // ─── Updates (Settings section and the update banner) ───────────────────────
@@ -4551,6 +4556,26 @@ mod tests {
                 "{lang:?} dashboard_quick_status empty"
             );
         }
+    }
+
+    #[test]
+    fn every_main_string_exists_in_every_locale() {
+        // Walk the whole key list, not a spot-check, so a key added in one
+        // language but missed in another is caught here.
+        for lang in Locale::ALL {
+            for (name, value) in strings(lang).all() {
+                assert!(!value.trim().is_empty(), "{lang:?} strings.{name} is empty");
+            }
+        }
+        // The files tab's not-connected reason is present and distinct per language.
+        let (en, ja, zh) = (
+            strings(Locale::En).files_not_connected_hint,
+            strings(Locale::Ja).files_not_connected_hint,
+            strings(Locale::ZhCn).files_not_connected_hint,
+        );
+        assert_ne!(en, ja);
+        assert_ne!(en, zh);
+        assert_ne!(ja, zh);
     }
 
     #[test]
