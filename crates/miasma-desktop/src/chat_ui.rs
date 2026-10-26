@@ -16,7 +16,7 @@ use miasma_core::push::ContactInfo;
 
 use crate::chat::*;
 use crate::contacts::{ContactsUi, FileStatus, SentFile};
-use crate::group::split_by_kind;
+use crate::group::{split_by_kind, PICKER_SEARCH_MIN};
 use crate::group_ui::GroupUi;
 use crate::locale::{group_strings, ChatStrings, ContactStrings, Locale};
 use crate::theme::{self, Palette};
@@ -39,8 +39,14 @@ const RETRY_CLOSED: Duration = Duration::from_secs(30);
 const STALE: Duration = Duration::from_secs(20);
 /// Height of a conversation row.
 const ROW_H: f32 = 62.0;
-/// Room kept under the message list for the composer (one row, growing to a few lines).
-const COMPOSER_RESERVE: f32 = 120.0;
+/// Room assumed under the message list in the first frame, before the composer (one row, growing
+/// to a few lines) has been measured. Every later frame uses the measured height.
+const BELOW_FIRST: f32 = 76.0;
+/// The message list is never shorter than this, however small the window.
+pub(crate) const LIST_MIN_H: f32 = 140.0;
+/// The conversation list shows a search field from this many conversations on: with fewer the
+/// whole list fits in the default window without scrolling (a row is [`ROW_H`] high).
+const LIST_SEARCH_MIN: usize = 8;
 /// A row this far outside the visible part of the list is skipped, not laid out.
 const CULL_MARGIN: f32 = 240.0;
 /// The service's default limit of one message, until its status says otherwise.
@@ -89,6 +95,102 @@ enum ConversationAction {
     Delete,
 }
 
+fn below_id(key: &str) -> egui::Id {
+    egui::Id::new(("height_below_list", key))
+}
+
+/// Height for the scroll area drawn next: all that is left of `ui` less what is drawn under it
+/// (measured in the previous frame by [`note_below`], so the list fills the window whatever the
+/// composer, its notes and its length counter take), and not less than `min`. Both panes of the
+/// Chat area use it, so a group and a one-to-one conversation get the same room.
+pub(crate) fn fill_height(ui: &egui::Ui, key: &str, min: f32) -> f32 {
+    let below = ui
+        .ctx()
+        .data(|d| d.get_temp::<f32>(below_id(key)))
+        .unwrap_or(BELOW_FIRST);
+    (ui.available_height() - below).max(min)
+}
+
+/// Remember how tall everything drawn since `start_y` (the bottom of the scroll area) is.
+pub(crate) fn note_below(ui: &egui::Ui, key: &str, start_y: f32) {
+    let h = (ui.min_rect().bottom() - start_y + 2.0).max(0.0);
+    let id = below_id(key);
+    let old = ui.ctx().data(|d| d.get_temp::<f32>(id));
+    if old.map_or(true, |o| (o - h).abs() > 0.5) {
+        ui.ctx().data_mut(|d| d.insert_temp(id, h));
+        ui.ctx().request_repaint();
+    }
+}
+
+/// The time under a message: hour and minute only. The day is said once by [`day_heading`].
+pub(crate) fn time_of_day(at_ms: u64, clock: Clock) -> String {
+    if at_ms == 0 {
+        String::new()
+    } else {
+        hhmm(at_ms, clock.utc_offset_secs)
+    }
+}
+
+/// Whether the message at `at_ms` is the first of its day: the first one shown, or one on another
+/// day than the message before it (`prev_ms`).
+pub(crate) fn starts_new_day(prev_ms: Option<u64>, at_ms: u64, clock: Clock) -> bool {
+    if at_ms == 0 {
+        return false;
+    }
+    match prev_ms {
+        Some(p) if p != 0 => {
+            day_index(p, clock.utc_offset_secs) != day_index(at_ms, clock.utc_offset_secs)
+        }
+        _ => true,
+    }
+}
+
+/// The heading over the first message of a day: "Today", "Yesterday" or the date.
+pub(crate) fn day_heading(c: &ChatStrings, at_ms: u64, clock: Clock, locale: Locale) -> String {
+    let gs = group_strings(locale);
+    let day = day_index(at_ms, clock.utc_offset_secs);
+    let today = day_index(clock.now_ms, clock.utc_offset_secs);
+    if day == today {
+        gs.day_today.to_owned()
+    } else if day == today - 1 {
+        gs.day_yesterday.to_owned()
+    } else {
+        when_list(c, at_ms, clock)
+    }
+}
+
+/// The text of a bubble. The bubble of my own message sits at the right, but its lines are read
+/// from the left, as in the other person's bubble: the box is first made as wide as the longest
+/// line, so the bubble stays at the right and hugs its text.
+pub(crate) fn bubble_text(ui: &mut egui::Ui, text: &str, color: egui::Color32, own: bool) {
+    if !own {
+        ui.add(egui::Label::new(RichText::new(text).color(color)).wrap(true));
+        return;
+    }
+    let avail = ui.available_width();
+    let mut job = egui::text::LayoutJob::single_section(
+        text.to_owned(),
+        egui::TextFormat::simple(egui::TextStyle::Body.resolve(ui.style()), color),
+    );
+    job.wrap.max_width = avail;
+    let widest = ui.fonts(|f| f.layout_job(job)).size().x;
+    // A little slack, so a line that just fits is not wrapped by a rounding difference.
+    ui.set_max_width((widest + 2.0).min(avail));
+    ui.with_layout(Layout::top_down(Align::Min), |ui| {
+        // Fill the box, so the bubble ends exactly at the right edge.
+        ui.set_min_width(ui.available_width());
+        ui.add(egui::Label::new(RichText::new(text).color(color)).wrap(true));
+    });
+}
+
+/// The day heading in the message list: one muted line, centred.
+pub(crate) fn day_separator(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(kit::SP_1);
+    ui.vertical_centered(|ui| {
+        ui.add(egui::Label::new(kit::meta_text(text, pal().muted)).wrap(true));
+    });
+}
+
 /// What the composer shows for `text`: whether Send works, and the length note when the text is
 /// close to the limit or over it (otherwise nothing is drawn).
 pub(crate) fn composer_state(c: &ChatStrings, text: &str, max_bytes: usize) -> kit::ComposerView {
@@ -123,6 +225,8 @@ pub struct ChatUi {
     /// Set by the window from the daemon status: the home relay is not connected, so a waiting
     /// message is waiting on this computer, not on the other person.
     pub relay_down: bool,
+    /// Easy mode: the screens use plain words and leave out the encryption and relay details.
+    easy: bool,
     availability: Availability,
     was_connected: bool,
     initial_sent: bool,
@@ -158,6 +262,9 @@ pub struct ChatUi {
     focus_composer: bool,
     ime_composing: bool,
     picker_open: bool,
+    /// The search over the conversation list and over the contacts of the picker.
+    list_query: String,
+    picker_query: String,
     delete_target: Option<Open>,
     /// Which open dialog appeared last (only that one stays open).
     modals: crate::modal::Order,
@@ -228,6 +335,7 @@ impl Default for ChatUi {
         Self {
             locale: Locale::default(),
             relay_down: false,
+            easy: false,
             availability: Availability::Unknown,
             was_connected: false,
             initial_sent: false,
@@ -257,6 +365,8 @@ impl Default for ChatUi {
             focus_composer: false,
             ime_composing: false,
             picker_open: false,
+            list_query: String::new(),
+            picker_query: String::new(),
             delete_target: None,
             modals: crate::modal::Order::default(),
             verify_target: None,
@@ -315,6 +425,12 @@ impl ChatUi {
     pub fn set_locale(&mut self, locale: Locale) {
         self.locale = locale;
         self.group.set_locale(locale);
+    }
+
+    /// Easy mode shows no technical sentences on the chat screens (set by the window every frame).
+    pub fn set_easy(&mut self, easy: bool) {
+        self.easy = easy;
+        self.group.set_easy(easy);
     }
 
     /// The setting "join a group at once when a contact adds me" changed: tell the running
@@ -393,6 +509,13 @@ impl ChatUi {
 
     fn is_open_endpoint(&self, endpoint: &str) -> bool {
         self.open().is_some_and(|o| o.endpoint_id == endpoint)
+    }
+
+    /// The conversation still open is the one this contact id belongs to. A send's answer carries
+    /// the contact id (`ChatRequest::Send`), so this says whether its text belongs in the
+    /// composer now on screen or in that conversation's kept draft.
+    fn is_open_contact(&self, contact_id: &str) -> bool {
+        self.open().is_some_and(|o| o.contact_id == contact_id)
     }
 
     // ─── Asking ─────────────────────────────────────────────────────────────
@@ -604,21 +727,43 @@ impl ChatUi {
                     ChatFail::NotSupported => Availability::OldDaemon,
                     ChatFail::Other => self.availability,
                 };
-                if let ChatRequest::Send { text, .. } = &req {
-                    self.send_failed(text, c.err_other);
+                if let ChatRequest::Send { contact, text } = &req {
+                    self.send_failed(contact, text, c.err_other);
                 }
             }
         }
     }
 
-    /// A send got no answer or an error: nothing is lost, the text goes back into the composer.
-    fn send_failed(&mut self, text: &str, why: &str) {
+    /// A send got no answer or an error: nothing is lost, the text goes back. It returns to the
+    /// composer only while that same conversation is still open; if the person has moved on, it is
+    /// kept as that conversation's draft instead, so one conversation's failure never writes into
+    /// another's composer.
+    fn send_failed(&mut self, contact_id: &str, text: &str, why: &str) {
         self.sends_in_flight = self.sends_in_flight.saturating_sub(1);
         self.send_kinds.pop_front();
-        if self.composer.trim().is_empty() {
-            self.composer = text.to_owned();
+        if self.is_open_contact(contact_id) {
+            if self.composer.trim().is_empty() {
+                self.composer = text.to_owned();
+            }
+            self.page_msg = Some(why.to_owned());
+        } else if !text.trim().is_empty() {
+            self.keep_draft(contact_id, text);
         }
-        self.page_msg = Some(why.to_owned());
+    }
+
+    /// Keep `text` as `contact_id`'s draft (memory only, a few of them), without disturbing the
+    /// open conversation's composer. An existing draft for that contact is not overwritten: what
+    /// the person has since typed there wins.
+    fn keep_draft(&mut self, contact_id: &str, text: &str) {
+        if self.drafts.contains_key(contact_id) {
+            return;
+        }
+        if self.drafts.len() >= MAX_DRAFTS {
+            self.drafts.clear();
+        }
+        let mut kept = text.to_owned();
+        cap_text(&mut kept, composer_cap(self.max_bytes));
+        self.drafts.insert(contact_id.to_owned(), kept);
     }
 
     fn on_answer(&mut self, c: &ChatStrings, req: &ChatRequest, resp: ChatResponse) {
@@ -628,8 +773,8 @@ impl ChatUi {
                     self.availability = Availability::NoChat;
                 }
                 match req {
-                    ChatRequest::Send { text, .. } => {
-                        self.send_failed(text, error_text(c, &kind));
+                    ChatRequest::Send { contact, text } => {
+                        self.send_failed(contact, text, error_text(c, &kind));
                     }
                     ChatRequest::Events { .. }
                     | ChatRequest::Conversations {}
@@ -993,9 +1138,25 @@ impl ChatUi {
         contacts: &[ContactInfo],
     ) -> Option<ChatAction> {
         let mut action = None;
-        if !connected || self.availability == Availability::DaemonDown {
+        // When the daemon is not connected (needs setup, stopped, or starting),
+        // the connection card above the tab is the single place that explains
+        // what to do and carries the button. Repeating a notice here would show
+        // two reasons at once and point at a button this tab does not have, so
+        // draw only the heading and let that card lead.
+        if !connected {
             self.heading(ui, c, |_| {});
-            self.notice_card(ui, c.daemon_down, Level::Warn, None, c);
+            return None;
+        }
+        // Connected, but the service dropped the chat channel after start: no
+        // connection card is shown in this case, so the reason belongs here.
+        if self.availability == Availability::DaemonDown {
+            self.heading(ui, c, |_| {});
+            let text = if self.easy {
+                c.daemon_down_easy
+            } else {
+                c.daemon_down
+            };
+            self.notice_card(ui, text, Level::Warn, None, c);
             return None;
         }
         match self.availability {
@@ -1006,7 +1167,12 @@ impl ChatUi {
             }
             Availability::OldDaemon => {
                 self.heading(ui, c, |_| {});
-                self.notice_card(ui, c.old_daemon, Level::Warn, Some(c.retry_now), c);
+                let text = if self.easy {
+                    c.old_daemon_easy
+                } else {
+                    c.old_daemon
+                };
+                self.notice_card(ui, text, Level::Warn, Some(c.retry_now), c);
                 return None;
             }
             Availability::Unknown => {
@@ -1170,7 +1336,13 @@ impl ChatUi {
                     View::Conversation(o) => self.conversation_view(ui, c, contacts, &o, action),
                     View::List => {
                         ui.add_space(kit::SP_5);
-                        kit::paragraph_muted(ui, group_strings(self.locale).pane_empty);
+                        // When the list holds nothing, "pick a conversation" would contradict the
+                        // empty list on the left; say there are none instead. Once at least one
+                        // conversation or group exists, go back to the "pick one" hint.
+                        let gs = group_strings(self.locale);
+                        let none = self.rows.is_empty() && self.group.rows().is_empty();
+                        let hint = if none { gs.pane_none } else { gs.pane_empty };
+                        kit::paragraph_muted(ui, hint);
                     }
                 }
             }
@@ -1187,14 +1359,21 @@ impl ChatUi {
             c.heading,
             Some(c.desc),
             |ui| {
-                let resp = kit::primary(ui, !contacts.is_empty(), c.new_chat);
-                resp.widget_info(|| {
-                    egui::WidgetInfo::labeled(egui::WidgetType::Button, c.new_chat)
+                // The page's action area is laid right to left, which would make the buttons be
+                // read (and focused) right to left too — the reverse of what is seen. Nest a
+                // left-to-right group so the cluster still sits on the right, while the two
+                // buttons are both drawn and announced left to right: "New group" then the
+                // primary "New conversation".
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    self.group.new_group_button(ui, !contacts.is_empty());
+                    let resp = kit::primary(ui, !contacts.is_empty(), c.new_chat);
+                    resp.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, c.new_chat)
+                    });
+                    if resp.clicked() {
+                        new_chat = true;
+                    }
                 });
-                if resp.clicked() {
-                    new_chat = true;
-                }
-                self.group.new_group_button(ui, !contacts.is_empty());
             },
             |_| {},
         );
@@ -1237,16 +1416,38 @@ impl ChatUi {
             }
             return;
         }
-        let (group_ix, direct_ix) = split_by_kind(&self.rows, self.group.rows());
+        let (mut group_ix, mut direct_ix) = split_by_kind(&self.rows, self.group.rows());
         let gs = group_strings(self.locale);
         kit::section(ui, c.list_title, |_| {});
+        // From a few conversations on, a search by name; with fewer the list needs none.
+        if self.rows.len() + self.group.rows().len() >= LIST_SEARCH_MIN {
+            let r = ui.add(
+                kit::input(&mut self.list_query)
+                    .hint_text(gs.search_conversations)
+                    .desired_width(ui.available_width()),
+            );
+            r.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, gs.search_conversations)
+            });
+            let q = self.list_query.trim().to_lowercase();
+            if !q.is_empty() {
+                let groups = self.group.rows();
+                group_ix.retain(|&j| groups[j].name.to_lowercase().contains(&q));
+                direct_ix.retain(|&i| self.rows[i].label.to_lowercase().contains(&q));
+                if group_ix.is_empty() && direct_ix.is_empty() {
+                    kit::paragraph_muted(ui, gs.search_conversations_none);
+                }
+            }
+        }
         egui::ScrollArea::vertical()
             .id_source("chat_list")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                // Two headings, groups then people, each newest first. The heading and the
-                // shape of the avatar say which kind a row is, not only its colour.
+                // Two headings, groups then people, each newest first. Groups come first because
+                // the invitations above belong to them and a group is the busier conversation;
+                // the heading and the shape of the avatar say which kind a row is, not only its
+                // colour.
                 if !group_ix.is_empty() {
                     section_heading(ui, gs.section_groups);
                     for &j in &group_ix {
@@ -1322,27 +1523,32 @@ impl ChatUi {
         let status = match header_status(self.relay_down, has_queued) {
             HeaderStatus::Quiet => None,
             HeaderStatus::Waiting => Some(k.header_waiting),
+            HeaderStatus::RelayDown if self.easy => Some(k.header_relay_easy),
             HeaderStatus::RelayDown => Some(k.header_relay),
         };
         // The hybrid post-quantum upgrade of this conversation, when it is in use or was asked
         // for, goes on the same muted line.
+        // Easy mode does not show it at all: it names encryption steps a person cannot act on.
         let pqc_state = self
             .conversations
             .iter()
             .find(|x| x.endpoint_id == o.endpoint_id)
-            .and_then(|x| x.pqc.clone());
+            .and_then(|x| x.pqc.clone())
+            .filter(|_| !self.easy);
         let pqc_line = crate::chat::pqc_text(c, pqc_state.as_deref());
-        let status_line: Option<String> = match (status, pqc_line) {
-            (Some(s), Some(p)) => Some(format!("{s} · {p}")),
-            (Some(s), None) => Some(s.to_owned()),
-            (None, Some(p)) => Some(p.to_owned()),
-            (None, None) => None,
-        };
-        let status_color = match (status, pqc_state.as_deref()) {
-            (None, Some("hybrid")) => pal().success,
-            (None, Some("failed")) => pal().danger,
+        // One state per line: the delivery state and the encryption state are not joined.
+        let pqc_color = match pqc_state.as_deref() {
+            Some("hybrid") => pal().success,
+            Some("failed") => pal().danger,
             _ => pal().muted,
         };
+        let mut header_lines: Vec<(&str, egui::Color32)> = Vec::new();
+        if let Some(s) = status {
+            header_lines.push((s, pal().muted));
+        }
+        if let Some(p) = pqc_line {
+            header_lines.push((p, pqc_color));
+        }
         let mut chosen: Option<ConversationAction> = None;
         let mut menu = |ui: &mut egui::Ui| {
             if receipts_global {
@@ -1370,7 +1576,7 @@ impl ChatUi {
             ui,
             back_name,
             &elide(&name, NAME_CHARS),
-            status_line.as_deref().map(|s| (s, status_color)),
+            &header_lines,
             kit::HeaderEnd::Menu {
                 name: k.a11y_menu,
                 key: "chat",
@@ -1392,6 +1598,7 @@ impl ChatUi {
         }
 
         self.thread_view(ui, c, o);
+        let below_start = ui.min_rect().bottom();
         if self.window.is_detached() {
             ui.horizontal(|ui| {
                 if ui.add(kit::secondary_button(c.jump_latest)).clicked() {
@@ -1418,6 +1625,7 @@ impl ChatUi {
         } else {
             kit::notice(ui, Level::Warn, c.send_off_note);
         }
+        note_below(ui, "chat_thread", below_start);
     }
 
     /// What a press in the header, its menu or the composer does. Nothing here deletes without
@@ -1493,7 +1701,7 @@ impl ChatUi {
         if !self.thread_loaded {
             ui.label(RichText::new(c.loading).color(pal().muted));
         }
-        let height = (ui.available_height() - COMPOSER_RESERVE).max(140.0);
+        let height = fill_height(ui, "chat_thread", LIST_MIN_H);
         let mut area = egui::ScrollArea::vertical()
             .id_source(("chat_thread", o.endpoint_id.as_str()))
             .max_height(height)
@@ -1508,6 +1716,7 @@ impl ChatUi {
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         let relay_down = self.relay_down;
+        let easy = self.easy;
         let msgs = self.window.items();
         // Only the newest message of mine says "Read" in words; older ones a small check.
         let latest_own = msgs.iter().rposition(|m| m.outgoing);
@@ -1523,6 +1732,7 @@ impl ChatUi {
         let mut moved = false;
         // Messages whose rows really overlap the visible part (not the culling margin).
         let mut in_view: Vec<usize> = Vec::new();
+        let locale = self.locale;
         let out = area.show_viewport(ui, |ui, viewport| {
             ui.spacing_mut().item_spacing.y = kit::SP_2;
             let spacing = kit::SP_2;
@@ -1533,7 +1743,14 @@ impl ChatUi {
                 kit::paragraph_muted(ui, c.empty_thread);
             }
             let mut y = 0.0f32;
+            let mut prev_ms: Option<u64> = None;
             for e in timeline {
+                let at_ms = match *e {
+                    Entry::Msg(i) => msgs[i].at_ms,
+                    Entry::File(i) => notes[i].at_ms,
+                };
+                let new_day = starts_new_day(prev_ms, at_ms, clock);
+                prev_ms = Some(at_ms);
                 let (key, est) = match *e {
                     Entry::Msg(i) => {
                         let m = &msgs[i];
@@ -1558,25 +1775,31 @@ impl ChatUi {
                             in_view.push(i);
                         }
                     }
-                    let r = ui.vertical(|ui| match *e {
-                        Entry::Msg(i) => message_row(
-                            ui,
-                            c,
-                            &msgs[i],
-                            clock,
-                            bubble_w,
-                            relay_down,
-                            latest_own == Some(i),
-                        ),
-                        Entry::File(i) => {
-                            let st = file_states
-                                .get(&notes[i].id)
-                                .cloned()
-                                .unwrap_or(FileStatus::Waiting);
-                            if file_row(ui, c, &notes[i], &st, clock) {
-                                file_retry = Some((contact_id.clone(), notes[i].path.clone()));
+                    let r = ui.vertical(|ui| {
+                        if new_day {
+                            day_separator(ui, &day_heading(c, at_ms, clock, locale));
+                        }
+                        match *e {
+                            Entry::Msg(i) => message_row(
+                                ui,
+                                c,
+                                &msgs[i],
+                                clock,
+                                bubble_w,
+                                relay_down,
+                                easy,
+                                latest_own == Some(i),
+                            ),
+                            Entry::File(i) => {
+                                let st = file_states
+                                    .get(&notes[i].id)
+                                    .cloned()
+                                    .unwrap_or(FileStatus::Waiting);
+                                if file_row(ui, c, &notes[i], &st, clock) {
+                                    file_retry = Some((contact_id.clone(), notes[i].path.clone()));
+                                }
+                                None
                             }
-                            None
                         }
                     });
                     let measured = r.response.rect.height();
@@ -1769,14 +1992,36 @@ impl ChatUi {
                 if contacts.is_empty() {
                     kit::paragraph(ui, c.pick_none);
                 }
+                let gs = group_strings(self.locale);
+                let mut offered = picker_order(contacts);
+                if contacts.len() >= PICKER_SEARCH_MIN {
+                    let r = ui.add(
+                        kit::input(&mut self.picker_query)
+                            .hint_text(gs.ng_search_hint)
+                            .desired_width(ui.available_width()),
+                    );
+                    r.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, gs.ng_search_hint)
+                    });
+                    let q = self.picker_query.trim().to_lowercase();
+                    if !q.is_empty() {
+                        offered.retain(|ct| ct.label.to_lowercase().contains(&q));
+                        if offered.is_empty() {
+                            kit::paragraph_muted(ui, gs.ng_no_match);
+                        }
+                    }
+                }
                 egui::ScrollArea::vertical()
                     .max_height(320.0)
                     .show(ui, |ui| {
-                        for ct in picker_order(contacts) {
+                        // Every contact button is as wide as the list, not as wide as its name.
+                        let button_w = ui.available_width();
+                        for ct in offered {
                             let r = crate::form_check::add_enabled(
                                 ui,
                                 ct.allow_send,
-                                kit::secondary_button(elide(&ct.label, NAME_CHARS)),
+                                kit::secondary_button(elide(&ct.label, NAME_CHARS))
+                                    .min_size(vec2(button_w, 0.0)),
                             );
                             let r = if ct.allow_send {
                                 r
@@ -1967,6 +2212,7 @@ fn message_row(
     clock: Clock,
     bubble_w: f32,
     relay_down: bool,
+    easy: bool,
     latest_own: bool,
 ) -> Option<()> {
     let p = pal();
@@ -1990,10 +2236,10 @@ fn message_row(
             .inner_margin(egui::Margin::symmetric(kit::SP_3, kit::SP_2))
             .show(ui, |ui| {
                 ui.set_max_width(bubble_w);
-                ui.add(egui::Label::new(RichText::new(&m.text).color(p.text)).wrap(true));
+                bubble_text(ui, &m.text, p.text, own);
             });
     });
-    let when = when_message(c, m.at_ms, clock);
+    let when = time_of_day(m.at_ms, clock);
     let state = state_label(c, delivery);
     let state_color = match delivery {
         Delivery::Failed => p.danger,
@@ -2016,7 +2262,9 @@ fn message_row(
     match delivery {
         Delivery::Queued => {
             ui.with_layout(layout, |ui| {
-                let note = if relay_down {
+                let note = if relay_down && easy {
+                    c.queued_note_relay_easy
+                } else if relay_down {
                     c.queued_note_relay
                 } else {
                     c.queued_note
@@ -2028,8 +2276,11 @@ fn message_row(
             ui.with_layout(layout, |ui| {
                 ui.set_max_width(bubble_w);
                 ui.add(
-                    egui::Label::new(kit::meta_text(fail_text(c, m.reason.as_deref()), p.danger))
-                        .wrap(true),
+                    egui::Label::new(kit::meta_text(
+                        crate::chat::fail_text_for(c, m.reason.as_deref(), easy),
+                        p.danger,
+                    ))
+                    .wrap(true),
                 );
             });
             ui.with_layout(layout, |ui| {
@@ -2073,7 +2324,7 @@ fn file_row(
                     retry = true;
                 }
             }
-            let when = when_message(c, note.at_ms, clock);
+            let when = time_of_day(note.at_ms, clock);
             if !when.is_empty() {
                 ui.label(kit::meta_text(when, p.muted));
             }
@@ -2362,6 +2613,68 @@ mod tests {
             true
         });
         v
+    }
+
+    /// Draw the chat area once with AccessKit on and collect every node name, so a
+    /// test can check whether a given line of text is shown.
+    fn drawn_names(chat: &mut ChatUi, connected: bool) -> Vec<String> {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        kit::apply_theme(&ctx, false);
+        let list: Vec<ContactInfo> = Vec::new();
+        let mut names = Vec::new();
+        for _ in 0..3 {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    vec2(700.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let out = ctx.run(raw, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    kit::column(ui, |ui| {
+                        let _ = chat.show(ui, chat_strings(Locale::En), connected, &list);
+                    });
+                });
+            });
+            if let Some(update) = out.platform_output.accesskit_update {
+                names = update
+                    .nodes
+                    .iter()
+                    .filter_map(|(_, n)| n.name().map(|s| s.to_owned()))
+                    .collect();
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn before_setup_the_chat_tab_does_not_repeat_the_service_notice() {
+        // Not connected: the connection card above the tab is the single guide, so
+        // the tab body must not show the "service" notice a second time.
+        let mut chat = ready();
+        chat.availability = Availability::Unknown;
+        let names = drawn_names(&mut chat, false);
+        let notice = chat_strings(Locale::En).daemon_down;
+        assert!(
+            !names.iter().any(|n| n == notice),
+            "the chat tab repeated the service notice while disconnected: {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_dropped_service_after_connect_still_explains_itself_in_chat() {
+        // Connected but the service stopped answering: no connection card is shown,
+        // so the reason must appear in the tab body.
+        let mut chat = ready();
+        chat.availability = Availability::DaemonDown;
+        let names = drawn_names(&mut chat, true);
+        let notice = chat_strings(Locale::En).daemon_down;
+        assert!(
+            names.iter().any(|n| n == notice),
+            "the chat tab did not explain the dropped service: {names:?}"
+        );
     }
 
     fn c() -> &'static ChatStrings {
@@ -2873,6 +3186,45 @@ mod tests {
             ui.close_conversation();
         }
         assert!(ui.drafts.len() <= MAX_DRAFTS);
+    }
+
+    #[test]
+    fn a_send_that_fails_after_switching_does_not_write_into_the_other_composer() {
+        let mut ui = ready();
+        ui.open_conversation("a", "ep-a", "A");
+        ui.composer = "Aのメッセージ".into();
+        ui.submit(c());
+        let sent = requests(&mut ui).remove(0);
+        assert!(matches!(&sent, ChatRequest::Send { contact, .. } if contact == "a"));
+        // The person moves to B before A's send is answered.
+        ui.open_conversation("b", "ep-b", "B");
+        ui.composer = "Bで入力中".into();
+        ui.on_reply(
+            c(),
+            sent,
+            Ok(ChatResponse::Error {
+                kind: "outbox_full".into(),
+                message: "x".into(),
+            }),
+        );
+        // B's composer is untouched and keeps what is being typed there.
+        assert_eq!(ui.composer, "Bで入力中");
+        // A's failed text is kept as A's draft, so going back shows it again.
+        ui.open_conversation("a", "ep-a", "A");
+        assert_eq!(ui.composer, "Aのメッセージ");
+    }
+
+    #[test]
+    fn a_send_that_fails_while_still_open_returns_to_the_composer() {
+        let mut ui = ready();
+        ui.open_conversation("a", "ep-a", "A");
+        ui.composer = "そのまま".into();
+        ui.submit(c());
+        let sent = requests(&mut ui).remove(0);
+        ui.on_reply(c(), sent, Err(ChatFail::Other));
+        // Same conversation is still open: the text comes back to the composer.
+        assert_eq!(ui.composer, "そのまま");
+        assert!(ui.drafts.is_empty());
     }
 
     #[test]
@@ -3502,7 +3854,7 @@ mod tests {
                         "{ctx}: the header {header:?} is not drawn"
                     );
                     assert!(
-                        !self.has_text(group_strings(Locale::En).a11y_composer),
+                        !self.has_text(group_strings(Locale::En).a11y_group_composer),
                         "{ctx}: the group composer is drawn"
                     );
                 }
@@ -3585,5 +3937,197 @@ mod tests {
     #[test]
     fn people_and_groups_open_in_turn_wide_by_automation() {
         people_and_groups_in_turn(1400.0, Press::Invoke);
+    }
+    // ── Layout and behaviour of the message list ──────────────────────────────────────────────
+
+    fn bounds_of(rig: &ChatRig, name: &str) -> accesskit::Rect {
+        rig.last
+            .iter()
+            .find(|(_, n)| n.name() == Some(name))
+            .and_then(|(_, n)| n.bounds())
+            .unwrap_or_else(|| panic!("no {name:?} with bounds"))
+    }
+
+    #[test]
+    fn both_conversation_kinds_give_the_list_all_the_room_the_composer_leaves() {
+        // A 900 px tall window: the composer sits at the foot of the pane in a one-to-one
+        // conversation and in a group alike (before, the list stopped 100 to 200 px short of it).
+        let cs = chat_strings(Locale::En);
+        let gs = group_strings(Locale::En);
+        let direct = ChatRig::new("thread", 1400.0);
+        let group = ChatRig::new("group", 1400.0);
+        let d = bounds_of(&direct, cs.a11y_composer);
+        let g = bounds_of(&group, gs.a11y_group_composer);
+        assert!(d.y1 > 900.0 - 150.0, "one-to-one composer ends at {}", d.y1);
+        assert!(g.y1 > 900.0 - 150.0, "group composer ends at {}", g.y1);
+        assert!(
+            (d.y1 - g.y1).abs() < 60.0,
+            "the two panes differ: {} and {}",
+            d.y1,
+            g.y1
+        );
+    }
+
+    #[test]
+    fn fill_height_uses_what_was_measured_under_the_list() {
+        let ctx = egui::Context::default();
+        kit::apply_theme(&ctx, false);
+        let mut seen: Vec<f32> = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    vec2(600.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    seen.push(fill_height(ui, "test_list", LIST_MIN_H));
+                    ui.allocate_space(vec2(10.0, 300.0));
+                    let start = ui.min_rect().bottom();
+                    ui.allocate_space(vec2(10.0, 30.0));
+                    note_below(ui, "test_list", start);
+                });
+            });
+        }
+        // The first frame assumes a default; the next ones use the 30 px really drawn under it.
+        assert!(seen[0] >= LIST_MIN_H);
+        assert!(seen[2] > seen[0], "{seen:?}");
+        assert!((seen[2] - seen[1]).abs() < 0.5, "{seen:?}");
+        assert_eq!(LIST_MIN_H, 140.0);
+    }
+
+    #[test]
+    fn the_group_composer_is_named_like_the_direct_one_and_has_the_paperclip_too() {
+        let cs = chat_strings(Locale::En);
+        let gs = group_strings(Locale::En);
+        let rig = ChatRig::new("group", 1400.0);
+        assert!(rig.has_text(gs.a11y_group_composer));
+        assert_eq!(gs.a11y_group_composer, "Message input for the group");
+        assert_eq!(gs.a11y_group_send, "Send message to the group");
+        // The paperclip carries the same name as in a one-to-one conversation.
+        let _ = rig.button(cs.a11y_attach);
+        // The send button, and the note that a group takes no file with the way to a contact.
+        let _ = rig.button(gs.a11y_group_send);
+        assert!(rig.has_text(gs.group_file_note));
+        let _ = rig.button(gs.a11y_group_file_button);
+        // The header has the "..." menu of the other conversations.
+        let _ = rig.button(crate::locale::compose_strings(Locale::En).a11y_menu);
+    }
+
+    #[test]
+    fn only_the_newest_waiting_group_message_explains_what_waiting_means() {
+        let gs = group_strings(Locale::En);
+        let rig = ChatRig::new("group", 1400.0);
+        let count = rig
+            .last
+            .iter()
+            .filter(|(_, n)| n.name() == Some(gs.waiting_note))
+            .count();
+        assert_eq!(count, 1, "the note under the newest message of mine, once");
+    }
+
+    #[test]
+    fn a_search_field_shows_up_with_many_conversations_and_filters_the_list() {
+        let gs = group_strings(Locale::En);
+        let has_search = |rig: &ChatRig| {
+            rig.last
+                .iter()
+                .any(|(_, n)| n.name() == Some(gs.search_conversations))
+        };
+        let few = ChatRig::new("list", 1400.0);
+        assert!(!has_search(&few), "no search for a short list");
+        let mut many = ChatRig::new("list", 1400.0);
+        let template = many.chat.rows[0].clone();
+        for k in 0..LIST_SEARCH_MIN {
+            let mut r = template.clone();
+            r.contact_id = format!("extra{k}");
+            r.endpoint_id = format!("extra-ep{k}");
+            r.label = format!("Extra {k}");
+            many.chat.rows.push(r);
+        }
+        many.chat.list_query = "Extra 3".to_owned();
+        many.frames(3);
+        assert!(has_search(&many));
+        let named = |rig: &ChatRig, part: &str| {
+            rig.last
+                .iter()
+                .any(|(_, n)| n.name().is_some_and(|x| x.contains(part)))
+        };
+        assert!(named(&many, "Extra 3"));
+        assert!(!named(&many, "Extra 5"));
+    }
+
+    #[test]
+    fn dates_are_said_once_per_day() {
+        let clock = Clock {
+            now_ms: 1_792_074_600_000, // 2026-10-15 14:30 UTC
+            utc_offset_secs: 0,
+        };
+        let day = 86_400_000u64;
+        let now = clock.now_ms;
+        // The first message shown starts a day; the next one on the same day does not.
+        assert!(starts_new_day(None, now, clock));
+        assert!(!starts_new_day(Some(now - 60_000), now, clock));
+        assert!(starts_new_day(Some(now - day), now, clock));
+        assert!(starts_new_day(Some(0), now, clock));
+        assert!(!starts_new_day(Some(now), 0, clock));
+        // Under a message only the time stays, whatever day it is.
+        assert_eq!(time_of_day(now, clock), "14:30");
+        assert_eq!(time_of_day(now - 3 * day, clock), "14:30");
+        assert_eq!(time_of_day(0, clock), "");
+        // The heading says "Today", "Yesterday", or the date.
+        for locale in Locale::ALL {
+            let c = chat_strings(locale);
+            let gs = group_strings(locale);
+            assert_eq!(day_heading(c, now, clock, locale), gs.day_today);
+            assert_eq!(day_heading(c, now - day, clock, locale), gs.day_yesterday);
+            assert_eq!(
+                day_heading(c, now - 5 * day, clock, locale),
+                when_list(c, now - 5 * day, clock)
+            );
+        }
+    }
+
+    #[test]
+    fn the_bubble_of_my_message_hugs_its_text_at_the_right() {
+        let ctx = egui::Context::default();
+        kit::apply_theme(&ctx, false);
+        let long = "A longer line of text that has to be wrapped at some point because it is long, long, long, long, long, long, long.";
+        let mut rects: Vec<(f32, f32, f32)> = Vec::new();
+        for _ in 0..2 {
+            rects.clear();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    vec2(600.0, 400.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let edge = ui.max_rect().right();
+                    for text in ["Hi", long] {
+                        let r = ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                            egui::Frame::none().show(ui, |ui| {
+                                ui.set_max_width(200.0);
+                                bubble_text(ui, text, egui::Color32::WHITE, true);
+                            })
+                        });
+                        let rect = r.inner.response.rect;
+                        rects.push((rect.left(), rect.right(), edge));
+                    }
+                });
+            });
+        }
+        let (short, wrapped) = (rects[0], rects[1]);
+        // Both stay at the right edge of the column.
+        assert!((short.1 - short.2).abs() < 1.5, "{short:?}");
+        assert!((wrapped.1 - wrapped.2).abs() < 1.5, "{wrapped:?}");
+        // The short one hugs its text; the long one is wrapped within its 200 px.
+        assert!(short.1 - short.0 < 60.0, "{short:?}");
+        assert!(wrapped.1 - wrapped.0 <= 201.0, "{wrapped:?}");
+        assert!(wrapped.1 - wrapped.0 > 100.0, "{wrapped:?}");
     }
 }

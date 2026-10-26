@@ -75,10 +75,17 @@ pub fn mark_disabled(resp: &egui::Response) {
 /// `ui.add_enabled(..)` that also tells assistive technology when the control is switched off
 /// (egui draws it grey but publishes nothing). Use this instead of `ui.add_enabled`.
 pub fn add_enabled(ui: &mut egui::Ui, enabled: bool, widget: impl egui::Widget) -> egui::Response {
-    let resp = ui.add_enabled(enabled, widget);
-    if !enabled {
-        mark_disabled(&resp);
+    if enabled {
+        return ui.add_enabled(true, widget);
     }
+    // Switched off, but still readable: the outline and the text keep their contrast.
+    let resp = ui
+        .scope(|ui| {
+            kit::disabled_look(ui);
+            ui.add_enabled(false, widget)
+        })
+        .inner;
+    mark_disabled(&resp);
     resp
 }
 
