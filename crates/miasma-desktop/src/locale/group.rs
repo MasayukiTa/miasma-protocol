@@ -69,6 +69,10 @@ group_strings! {
     a11y_group_file_button, list_sep,
     // Headings of the two kinds of conversation in the list
     section_groups, section_people,
+    // Chat and group screens: note under a waiting message, day separators, member menu,
+    // names for assistive technology that match the one-to-one screen, conversation search
+    waiting_note, day_today, day_yesterday, remove_from_group, a11y_group_composer,
+    a11y_group_send, search_conversations, search_conversations_none,
 }
 
 pub fn group_strings(locale: Locale) -> &'static GroupStrings {
@@ -234,6 +238,14 @@ static GR_EN: GroupStrings = GroupStrings {
     list_sep: ", ",
     section_groups: "Groups",
     section_people: "People",
+    waiting_note: "Members who are offline will get it when they come online.",
+    day_today: "Today",
+    day_yesterday: "Yesterday",
+    remove_from_group: "Remove from this group",
+    a11y_group_composer: "Message input for the group",
+    a11y_group_send: "Send message to the group",
+    search_conversations: "Search conversations",
+    search_conversations_none: "No conversation matches.",
 };
 
 static GR_JA: GroupStrings = GroupStrings {
@@ -391,6 +403,14 @@ static GR_JA: GroupStrings = GroupStrings {
     list_sep: "、",
     section_groups: "グループ",
     section_people: "個人",
+    waiting_note: "オフラインの人には、オンラインになると届きます。",
+    day_today: "今日",
+    day_yesterday: "昨日",
+    remove_from_group: "このグループから外す",
+    a11y_group_composer: "グループ宛てのメッセージを入力",
+    a11y_group_send: "グループ宛てのメッセージを送信",
+    search_conversations: "会話を検索",
+    search_conversations_none: "一致する会話がありません。",
 };
 
 static GR_ZH_CN: GroupStrings = GroupStrings {
@@ -548,6 +568,14 @@ static GR_ZH_CN: GroupStrings = GroupStrings {
     list_sep: ", ",
     section_groups: "群组",
     section_people: "个人",
+    waiting_note: "离线的成员上线后即可收到。",
+    day_today: "今天",
+    day_yesterday: "昨天",
+    remove_from_group: "移出本群",
+    a11y_group_composer: "群组消息输入框",
+    a11y_group_send: "发送消息到群组",
+    search_conversations: "搜索会话",
+    search_conversations_none: "没有匹配的会话。",
 };
 
 #[cfg(test)]
