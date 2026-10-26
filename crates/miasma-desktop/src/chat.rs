@@ -981,7 +981,7 @@ mod tests {
             text: "こんにちは\n\n  元気ですか\t？".into(),
             outgoing: true,
         };
-        assert_eq!(preview_text(c, &mine), "あなた: こんにちは 元気ですか ？");
+        assert_eq!(preview_text(c, &mine), "あなた：こんにちは 元気ですか ？");
         let theirs = LastKind::Text {
             text: "はい".into(),
             outgoing: false,
@@ -1018,7 +1018,7 @@ mod tests {
                 name: "報告書.pdf".into(),
             },
         );
-        assert_eq!(p, "ファイル: 報告書.pdf");
+        assert_eq!(p, "ファイル：報告書.pdf");
         let long = preview_text(
             c,
             &LastKind::File {
@@ -1319,7 +1319,7 @@ mod tests {
         assert_eq!(counter(&"a".repeat(4096), 4096).level, CounterLevel::Near);
         assert_eq!(counter(&"a".repeat(4097), 4096).level, CounterLevel::Over);
         let c = ja();
-        assert_eq!(counter_text(c, &ok), "5 文字");
+        assert_eq!(counter_text(c, &ok), "5文字");
         assert!(counter_text(c, &near).starts_with("あと約"));
         assert!(counter_text(c, &over).contains("長すぎます"));
     }
