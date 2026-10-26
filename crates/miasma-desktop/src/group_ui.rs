@@ -113,6 +113,8 @@ struct Preview {
 
 pub struct GroupUi {
     locale: Locale,
+    /// Easy mode: plain words, no technical sentences.
+    easy: bool,
     support: Support,
     area_open: bool,
 
@@ -169,6 +171,7 @@ impl Default for GroupUi {
         let now = Instant::now();
         Self {
             locale: Locale::default(),
+            easy: false,
             support: Support::Unknown,
             area_open: false,
             rows: Vec::new(),
@@ -231,6 +234,10 @@ impl GroupUi {
 
     pub fn set_locale(&mut self, locale: Locale) {
         self.locale = locale;
+    }
+
+    pub fn set_easy(&mut self, easy: bool) {
+        self.easy = easy;
     }
 
     pub fn rows(&self) -> &[GroupRow] {
@@ -936,7 +943,11 @@ impl GroupUi {
         let resp = crate::form_check::add_enabled(ui, enabled, kit::secondary_button(gs.new_group));
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, gs.a11y_new_group));
         let resp = if !self.can_create() {
-            resp.on_disabled_hover_text(gs.unsupported)
+            resp.on_disabled_hover_text(if self.easy {
+                gs.unsupported_easy
+            } else {
+                gs.unsupported
+            })
         } else {
             resp
         };
@@ -1156,6 +1167,7 @@ impl GroupUi {
                         sender: &sender,
                         can_add: code.is_some(),
                         explain_waiting: latest_own == Some(i),
+                        easy: self.easy,
                     };
                     if message_row(ui, gs, cs, m, &row, clock, bubble_w) {
                         add_code = code.map(str::to_owned);
@@ -1960,6 +1972,8 @@ struct Row<'a> {
     can_add: bool,
     /// This is my newest message: when it is still waiting, say what that means.
     explain_waiting: bool,
+    /// Easy mode: the delivery line uses plain words.
+    easy: bool,
 }
 
 /// One message of a group as an aligned bubble: for an incoming one the sender above it (with the
@@ -2031,7 +2045,12 @@ fn message_row(
     let delivery = delivery_of(m);
     // A message that is only waiting shows one short word; the exact count is in the hover text
     // and in what a screen reader is told. The sentence is shown in full once it is stuck.
-    let state = delivery_line(gs, delivery, clock.now_ms.saturating_sub(m.sent_ms));
+    let state = delivery_line_for(
+        gs,
+        delivery,
+        clock.now_ms.saturating_sub(m.sent_ms),
+        row.easy,
+    );
     let state_color = match delivery {
         GroupDelivery::All { .. } => p.success,
         GroupDelivery::Partial { .. } | GroupDelivery::FailedAll { .. } => p.danger,

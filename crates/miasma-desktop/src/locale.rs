@@ -3065,6 +3065,9 @@ chat_strings! {
     a11y_row, a11y_unread, nav_new, dismiss,
     state_read, receipts_on, receipts_off, receipts_hint, receipts_global_off, a11y_receipts,
     system_label, file_waiting, file_sending, file_done, file_failed,
+    // Plain-language versions of the technical sentences, shown in Easy mode.
+    queued_note_relay_easy, fail_session_easy, fail_pqc_peer_no_hybrid_easy,
+    fail_pqc_failed_easy, daemon_down_easy, old_daemon_easy,
 }
 
 pub fn chat_strings(locale: Locale) -> &'static ChatStrings {
@@ -3170,6 +3173,12 @@ static CH_EN: ChatStrings = ChatStrings {
     file_sending: "Sending: {name} ({pct}%)",
     file_done: "File sent: {name}",
     file_failed: "File not sent: {name}",
+    queued_note_relay_easy: "Miasma is not connected right now, so this cannot go out yet.",
+    fail_session_easy: "It could not be sent safely. Try again later.",
+    fail_pqc_peer_no_hybrid_easy: "Not sent. The other person's app is too old for this. Ask them to update to the latest version.",
+    fail_pqc_failed_easy: "Not sent. A safe way to send could not be prepared with this contact. Try again later.",
+    daemon_down_easy: "Miasma has stopped responding, so chat is unavailable. Please wait a moment; if it does not recover, close Miasma completely and open it again.",
+    old_daemon_easy: "Chat does not work with this version of Miasma. Close Miasma completely and open it again. If that does not help, update Miasma.",
 };
 
 static CH_JA: ChatStrings = ChatStrings {
@@ -3267,6 +3276,12 @@ static CH_JA: ChatStrings = ChatStrings {
     file_sending: "送信中：{name}（{pct}%）",
     file_done: "ファイルを送りました：{name}",
     file_failed: "ファイルを送れませんでした：{name}",
+    queued_note_relay_easy: "いまMiasmaがつながっていないため、まだ送れません。",
+    fail_session_easy: "安全に送れませんでした。しばらくしてからもう一度お試しください。",
+    fail_pqc_peer_no_hybrid_easy: "送りませんでした。相手のアプリが古いため送れません。相手に最新版への更新を依頼してください。",
+    fail_pqc_failed_easy: "送りませんでした。この相手に安全に送る準備ができませんでした。しばらくしてからもう一度お試しください。",
+    daemon_down_easy: "Miasmaが応答しなくなり、チャットを使えません。少し待ってください。直らないときは、Miasmaを完全に閉じてから、もう一度開いてください。",
+    old_daemon_easy: "このバージョンのMiasmaではチャットが動きません。Miasmaを完全に閉じてから、もう一度開いてください。直らないときは、Miasmaを更新してください。",
 };
 
 // zh-CN: a first translation; to be reviewed by a native speaker before it is called finished.
@@ -3365,6 +3380,12 @@ static CH_ZH_CN: ChatStrings = ChatStrings {
     file_sending: "正在发送：{name}（{pct}%）",
     file_done: "文件已发送：{name}",
     file_failed: "文件未能发送：{name}",
+    queued_note_relay_easy: "Miasma 当前未连接，暂时无法发出。",
+    fail_session_easy: "无法安全发送。请稍后重试。",
+    fail_pqc_peer_no_hybrid_easy: "未发送。对方的应用版本过旧。请让对方更新到最新版本。",
+    fail_pqc_failed_easy: "未发送。无法与该联系人建立安全发送。请稍后重试。",
+    daemon_down_easy: "Miasma 已停止响应，因此无法使用聊天。请稍候；若未恢复，请完全关闭 Miasma 后再次打开。",
+    old_daemon_easy: "当前版本的 Miasma 无法使用聊天。请完全关闭 Miasma 后重新打开。若仍然无法解决，请更新 Miasma。",
 };
 
 // ─── Logs (memory-only logging, opt-in diagnostic logging) ──────────────────

@@ -33,6 +33,8 @@ compose_strings! {
     // The conversation header and menu
     a11y_menu, menu_receipts, menu_verify, verify_title, verify_body, verify_close,
     header_waiting, header_relay, unverified_short,
+    // Easy mode: the same state without the word "relay".
+    header_relay_easy,
 }
 
 pub fn compose_strings(locale: Locale) -> &'static ComposeStrings {
@@ -88,6 +90,7 @@ static CO_EN: ComposeStrings = ComposeStrings {
     header_waiting: "Waiting for them to receive",
     header_relay: "This computer is not connected to the relay",
     unverified_short: "{u} not in your contacts yet",
+    header_relay_easy: "Miasma is not connected right now",
 };
 
 static CO_JA: ComposeStrings = ComposeStrings {
@@ -135,6 +138,7 @@ static CO_JA: ComposeStrings = ComposeStrings {
     header_waiting: "相手の受信を待っています",
     header_relay: "このコンピューターはリレーに接続されていません",
     unverified_short: "連絡先に未登録：{u}人",
+    header_relay_easy: "いまMiasmaはつながっていません",
 };
 
 static CO_ZH_CN: ComposeStrings = ComposeStrings {
@@ -182,6 +186,7 @@ static CO_ZH_CN: ComposeStrings = ComposeStrings {
     header_waiting: "正在等待对方接收",
     header_relay: "本机未连接到中继服务器",
     unverified_short: "{u} 人不在你的联系人中",
+    header_relay_easy: "Miasma 当前未连接",
 };
 
 #[cfg(test)]
