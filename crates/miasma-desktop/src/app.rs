@@ -1468,7 +1468,10 @@ impl MiasmaApp {
             kit::surface(ui, |ui| {
                 kit::paragraph(ui, s.home_no_contacts);
                 ui.add_space(kit::SP_2);
-                if ui.add(kit::secondary_button(s.home_open_contacts)).clicked() {
+                if ui
+                    .add(kit::secondary_button(s.home_open_contacts))
+                    .clicked()
+                {
                     self.tab = Tab::Contacts;
                 }
             });
@@ -2015,7 +2018,10 @@ impl MiasmaApp {
                     // link an empty inbox gives no way to receive by code. Same destination as
                     // the "File transfer" link on the Files tab.
                     ui.add_space(kit::SP_2);
-                    if ui.add(kit::secondary_button(s.inbox_receive_by_code)).clicked() {
+                    if ui
+                        .add(kit::secondary_button(s.inbox_receive_by_code))
+                        .clicked()
+                    {
                         self.tab = Tab::Transfers;
                     }
                     return;
@@ -4382,6 +4388,9 @@ mod tests {
             LaunchIntent::Normal,
         );
         app.daemon_state = state;
+        // This test measures the layout of the three actions and the status line. The
+        // "no contacts yet" card is covered by its own test, so give the app a contact here.
+        app.contacts = ContactsUi::fixture("two", locale::contact_strings(Locale::En)).unwrap();
         let mut used = egui::Rect::NOTHING;
         for _ in 0..3 {
             let input = egui::RawInput {

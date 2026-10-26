@@ -4641,14 +4641,17 @@ mod tests {
     fn the_empty_state_guidance_strings_are_filled_and_translated() {
         for lang in Locale::ALL {
             let s = strings(lang);
-            for (name, v) in [
-                ("home_no_contacts", s.home_no_contacts),
-                ("home_open_contacts", s.home_open_contacts),
-                ("inbox_receive_by_code", s.inbox_receive_by_code),
+            for (idx, v) in [
+                s.home_no_contacts,
+                s.home_open_contacts,
+                s.inbox_receive_by_code,
                 // The Easy Inbox title reuses this label, so it must be present too.
-                ("home_receive_action", s.home_receive_action),
-            ] {
-                assert!(!v.trim().is_empty(), "{lang:?} {name} is empty");
+                s.home_receive_action,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                assert!(!v.trim().is_empty(), "{lang:?} string #{idx} is empty");
             }
         }
         // Japanese is a real translation, not the English left in place.
