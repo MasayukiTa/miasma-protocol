@@ -70,12 +70,60 @@ pub const COLUMN_MAX: f32 = 920.0;
 pub const PAGE_MARGIN_X: f32 = SP_5;
 /// Width of the label column of key-value grids and forms.
 pub const LABEL_W: f32 = 168.0;
+/// The label column when the page is wide enough: Japanese labels of ten characters or more
+/// ("the address of the relay server:") used to break in the middle of a word at 168 px.
+pub const LABEL_W_WIDE: f32 = 224.0;
+/// Page width from which the wide label column is used.
+const LABEL_WIDE_FROM: f32 = 640.0;
+
+/// The label column for a page `total` px wide.
+fn label_w(total: f32) -> f32 {
+    if total >= LABEL_WIDE_FROM {
+        LABEL_W_WIDE
+    } else {
+        LABEL_W
+    }
+}
 /// Height of every button and single-line text edit.
 pub const CONTROL_H: f32 = 30.0;
 /// Height of an inline (compact) button such as Copy.
 pub const COMPACT_H: f32 = 24.0;
 /// Narrowest a regular button gets, so a row of buttons looks like a row.
 pub const BTN_MIN_W: f32 = 96.0;
+/// Narrowest a compact button gets.
+pub const BTN_COMPACT_MIN_W: f32 = 56.0;
+
+/// The three button sizes of the app. Every button is one of them: a big task of a page (Home,
+/// Files), a regular button (forms, dialogs, rows of actions) or a compact one next to a title or
+/// in a list row. The height and the narrowest width come from here only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonSize {
+    Large,
+    Standard,
+    Compact,
+}
+
+impl ButtonSize {
+    pub const fn height(self) -> f32 {
+        match self {
+            ButtonSize::Large => LARGE_ACTION_H,
+            ButtonSize::Standard => CONTROL_H,
+            ButtonSize::Compact => COMPACT_H,
+        }
+    }
+
+    pub const fn min_width(self) -> f32 {
+        match self {
+            ButtonSize::Large => 0.0,
+            ButtonSize::Standard => BTN_MIN_W,
+            ButtonSize::Compact => BTN_COMPACT_MIN_W,
+        }
+    }
+
+    pub fn min_size(self) -> egui::Vec2 {
+        vec2(self.min_width(), self.height())
+    }
+}
 
 /// Smallest text size anywhere (hints, labels): egui's `Small`.
 pub const MIN_TEXT_PX: f32 = 12.5;
@@ -131,7 +179,57 @@ pub fn apply_theme(ctx: &egui::Context, dark: bool) {
     style.spacing.window_margin = egui::Margin::same(SP_4);
     style.spacing.interact_size = vec2(40.0, CONTROL_H);
     style.spacing.indent = SP_4;
+    style.spacing.scroll = scroll_style();
     ctx.set_style(style);
+}
+
+/// Scroll bars that can be seen and grabbed: always drawn, 6 px wide at rest (egui's default
+/// floating bar is 2 px and invisible until hovered) and 12 px wide under the pointer.
+pub fn scroll_style() -> egui::style::ScrollStyle {
+    egui::style::ScrollStyle {
+        floating: true,
+        bar_width: SCROLL_BAR_HOVER_W,
+        floating_width: SCROLL_BAR_W,
+        floating_allocated_width: SCROLL_BAR_W + 2.0,
+        foreground_color: false,
+        dormant_background_opacity: 1.0,
+        dormant_handle_opacity: 1.0,
+        active_background_opacity: 1.0,
+        active_handle_opacity: 1.0,
+        interact_background_opacity: 1.0,
+        interact_handle_opacity: 1.0,
+        ..egui::style::ScrollStyle::solid()
+    }
+}
+
+/// Width of a scroll bar at rest.
+pub const SCROLL_BAR_W: f32 = 6.0;
+/// Width of a scroll bar while the pointer is on it or it is being dragged.
+pub const SCROLL_BAR_HOVER_W: f32 = 12.0;
+
+/// What to paint so that egui's fade of a disabled control (each channel half way to the fade
+/// colour) ends on `drawn`.
+pub(crate) fn before_fade(drawn: Color32, fade_to: Color32) -> Color32 {
+    let f = |d: u8, t: u8| (2 * d as i32 - t as i32).clamp(0, 255) as u8;
+    Color32::from_rgb(
+        f(drawn.r(), fade_to.r()),
+        f(drawn.g(), fade_to.g()),
+        f(drawn.b(), fade_to.b()),
+    )
+}
+
+/// Make the controls added to `ui` next, once it is switched off, come out in the readable
+/// disabled colours (`Palette::disabled_text` and `disabled_border`). egui fades a disabled
+/// widget half way to the colour in `widgets.noninteractive.weak_bg_fill`; that left disabled
+/// buttons at 2.4:1 (text) and 1.3:1 (outline). Call it in a scope, then `add_enabled(false, ..)`.
+pub fn disabled_look(ui: &mut Ui) {
+    let p = pal();
+    let fade_to = p.surface_subtle;
+    let n = &mut ui.visuals_mut().widgets.noninteractive;
+    n.fg_stroke = Stroke::new(1.0, before_fade(p.disabled_text, fade_to));
+    n.bg_stroke = Stroke::new(1.0, before_fade(p.disabled_border, fade_to));
+    n.bg_fill = fade_to;
+    n.weak_bg_fill = fade_to;
 }
 
 // ─── Status levels ──────────────────────────────────────────────────────────
@@ -539,15 +637,16 @@ fn labelled_row<R>(
     value: impl FnOnce(&mut Ui) -> R,
 ) -> R {
     let total = ui.available_width();
-    let value_w = (total - LABEL_W).max(80.0);
+    let label_w = label_w(total);
+    let value_w = (total - label_w).max(80.0);
     let spacing = ui.spacing().item_spacing;
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.allocate_ui_with_layout(
-            vec2(LABEL_W, 0.0),
+            vec2(label_w, 0.0),
             Layout::top_down(egui::Align::Min),
             |ui| {
-                ui.set_width(LABEL_W - SP_3);
+                ui.set_width(label_w - SP_3);
                 if !label.is_empty() {
                     let color = if muted_label { pal().muted } else { pal().text };
                     ui.add(Label::new(RichText::new(label).color(color)).wrap(true));
@@ -600,14 +699,15 @@ pub fn form_row<R>(
             })
             .inner;
     }
-    let value_w = (total - LABEL_W).max(80.0);
+    let label_w = label_w(total);
+    let value_w = (total - label_w).max(80.0);
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.allocate_ui_with_layout(
-            vec2(LABEL_W, 0.0),
+            vec2(label_w, 0.0),
             Layout::top_down(egui::Align::Min),
             |ui| {
-                ui.set_width(LABEL_W - SP_3);
+                ui.set_width(label_w - SP_3);
                 if !label.is_empty() {
                     let line = ui.text_style_height(&TextStyle::Body);
                     ui.add_space(((CONTROL_H - line) * 0.5).max(0.0));
@@ -636,9 +736,10 @@ pub fn form_row<R>(
 
 /// The action row under a form, aligned with the controls (not with the labels).
 pub fn form_actions<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let total = ui.available_width();
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        ui.add_space(LABEL_W);
+        ui.add_space(label_w(total));
         ui.spacing_mut().item_spacing.x = SP_2;
         add(ui)
     })
@@ -687,7 +788,7 @@ pub fn primary_button<'a>(text: impl Into<WidgetText>) -> egui::Button<'a> {
     egui::Button::new(text.color(pal().on_accent()))
         .fill(pal().accent_fill)
         .stroke(Stroke::NONE)
-        .min_size(vec2(BTN_MIN_W, CONTROL_H))
+        .min_size(ButtonSize::Standard.min_size())
 }
 
 /// The one primary action of a section. Disabled, it falls back to the neutral outlined style
@@ -711,26 +812,27 @@ pub fn primary(ui: &mut Ui, enabled: bool, text: &str) -> Response {
             state.bg_stroke = Stroke::NONE;
             state.fg_stroke = Stroke::new(1.0, p.on_accent());
         }
-        ui.add(egui::Button::new(text).min_size(vec2(BTN_MIN_W, CONTROL_H)))
+        ui.add(egui::Button::new(text).min_size(ButtonSize::Standard.min_size()))
     })
     .inner
 }
 
 /// An outlined neutral button.
 pub fn secondary_button<'a>(text: impl Into<WidgetText>) -> egui::Button<'a> {
-    egui::Button::new(text).min_size(vec2(BTN_MIN_W, CONTROL_H))
+    egui::Button::new(text).min_size(ButtonSize::Standard.min_size())
 }
 
 /// A destructive action: neutral button, danger-coloured text. Callers confirm first.
 pub fn danger_button<'a>(text: impl Into<String>) -> egui::Button<'a> {
-    egui::Button::new(RichText::new(text).color(pal().danger)).min_size(vec2(BTN_MIN_W, CONTROL_H))
+    egui::Button::new(RichText::new(text).color(pal().danger))
+        .min_size(ButtonSize::Standard.min_size())
 }
 
 /// A small inline button (Copy, Refresh next to a title).
 pub fn compact_button<'a>(text: impl Into<String>) -> egui::Button<'a> {
     egui::Button::new(RichText::new(text).small())
         .small()
-        .min_size(vec2(56.0, COMPACT_H))
+        .min_size(ButtonSize::Compact.min_size())
 }
 
 // ─── Button hierarchy: quiet and icon buttons ───────────────────────────────
@@ -758,7 +860,7 @@ pub fn large_action(
     text: &str,
     width: f32,
 ) -> Response {
-    let size = vec2(width, LARGE_ACTION_H);
+    let size = vec2(width, ButtonSize::Large.height());
     let label = RichText::new(text).text_style(section_style());
     if !primary_style || !enabled {
         return crate::form_check::add_enabled(
@@ -1167,7 +1269,7 @@ pub fn empty_state_with(
 pub fn inline_message(ui: &mut Ui, level: Level, text: &str, action: Option<&str>) -> bool {
     notice(ui, level, text);
     match action {
-        Some(label) => ui.add(quiet_button(label)).clicked(),
+        Some(label) => ui.add(compact_button(label)).clicked(),
         None => false,
     }
 }
@@ -1187,12 +1289,28 @@ pub fn code_display(ui: &mut Ui, text: &str) -> Response {
 /// Segmented choice: a row of mutually exclusive options; the selected one gets an accent
 /// outline. Returns true when the choice changed.
 pub fn segmented<T: Copy + PartialEq>(ui: &mut Ui, current: &mut T, options: &[(T, &str)]) -> bool {
+    match segmented_pick(ui, *current, options) {
+        Some(value) if value != *current => {
+            *current = value;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// [`segmented`] for a strip that leads to pages: `selected_value` is drawn as the chosen
+/// segment and the segment pressed is returned, also when it is the selected one.
+pub fn segmented_pick<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    selected_value: T,
+    options: &[(T, &str)],
+) -> Option<T> {
     let p = pal();
-    let mut changed = false;
+    let mut picked = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = SP_1;
         for (value, label) in options {
-            let selected = *current == *value;
+            let selected = selected_value == *value;
             let mut button = egui::Button::new(RichText::new(*label).color(p.text))
                 .min_size(vec2(72.0, CONTROL_H));
             if selected {
@@ -1203,13 +1321,12 @@ pub fn segmented<T: Copy + PartialEq>(ui: &mut Ui, current: &mut T, options: &[(
             resp.widget_info(|| {
                 egui::WidgetInfo::selected(egui::WidgetType::RadioButton, selected, *label)
             });
-            if resp.clicked() && !selected {
-                *current = *value;
-                changed = true;
+            if resp.clicked() {
+                picked = Some(*value);
             }
         }
     });
-    changed
+    picked
 }
 
 /// A top-level navigation tab: muted text, the selected one in the text colour with an accent
@@ -2309,5 +2426,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_disabled_control_is_still_drawn_readably_after_egui_fades_it() {
+        use crate::theme::{contrast, Palette};
+        for (name, p) in [("light", Palette::light()), ("dark", Palette::dark())] {
+            let fade_to = p.surface_subtle;
+            let faded =
+                |drawn| egui::ecolor::tint_color_towards(before_fade(drawn, fade_to), fade_to);
+            let (text, border) = (faded(p.disabled_text), faded(p.disabled_border));
+            for (on, bg) in [
+                ("page", p.bg),
+                ("surface", p.surface),
+                ("button fill", fade_to),
+            ] {
+                let t = contrast(text, bg);
+                assert!(t >= 3.5, "{name} disabled text on {on}: {t:.2}");
+                let b = contrast(border, bg);
+                assert!(b >= 2.0, "{name} disabled outline on {on}: {b:.2}");
+            }
+        }
+    }
+
+    #[test]
+    fn button_sizes_grow_from_compact_to_large() {
+        let (c, s, l) = (ButtonSize::Compact, ButtonSize::Standard, ButtonSize::Large);
+        assert!(c.height() < s.height() && s.height() < l.height());
+        assert!(c.min_width() < s.min_width());
+        assert_eq!(s.min_size(), vec2(BTN_MIN_W, CONTROL_H));
+    }
+
+    #[test]
+    fn scroll_bars_are_drawn_at_rest_and_widen_under_the_pointer() {
+        let st = scroll_style();
+        assert!(st.floating_width >= 6.0, "a resting bar is at least 6 px");
+        assert!(st.bar_width >= 2.0 * st.floating_width);
+        assert_eq!(st.dormant_handle_opacity, 1.0);
+        assert!(st.floating_allocated_width >= st.floating_width);
     }
 }
