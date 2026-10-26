@@ -39,7 +39,9 @@ pub fn save_quota(data_dir: &Path, packaged: bool, mb: u64) -> Result<(), String
     r
 }
 
-/// A size for the sentence under the control ("256 MiB", "1 GiB", "5 GiB", else MiB).
+/// A size as text ("256 MiB", "1 GiB", "5 GiB", else MiB). The sentence under the switch that used it
+/// is gone, so only the tests read it now.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn size_text(mb: u64) -> String {
     if mb >= 1024 && mb % 1024 == 0 {
         format!("{} GiB", mb / 1024)
@@ -146,11 +148,9 @@ impl HostingUi {
             if self.load_failed {
                 kit::notice(ui, Level::Warn, s.load_failed);
             }
-            let desc = if self.saved == 0 {
-                s.desc_off.to_owned()
-            } else {
-                s.desc_on.replace("{size}", &size_text(self.saved))
-            };
+            // Only "off" gets a note (what off means). With a size chosen, the sentence would
+            // repeat the selected button (`desc_on` stays in the table).
+            let desc = choice_note(s, self.saved);
             let mut choice = self.saved;
             let options = [
                 (0, s.choice_off),
@@ -158,7 +158,7 @@ impl HostingUi {
                 (1_024, s.choice_1g),
                 (5_120, s.choice_5g),
             ];
-            kit::form_row(ui, s.switch_label, Some(&desc), |ui| {
+            kit::form_row(ui, s.switch_label, desc, |ui| {
                 let changed = kit::segmented(ui, &mut choice, &options);
                 kit::status_dot(ui, Level::Warn, s.restart_tag);
                 if changed {
@@ -193,10 +193,76 @@ impl HostingUi {
     }
 }
 
+/// The note under the switch. Only "off" has one (what off means); with a size chosen the
+/// sentence would repeat the selected button.
+fn choice_note(
+    s: &'static crate::hosting_strings::HostStrings,
+    saved: u64,
+) -> Option<&'static str> {
+    (saved == 0).then_some(s.desc_off)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use miasma_core::config::DEFAULT_HOSTED_QUOTA_MB;
+
+    #[test]
+    fn a_chosen_size_gets_no_sentence_that_repeats_the_button() {
+        for l in [Locale::En, Locale::Ja, Locale::ZhCn] {
+            let s = host_strings(l);
+            assert_eq!(choice_note(s, 0), Some(s.desc_off));
+            for mb in [256, 1_024, 5_120, 300] {
+                assert_eq!(choice_note(s, mb), None, "{l:?} {mb}");
+            }
+        }
+    }
+
+    /// The restart sentence is a whole sentence now: at the narrowest widths it wraps inside
+    /// the window and never runs past the right edge.
+    #[test]
+    fn the_restart_sentence_wraps_inside_the_window() {
+        for l in [Locale::En, Locale::Ja, Locale::ZhCn] {
+            for width in [640.0_f32, 420.0] {
+                let ctx = egui::Context::default();
+                ctx.enable_accesskit();
+                kit::apply_theme(&ctx, false);
+                let d = dir();
+                let mut u = HostingUi::with_packaged(d.path().to_path_buf(), false);
+                let tag = host_strings(l).restart_tag;
+                let mut right = f32::NEG_INFINITY;
+                for _ in 0..3 {
+                    let input = egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::pos2(0.0, 0.0),
+                            egui::vec2(width, 900.0),
+                        )),
+                        ..Default::default()
+                    };
+                    let out = ctx.run(input, |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            kit::column(ui, |ui| u.section(ui, l, None));
+                        });
+                    });
+                    if let Some(update) = out.platform_output.accesskit_update {
+                        for (_, n) in &update.nodes {
+                            if n.name() == Some(tag) {
+                                right = n.bounds().map_or(right, |b| b.x1 as f32);
+                            }
+                        }
+                    }
+                }
+                assert!(
+                    right.is_finite(),
+                    "{l:?}: the restart sentence is not drawn"
+                );
+                assert!(
+                    right <= width,
+                    "{l:?} at {width}: the restart sentence ends at {right}"
+                );
+            }
+        }
+    }
 
     fn dir() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()

@@ -225,6 +225,8 @@ pub struct ChatUi {
     /// Set by the window from the daemon status: the home relay is not connected, so a waiting
     /// message is waiting on this computer, not on the other person.
     pub relay_down: bool,
+    /// Easy mode: the screens use plain words and leave out the encryption and relay details.
+    easy: bool,
     availability: Availability,
     was_connected: bool,
     initial_sent: bool,
@@ -333,6 +335,7 @@ impl Default for ChatUi {
         Self {
             locale: Locale::default(),
             relay_down: false,
+            easy: false,
             availability: Availability::Unknown,
             was_connected: false,
             initial_sent: false,
@@ -422,6 +425,12 @@ impl ChatUi {
     pub fn set_locale(&mut self, locale: Locale) {
         self.locale = locale;
         self.group.set_locale(locale);
+    }
+
+    /// Easy mode shows no technical sentences on the chat screens (set by the window every frame).
+    pub fn set_easy(&mut self, easy: bool) {
+        self.easy = easy;
+        self.group.set_easy(easy);
     }
 
     /// The setting "join a group at once when a contact adds me" changed: tell the running
@@ -1142,7 +1151,12 @@ impl ChatUi {
         // connection card is shown in this case, so the reason belongs here.
         if self.availability == Availability::DaemonDown {
             self.heading(ui, c, |_| {});
-            self.notice_card(ui, c.daemon_down, Level::Warn, None, c);
+            let text = if self.easy {
+                c.daemon_down_easy
+            } else {
+                c.daemon_down
+            };
+            self.notice_card(ui, text, Level::Warn, None, c);
             return None;
         }
         match self.availability {
@@ -1153,7 +1167,12 @@ impl ChatUi {
             }
             Availability::OldDaemon => {
                 self.heading(ui, c, |_| {});
-                self.notice_card(ui, c.old_daemon, Level::Warn, Some(c.retry_now), c);
+                let text = if self.easy {
+                    c.old_daemon_easy
+                } else {
+                    c.old_daemon
+                };
+                self.notice_card(ui, text, Level::Warn, Some(c.retry_now), c);
                 return None;
             }
             Availability::Unknown => {
@@ -1504,15 +1523,18 @@ impl ChatUi {
         let status = match header_status(self.relay_down, has_queued) {
             HeaderStatus::Quiet => None,
             HeaderStatus::Waiting => Some(k.header_waiting),
+            HeaderStatus::RelayDown if self.easy => Some(k.header_relay_easy),
             HeaderStatus::RelayDown => Some(k.header_relay),
         };
         // The hybrid post-quantum upgrade of this conversation, when it is in use or was asked
         // for, goes on the same muted line.
+        // Easy mode does not show it at all: it names encryption steps a person cannot act on.
         let pqc_state = self
             .conversations
             .iter()
             .find(|x| x.endpoint_id == o.endpoint_id)
-            .and_then(|x| x.pqc.clone());
+            .and_then(|x| x.pqc.clone())
+            .filter(|_| !self.easy);
         let pqc_line = crate::chat::pqc_text(c, pqc_state.as_deref());
         let status_line: Option<String> = match (status, pqc_line) {
             (Some(s), Some(p)) => Some(format!("{s} · {p}")),
@@ -1692,6 +1714,7 @@ impl ChatUi {
             .map(Vec::as_slice)
             .unwrap_or(&[]);
         let relay_down = self.relay_down;
+        let easy = self.easy;
         let msgs = self.window.items();
         // Only the newest message of mine says "Read" in words; older ones a small check.
         let latest_own = msgs.iter().rposition(|m| m.outgoing);
@@ -1762,6 +1785,7 @@ impl ChatUi {
                                 clock,
                                 bubble_w,
                                 relay_down,
+                                easy,
                                 latest_own == Some(i),
                             ),
                             Entry::File(i) => {
@@ -2186,6 +2210,7 @@ fn message_row(
     clock: Clock,
     bubble_w: f32,
     relay_down: bool,
+    easy: bool,
     latest_own: bool,
 ) -> Option<()> {
     let p = pal();
@@ -2235,7 +2260,9 @@ fn message_row(
     match delivery {
         Delivery::Queued => {
             ui.with_layout(layout, |ui| {
-                let note = if relay_down {
+                let note = if relay_down && easy {
+                    c.queued_note_relay_easy
+                } else if relay_down {
                     c.queued_note_relay
                 } else {
                     c.queued_note
@@ -2247,8 +2274,11 @@ fn message_row(
             ui.with_layout(layout, |ui| {
                 ui.set_max_width(bubble_w);
                 ui.add(
-                    egui::Label::new(kit::meta_text(fail_text(c, m.reason.as_deref()), p.danger))
-                        .wrap(true),
+                    egui::Label::new(kit::meta_text(
+                        crate::chat::fail_text_for(c, m.reason.as_deref(), easy),
+                        p.danger,
+                    ))
+                    .wrap(true),
                 );
             });
             ui.with_layout(layout, |ui| {

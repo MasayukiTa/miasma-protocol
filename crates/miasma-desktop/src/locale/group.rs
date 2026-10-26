@@ -73,6 +73,8 @@ group_strings! {
     // names for assistive technology that match the one-to-one screen, conversation search
     waiting_note, day_today, day_yesterday, remove_from_group, a11y_group_composer,
     a11y_group_send, search_conversations, search_conversations_none,
+    // Easy mode: plain-language versions of the delivery line and the groups-unsupported note.
+    state_waiting_easy, unsupported_easy,
 }
 
 pub fn group_strings(locale: Locale) -> &'static GroupStrings {
@@ -246,6 +248,8 @@ static GR_EN: GroupStrings = GroupStrings {
     a11y_group_send: "Send message to the group",
     search_conversations: "Search conversations",
     search_conversations_none: "No conversation matches.",
+    state_waiting_easy: "Delivered to {d} of {n} members. The rest will get it when they are online.",
+    unsupported_easy: "Groups cannot be used with this version of Miasma. Update Miasma to use them.",
 };
 
 static GR_JA: GroupStrings = GroupStrings {
@@ -411,6 +415,8 @@ static GR_JA: GroupStrings = GroupStrings {
     a11y_group_send: "グループ宛てのメッセージを送信",
     search_conversations: "会話を検索",
     search_conversations_none: "一致する会話がありません。",
+    state_waiting_easy: "{n}人中{d}人に届きました。残りの人はオンラインになると届きます。",
+    unsupported_easy: "このバージョンのMiasmaではグループを使えません。使うには、Miasmaを最新にしてください。",
 };
 
 static GR_ZH_CN: GroupStrings = GroupStrings {
@@ -576,6 +582,8 @@ static GR_ZH_CN: GroupStrings = GroupStrings {
     a11y_group_send: "发送消息到群组",
     search_conversations: "搜索会话",
     search_conversations_none: "没有匹配的会话。",
+    state_waiting_easy: "已送达 {n} 人中的 {d} 人。其余的人上线后会收到。",
+    unsupported_easy: "当前版本的 Miasma 无法使用群组。请将 Miasma 更新到最新版以使用。",
 };
 
 #[cfg(test)]

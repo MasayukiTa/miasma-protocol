@@ -38,6 +38,8 @@ audit_strings! {
     chip_ready, chip_relay,
     // The first line of the stored-shares confirmation.
     storage_scope_all, storage_scope_ids, storage_scope_days,
+    // Why the main button of the private send is off (the code that names the recipient).
+    need_receive_code,
 }
 
 pub fn audit_strings(locale: Locale) -> &'static AuditStrings {
@@ -90,6 +92,7 @@ static AU_EN: AuditStrings = AuditStrings {
     storage_scope_all: "This deletes all {n} stored shares.",
     storage_scope_ids: "This deletes {n} selected shares.",
     storage_scope_days: "This deletes the shares older than {n} days.",
+    need_receive_code: "Enter the receive code first.",
 };
 
 static AU_JA: AuditStrings = AuditStrings {
@@ -134,6 +137,7 @@ static AU_JA: AuditStrings = AuditStrings {
     storage_scope_all: "保存している共有{n}件をすべて削除します。",
     storage_scope_ids: "選んだ共有{n}件を削除します。",
     storage_scope_days: "{n}日より古い共有を削除します。",
+    need_receive_code: "先に受信コードを入力してください。",
 };
 
 static AU_ZH_CN: AuditStrings = AuditStrings {
@@ -178,6 +182,7 @@ static AU_ZH_CN: AuditStrings = AuditStrings {
     storage_scope_all: "将删除全部 {n} 个已保存的共享。",
     storage_scope_ids: "将删除所选的 {n} 个共享。",
     storage_scope_days: "将删除早于 {n} 天的共享。",
+    need_receive_code: "请先输入接收码。",
 };
 
 #[cfg(test)]
@@ -252,6 +257,7 @@ mod tests {
                 a.need_folder,
                 a.need_file,
                 a.need_contact,
+                a.need_receive_code,
                 a.need_password,
                 a.need_private_password,
                 a.need_connection,
@@ -264,5 +270,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn the_private_send_reason_names_the_receive_code_not_a_contact_code() {
+        let en = audit_strings(Locale::En).need_receive_code;
+        let ja = audit_strings(Locale::Ja).need_receive_code;
+        let zh = audit_strings(Locale::ZhCn).need_receive_code;
+        assert!(
+            en.contains("receive code") && !en.contains("contact"),
+            "{en}"
+        );
+        assert!(ja.contains("受信コード") && !ja.contains("連絡先"), "{ja}");
+        assert!(zh.contains("接收码") && !zh.contains("联系人"), "{zh}");
+        // The contact-adding screens keep their own wording.
+        assert!(audit_strings(Locale::Ja)
+            .need_contact
+            .contains("連絡先コード"));
     }
 }

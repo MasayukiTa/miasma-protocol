@@ -713,6 +713,20 @@ pub fn fail_text(c: &ChatStrings, reason: Option<&str>) -> &'static str {
     }
 }
 
+/// [`fail_text`] for the mode: Easy mode says "could not be sent safely" instead of naming the
+/// encryption steps.
+pub fn fail_text_for(c: &ChatStrings, reason: Option<&str>, easy: bool) -> &'static str {
+    if easy {
+        match reason {
+            Some("session") => return c.fail_session_easy,
+            Some("pqc_peer_no_hybrid") => return c.fail_pqc_peer_no_hybrid_easy,
+            Some("pqc_failed") => return c.fail_pqc_failed_easy,
+            _ => {}
+        }
+    }
+    fail_text(c, reason)
+}
+
 /// The line about the hybrid post-quantum upgrade of a conversation, from the
 /// service's state word. `None` when nothing is to be shown (the setting is
 /// off and nothing was negotiated, or the service does not report it).
@@ -1388,6 +1402,79 @@ mod tests {
             // Three different sentences, none of them the "sent" one.
             assert!(waiting != done && sending != done && failed != done);
             assert!(waiting != failed && sending != failed);
+        }
+    }
+
+    /// Words that belong to the technical view: how the message is protected on the way, and
+    /// which server carries it.
+    const TECHNICAL_WORDS: [&str; 12] = [
+        "relay",
+        "advanced encryption",
+        "background service",
+        "verification code",
+        "key exchange",
+        "protection",
+        "リレー",
+        "高度な暗号化",
+        "バックグラウンド",
+        "確認用コード",
+        "中继",
+        "高级加密",
+    ];
+
+    #[test]
+    fn easy_mode_chat_sentences_have_no_technical_words() {
+        use crate::locale::{chat_strings, Locale};
+        for l in Locale::ALL {
+            let c = chat_strings(l);
+            for (name, text) in [
+                ("queued_note_relay_easy", c.queued_note_relay_easy),
+                ("fail_session_easy", c.fail_session_easy),
+                (
+                    "fail_pqc_peer_no_hybrid_easy",
+                    c.fail_pqc_peer_no_hybrid_easy,
+                ),
+                ("fail_pqc_failed_easy", c.fail_pqc_failed_easy),
+                ("daemon_down_easy", c.daemon_down_easy),
+                ("old_daemon_easy", c.old_daemon_easy),
+            ] {
+                assert!(!text.is_empty(), "{l:?} {name}");
+                for w in TECHNICAL_WORDS {
+                    assert!(
+                        !text.to_lowercase().contains(w),
+                        "{l:?} {name} has the technical word {w:?}: {text}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn easy_mode_swaps_only_the_technical_failure_reasons() {
+        use crate::locale::{chat_strings, Locale};
+        for l in Locale::ALL {
+            let c = chat_strings(l);
+            for (reason, easy) in [
+                ("session", c.fail_session_easy),
+                ("pqc_peer_no_hybrid", c.fail_pqc_peer_no_hybrid_easy),
+                ("pqc_failed", c.fail_pqc_failed_easy),
+            ] {
+                assert_eq!(fail_text_for(c, Some(reason), true), easy, "{l:?} {reason}");
+                assert_eq!(
+                    fail_text_for(c, Some(reason), false),
+                    fail_text(c, Some(reason)),
+                    "{l:?} {reason}"
+                );
+                assert_ne!(easy, fail_text(c, Some(reason)), "{l:?} {reason}");
+            }
+            // Every other reason reads the same in both modes.
+            for reason in ["not_allowed", "too_big", "rejected", "expired", "other"] {
+                assert_eq!(
+                    fail_text_for(c, Some(reason), true),
+                    fail_text(c, Some(reason)),
+                    "{l:?} {reason}"
+                );
+            }
         }
     }
 }

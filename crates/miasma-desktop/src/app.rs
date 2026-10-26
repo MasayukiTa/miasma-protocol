@@ -1793,11 +1793,7 @@ impl MiasmaApp {
                     let typed = !self.mid_input.trim().is_empty();
                     let needs = [
                         crate::form_check::Need::general(connected, au.need_connection),
-                        crate::form_check::Need::new(
-                            &mid_edit,
-                            typed,
-                            if easy { au.need_code } else { au.need_mid },
-                        ),
+                        crate::form_check::Need::new(&mid_edit, typed, au.need_mid),
                         // Read with the parser the daemon uses: a text that cannot be an ID keeps
                         // the button off, and the reason says what an ID looks like.
                         crate::form_check::Need::new(
@@ -1969,7 +1965,7 @@ impl MiasmaApp {
                     crate::form_check::Need {
                         field: field_id(&contact_field),
                         ok: !self.send_contact.is_empty(),
-                        reason: au.need_contact,
+                        reason: au.need_receive_code,
                     },
                     crate::form_check::Need {
                         field: field_id(&password_field),
@@ -2044,11 +2040,8 @@ impl MiasmaApp {
         } else {
             s.inbox_heading
         };
-        let desc = if easy {
-            s.inbox_desc_easy
-        } else {
-            s.inbox_desc
-        };
+        // The page title says what the page is; a sentence repeating it is not drawn
+        // (`inbox_desc*` stay in the tables).
 
         self.tech_pair_strip(ui, self.receive_group());
         // Taken out for the frame instead of cloned: the rows need `&mut self` for the password
@@ -2058,7 +2051,7 @@ impl MiasmaApp {
         kit::page_actions(
             ui,
             title,
-            Some(desc),
+            None,
             |ui| {
                 if ui.add(kit::compact_button(s.inbox_refresh)).clicked() {
                     refresh_clicked.set(true);
@@ -2230,11 +2223,7 @@ impl MiasmaApp {
         } else {
             s.outbox_heading
         };
-        let desc = if easy {
-            s.outbox_desc_easy
-        } else {
-            s.outbox_desc
-        };
+        // No sentence under the title: it only repeated it (`outbox_desc*` stay in the tables).
 
         if easy {
             self.easy_files_strip(ui, Tab::Outbox);
@@ -2246,7 +2235,7 @@ impl MiasmaApp {
         kit::page_actions(
             ui,
             title,
-            Some(desc),
+            None,
             |ui| {
                 if ui.add(kit::compact_button(s.outbox_refresh)).clicked() {
                     refresh_clicked.set(true);
@@ -4037,6 +4026,7 @@ impl MiasmaApp {
                 self.chat.mark_seen();
             }
             self.chat.set_locale(self.locale);
+            self.chat.set_easy(self.mode.is_easy());
             self.chat
                 .tick(open, self.daemon_state == DaemonState::Connected);
             let tx = self.worker.tx.clone();
@@ -5604,5 +5594,108 @@ mod tests {
             })
             .collect();
         assert!(bad.is_empty(), "text buttons for Cancel/Done: {bad:?}");
+    }
+
+    #[test]
+    fn the_restore_page_in_easy_mode_asks_for_the_content_id_not_a_code() {
+        for l in Locale::ALL {
+            let au = locale::audit_strings(l);
+            let mut rig = A11yRig::new(Tab::Retrieve);
+            rig.app.locale = l;
+            rig.frames(3);
+            assert!(rig_has(&rig, au.need_mid), "{l:?}: no content ID reason");
+            assert!(!rig_has(&rig, au.need_code), "{l:?}: the vague code reason");
+        }
+    }
+
+    #[test]
+    fn the_private_send_asks_for_the_receive_code() {
+        for l in Locale::ALL {
+            let au = locale::audit_strings(l);
+            let mut rig = A11yRig::new(Tab::Send);
+            rig.app.locale = l;
+            rig.frames(3);
+            assert!(
+                rig_has(&rig, au.need_receive_code),
+                "{l:?}: no receive code reason"
+            );
+            assert!(
+                !rig_has(&rig, au.need_contact),
+                "{l:?}: the contact code reason"
+            );
+        }
+    }
+
+    #[test]
+    fn the_inbox_and_sent_pages_draw_no_sentence_that_repeats_their_title() {
+        let s = locale::strings(Locale::En);
+        for mode in [ProductMode::Easy, ProductMode::Technical] {
+            for tab in [Tab::Inbox, Tab::Outbox] {
+                let mut rig = A11yRig::new(tab);
+                rig.app.mode = mode;
+                rig.frames(3);
+                for text in [
+                    s.inbox_desc,
+                    s.inbox_desc_easy,
+                    s.outbox_desc,
+                    s.outbox_desc_easy,
+                ] {
+                    assert!(!rig_has(&rig, text), "{mode:?} {tab:?} draws {text:?}");
+                }
+            }
+        }
+    }
+
+    /// The tab rows wrap instead of running past the right edge, also with the longest labels
+    /// (Japanese and Chinese file sub-tabs) at a narrow window.
+    #[test]
+    fn the_tab_rows_stay_inside_a_narrow_window_in_every_language() {
+        let width = 640.0_f32;
+        for l in Locale::ALL {
+            for mode in [ProductMode::Easy, ProductMode::Technical] {
+                let ctx = egui::Context::default();
+                ctx.enable_accesskit();
+                let data = tempfile::tempdir().unwrap();
+                let mut app = MiasmaApp::new_with_ctx(
+                    &ctx,
+                    None,
+                    mode,
+                    l,
+                    ThemeMode::Light,
+                    data.path().to_path_buf(),
+                    LaunchIntent::Normal,
+                );
+                app.tab = Tab::Transfers;
+                let mut right = 0.0_f32;
+                let mut tabs = 0;
+                for _ in 0..4 {
+                    app.daemon_state = DaemonState::Connected;
+                    let raw = egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::pos2(0.0, 0.0),
+                            egui::vec2(width, 900.0),
+                        )),
+                        ..Default::default()
+                    };
+                    let out = ctx.run(raw, |ctx| app.update_frame(ctx, None));
+                    let update = out.platform_output.accesskit_update.expect("a tree");
+                    right = 0.0;
+                    tabs = 0;
+                    for (_, n) in &update.nodes {
+                        if n.role() == accesskit::Role::Tab {
+                            if let Some(b) = n.bounds() {
+                                right = right.max(b.x1 as f32);
+                                tabs += 1;
+                            }
+                        }
+                    }
+                }
+                assert!(tabs >= 3, "{l:?} {mode:?}: only {tabs} tabs drawn");
+                assert!(
+                    right <= width,
+                    "{l:?} {mode:?}: a tab ends at {right}, past {width}"
+                );
+            }
+        }
     }
 }
