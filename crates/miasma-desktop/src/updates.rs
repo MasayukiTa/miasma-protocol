@@ -577,7 +577,8 @@ impl UpdatesUi {
                 UpdateMode::Notify => u.mode_desc_notify,
                 UpdateMode::Auto => u.mode_desc_auto,
             };
-            kit::form_row(ui, u.mode_label, Some(desc), |ui| {
+            // No label: the section heading above already says "Updates".
+            kit::form_row(ui, "", Some(desc), |ui| {
                 let mut mode = self.cfg.mode;
                 let options = [
                     (UpdateMode::Off, u.mode_off),
@@ -593,7 +594,13 @@ impl UpdatesUi {
             }
 
             kit::kv_grid(ui, |g| {
-                g.mono(u.version_label, &crate::buildinfo::build_row_value());
+                // The build hash is for support and Technical mode; Easy mode shows the version.
+                let version = if technical {
+                    crate::buildinfo::build_row_value()
+                } else {
+                    env!("MIASMA_VERSION").to_owned()
+                };
+                g.mono(u.version_label, &version);
                 let last = match &self.last_check {
                     Some((at, _)) => self.ago(*at, u),
                     None => u.never_checked.to_owned(),

@@ -41,8 +41,8 @@ pub fn eta_secs(size: u64, bytes: u64, rate_bps: u64) -> Option<u64> {
     Some((size - bytes).div_ceil(rate_bps))
 }
 
-/// The remaining time in the person's language, compact: `あと 5 秒`, `あと 3 分 12 秒`,
-/// `あと 1 時間 5 分` (English keeps `hh:mm:ss`). The words come from `ContactStrings::eta_*`.
+/// The remaining time in the person's language, compact: `あと5秒`, `あと3分12秒`,
+/// `あと1時間5分` (English keeps `hh:mm:ss`). The words come from `ContactStrings::eta_*`.
 pub fn eta_text(c: &ContactStrings, secs: u64) -> String {
     let (d, h, m, s) = (
         secs / 86_400,
@@ -1890,7 +1890,16 @@ impl ContactsUi {
     }
 
     fn body(&mut self, ui: &mut egui::Ui, c: &ContactStrings, connected: bool, technical: bool) {
-        if !connected || self.availability == Availability::DaemonDown {
+        // When the daemon is not connected (needs setup, stopped, or starting),
+        // the connection card above the tab is the single place that explains
+        // what to do and carries the button; a second notice here would repeat
+        // the reason and point at a button this tab does not have.
+        if !connected {
+            return;
+        }
+        // Connected, but the service dropped the contacts channel after start:
+        // no connection card is shown then, so the reason belongs here.
+        if self.availability == Availability::DaemonDown {
             self.notice_card(ui, c.daemon_down, pal().warning, None);
             return;
         }
@@ -1925,7 +1934,7 @@ impl ContactsUi {
             if self.contacts_loaded {
                 let mut invite = false;
                 let add = kit::empty_state_with(ui, c.empty_line, c.add_title, |ui| {
-                    invite = ui.add(kit::quiet_button(c.invite_btn)).clicked();
+                    invite = ui.add(kit::secondary_button(c.invite_btn)).clicked();
                 });
                 if add {
                     self.open_add_dialog();
@@ -2040,12 +2049,12 @@ impl ContactsUi {
                 } else {
                     c.copy_code
                 };
-                if ui.add(kit::quiet_button(l)).clicked() {
+                if ui.add(kit::secondary_button(l)).clicked() {
                     ui.output_mut(|o| o.copied_text = code.clone());
                     self.copied_at = Some(Instant::now());
                 }
                 let l = if self.show_qr { c.hide_qr } else { c.show_qr };
-                if ui.add(kit::quiet_button(l)).clicked() {
+                if ui.add(kit::secondary_button(l)).clicked() {
                     self.show_qr = !self.show_qr;
                 }
             });
@@ -2079,9 +2088,12 @@ impl ContactsUi {
                     hint(ui, c.my_fp_hint);
                 });
             ui.add_space(kit::SP_3);
-            if ui.add(kit::quiet_button(c.done_btn)).clicked() {
-                close = true;
-            }
+            // Closing is a real button, at the right like the other dialogs'.
+            kit::dialog_actions(ui, |ui| {
+                if ui.add(kit::secondary_button(c.done_btn)).clicked() {
+                    close = true;
+                }
+            });
         });
         if shown.is_none() || close {
             self.invite_open = false;
@@ -2256,7 +2268,7 @@ impl ContactsUi {
                         self.queue_add(label);
                     }
                 }
-                if ui.add(kit::quiet_button(c.cancel)).clicked() {
+                if ui.add(kit::secondary_button(c.cancel)).clicked() {
                     close = true;
                 }
             });
@@ -2473,7 +2485,7 @@ impl ContactsUi {
                     {
                         commit = true;
                     }
-                    if ui.add(kit::quiet_button(c.cancel)).clicked() {
+                    if ui.add(kit::secondary_button(c.cancel)).clicked() {
                         close = true;
                     }
                 });
@@ -2558,7 +2570,7 @@ impl ContactsUi {
                     if ui.add(kit::secondary_button(c.sugg_add)).clicked() {
                         add = Some(s.endpoint_id.clone());
                     }
-                    if ui.add(kit::quiet_button(c.sugg_ignore)).clicked() {
+                    if ui.add(kit::compact_button(c.sugg_ignore)).clicked() {
                         ignore = Some(s.endpoint_id.clone());
                     }
                 },
@@ -2628,7 +2640,7 @@ impl ContactsUi {
                     let send = crate::form_check::add_enabled(
                         ui,
                         ct.allow_send,
-                        kit::quiet_button(c.send_short),
+                        kit::compact_button(c.send_short),
                     )
                     .on_hover_text(c.send_files)
                     .on_disabled_hover_text(c.send_disabled_note);
@@ -2721,7 +2733,7 @@ impl ContactsUi {
                     ui.label(egui::RichText::new(t).color(pal().muted));
                 }
                 if self.rows.iter().any(|r| r.finished())
-                    && ui.add(kit::quiet_button(c.btn_clear_finished)).clicked()
+                    && ui.add(kit::compact_button(c.btn_clear_finished)).clicked()
                 {
                     self.clear_confirm = true;
                 }
@@ -4186,13 +4198,13 @@ mod tests {
         let ja = contact_strings(Locale::Ja);
         let en = contact_strings(Locale::En);
         for (secs, want_ja) in [
-            (5, "5 秒"),
-            (59, "59 秒"),
-            (60, "1 分"),
-            (192, "3 分 12 秒"),
-            (3600, "1 時間"),
-            (3900, "1 時間 5 分"),
-            (90_000, "1 日 1 時間"),
+            (5, "5秒"),
+            (59, "59秒"),
+            (60, "1分"),
+            (192, "3分12秒"),
+            (3600, "1時間"),
+            (3900, "1時間5分"),
+            (90_000, "1日1時間"),
         ] {
             assert_eq!(eta_text(ja, secs), want_ja, "{secs}");
             assert_eq!(
@@ -4201,15 +4213,9 @@ mod tests {
                 "en keeps hh:mm:ss ({secs})"
             );
         }
-        assert_eq!(fill(ja.eta, &[("t", &eta_text(ja, 5))]), "あと 5 秒");
-        assert_eq!(
-            fill(ja.eta, &[("t", &eta_text(ja, 192))]),
-            "あと 3 分 12 秒"
-        );
-        assert_eq!(
-            fill(ja.eta, &[("t", &eta_text(ja, 3900))]),
-            "あと 1 時間 5 分"
-        );
+        assert_eq!(fill(ja.eta, &[("t", &eta_text(ja, 5))]), "あと5秒");
+        assert_eq!(fill(ja.eta, &[("t", &eta_text(ja, 192))]), "あと3分12秒");
+        assert_eq!(fill(ja.eta, &[("t", &eta_text(ja, 3900))]), "あと1時間5分");
     }
 
     #[test]
@@ -4259,6 +4265,65 @@ mod tests {
         }
         let (used, avail) = seen.unwrap();
         (used, avail, state.row_rects.clone())
+    }
+
+    /// Draw the Contacts page once with AccessKit on and collect every node name,
+    /// so a test can check whether a given line of text is shown. `availability`
+    /// lets a test place the UI in the "service dropped after connect" state.
+    fn contacts_drawn_names(connected: bool, availability: Availability) -> Vec<String> {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        crate::ui_kit::apply_theme(&ctx, false);
+        let c = contact_strings(Locale::En);
+        let mut state = ContactsUi::fixture("two", c).unwrap();
+        state.availability = availability;
+        let mut names = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 2400.0),
+                )),
+                ..Default::default()
+            };
+            let out = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    crate::ui_kit::column(ui, |ui| state.show(ui, c, connected, false));
+                });
+            });
+            if let Some(update) = out.platform_output.accesskit_update {
+                names = update
+                    .nodes
+                    .iter()
+                    .filter_map(|(_, n)| n.name().map(|s| s.to_owned()))
+                    .collect();
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn before_setup_the_contacts_tab_does_not_repeat_the_service_notice() {
+        // Not connected: the connection card above the tab is the single guide, so
+        // the tab body must not repeat the "service" notice.
+        let names = contacts_drawn_names(false, Availability::Unknown);
+        let notice = contact_strings(Locale::En).daemon_down;
+        assert!(
+            !names.iter().any(|n| n == notice),
+            "the contacts tab repeated the service notice while disconnected: {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_dropped_service_after_connect_still_explains_itself_in_contacts() {
+        // Connected but the service stopped answering: no connection card is shown,
+        // so the reason must appear in the tab body.
+        let names = contacts_drawn_names(true, Availability::DaemonDown);
+        let notice = contact_strings(Locale::En).daemon_down;
+        assert!(
+            names.iter().any(|n| n == notice),
+            "the contacts tab did not explain the dropped service: {names:?}"
+        );
     }
 
     #[test]

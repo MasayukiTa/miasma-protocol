@@ -33,6 +33,8 @@ compose_strings! {
     // The conversation header and menu
     a11y_menu, menu_receipts, menu_verify, verify_title, verify_body, verify_close,
     header_waiting, header_relay, unverified_short,
+    // Easy mode: the same state without the word "relay".
+    header_relay_easy,
 }
 
 pub fn compose_strings(locale: Locale) -> &'static ComposeStrings {
@@ -60,7 +62,7 @@ static CO_EN: ComposeStrings = ComposeStrings {
     files_count: "{n} files",
     file_remove: "Remove",
     a11y_file_remove: "Remove {name} from the list",
-    more_options: "More options",
+    more_options: "Password and protection level",
     send: "Send",
     close: "Close",
     cancel: "Cancel",
@@ -85,9 +87,10 @@ static CO_EN: ComposeStrings = ComposeStrings {
     verify_title: "Verify {name}",
     verify_body: "Ask {name}, in person or by phone, to read out their own verification code. It should match this one:",
     verify_close: "Close",
-    header_waiting: "Waiting for them to receive your messages",
+    header_waiting: "Waiting for them to receive",
     header_relay: "This computer is not connected to the relay",
     unverified_short: "{u} not in your contacts yet",
+    header_relay_easy: "Miasma is not connected right now",
 };
 
 static CO_JA: ComposeStrings = ComposeStrings {
@@ -104,10 +107,10 @@ static CO_JA: ComposeStrings = ComposeStrings {
     files_add: "ファイルを追加...",
     files_drop: "ウィンドウのどこにでもファイルをドロップできます。",
     files_none: "ファイルはまだ選ばれていません。",
-    files_count: "{n} 個のファイル",
+    files_count: "{n}個のファイル",
     file_remove: "外す",
     a11y_file_remove: "{name} を一覧から外す",
-    more_options: "その他の設定",
+    more_options: "パスワードと保護レベル",
     send: "送信",
     close: "閉じる",
     cancel: "キャンセル",
@@ -121,7 +124,7 @@ static CO_JA: ComposeStrings = ComposeStrings {
     st_sending: "送信中 {pct}",
     st_done: "送信済み",
     st_failed: "失敗",
-    st_failed_why: "失敗: {why}",
+    st_failed_why: "失敗：{why}",
     show_in_files: "「ファイル」で見る",
     show_in_contacts: "「連絡先」で見る",
     send_more: "続けてファイルを送る",
@@ -129,12 +132,13 @@ static CO_JA: ComposeStrings = ComposeStrings {
     a11y_menu: "この会話のその他の操作",
     menu_receipts: "既読表示",
     menu_verify: "連絡先を確認する",
-    verify_title: "{name} さんを確認",
-    verify_body: "{name} さんに会うか電話で、相手自身の確認用コードを読み上げてもらってください。次のコードと同じなら、本人です。",
+    verify_title: "{name}さんを確認",
+    verify_body: "{name}さんに会うか電話で相手自身の確認用コードを読み上げてもらってください。次のコードと同じなら、本人です。",
     verify_close: "閉じる",
-    header_waiting: "相手がメッセージを受け取るのを待っています",
+    header_waiting: "相手の受信を待っています",
     header_relay: "このコンピューターはリレーに接続されていません",
-    unverified_short: "連絡先に未登録: {u} 人",
+    unverified_short: "連絡先に未登録：{u}人",
+    header_relay_easy: "いまMiasmaはつながっていません",
 };
 
 static CO_ZH_CN: ComposeStrings = ComposeStrings {
@@ -154,7 +158,7 @@ static CO_ZH_CN: ComposeStrings = ComposeStrings {
     files_count: "{n} 个文件",
     file_remove: "移除",
     a11y_file_remove: "从列表中移除 {name}",
-    more_options: "更多选项",
+    more_options: "密码与保护级别",
     send: "发送",
     close: "关闭",
     cancel: "取消",
@@ -179,9 +183,10 @@ static CO_ZH_CN: ComposeStrings = ComposeStrings {
     verify_title: "验证 {name}",
     verify_body: "请当面或通过电话，让 {name} 读出其自己的安全码。它应与下面的安全码一致：",
     verify_close: "关闭",
-    header_waiting: "正在等待对方接收你的消息",
+    header_waiting: "正在等待对方接收",
     header_relay: "本机未连接到中继服务器",
     unverified_short: "{u} 人不在你的联系人中",
+    header_relay_easy: "Miasma 当前未连接",
 };
 
 #[cfg(test)]

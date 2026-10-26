@@ -138,6 +138,9 @@ pub struct MiasmaApp {
     /// A dialog was open at the end of the last frame: the page behind it is switched off.
     modal_open: bool,
     relay_down: Option<crate::worker::RelayDown>,
+    /// The relay was not reached yet but has been down for less than [`RELAY_GRACE_SECS`]: shown
+    /// as "connecting", not as a problem.
+    relay_connecting: bool,
     share_count: usize,
     used_mb: f64,
     quota_mb: u64,
@@ -561,6 +564,7 @@ impl MiasmaApp {
             peer_count: 0,
             modal_open: false,
             relay_down: None,
+            relay_connecting: false,
             share_count: 0,
             used_mb: 0.0,
             quota_mb: 0,
@@ -976,6 +980,10 @@ impl MiasmaApp {
                     keeping_awake,
                 } => {
                     self.busy = false;
+                    // Right after the start the relay is not reached for a while and then is: that
+                    // is "connecting", not an error. Only a relay that stays down is reported.
+                    let (connecting, relay_down) = relay_after_grace(relay_down);
+                    self.relay_connecting = connecting;
                     self.chat.relay_down = relay_down.is_some();
                     self.relay_down = relay_down;
                     self.transfers.keeping_awake = keeping_awake;
@@ -1302,6 +1310,23 @@ impl MiasmaApp {
         }
     }
 
+    /// What the chip in the header says: [`header_chip`], with "connecting" while the relay has
+    /// not been reached for a short time after the start.
+    fn chip(&self) -> (Level, &'static str) {
+        if self.daemon_state == DaemonState::Connected
+            && self.relay_connecting
+            && self.relay_down.is_none()
+        {
+            return (Level::Info, crate::uitext::relay_connecting(self.locale));
+        }
+        header_chip(
+            &self.daemon_state,
+            self.relay_down.is_some(),
+            self.s(),
+            locale::audit_strings(self.locale),
+        )
+    }
+
     // ── Connection header ────────────────────────────────────────────────
 
     /// What the page shows above its content while the daemon is not up: one surface, one
@@ -1421,7 +1446,6 @@ impl MiasmaApp {
         if self.daemon_state != DaemonState::Connected {
             return;
         }
-        let peers = self.peer_count;
         let shares = self.share_count;
         let storage = if self.quota_mb > 0 {
             format!("{:.0}%", (self.used_mb / self.quota_mb as f64) * 100.0)
@@ -1461,15 +1485,29 @@ impl MiasmaApp {
             ui.horizontal(actions);
         }
 
+        // When there is no one to send to yet, point to Contacts — the same destination as the
+        // chat empty state. Without this the three actions lead nowhere useful on first run.
+        if self.contacts.contact_list().is_empty() {
+            ui.add_space(kit::SP_3);
+            kit::surface(ui, |ui| {
+                kit::paragraph(ui, s.home_no_contacts);
+                ui.add_space(kit::SP_2);
+                if ui
+                    .add(kit::secondary_button(s.home_open_contacts))
+                    .clicked()
+                {
+                    self.tab = Tab::Contacts;
+                }
+            });
+        }
+
         // Status is one muted line; the numbers are behind "Details".
         ui.add_space(kit::SP_3);
-        let (_, state_text) = header_chip(
-            &self.daemon_state,
-            self.relay_down.is_some(),
-            s,
-            locale::audit_strings(self.locale),
-        );
-        ui.label(kit::muted_text(state_text));
+        // The header already says "ready"; this line is only for what is not.
+        let (level, state_text) = self.chip();
+        if level != Level::Ok {
+            ui.label(kit::muted_text(state_text));
+        }
         ui.add_space(kit::SP_2);
         egui::CollapsingHeader::new(kit::muted_text(s.details_easy))
             .id_source("home_details")
@@ -1479,11 +1517,6 @@ impl MiasmaApp {
                     ui,
                     &[
                         (s.dashboard_storage_label, storage, Level::Muted),
-                        (
-                            s.dashboard_peers_label,
-                            peers.to_string(),
-                            if peers > 0 { Level::Ok } else { Level::Warn },
-                        ),
                         (s.status_items_stored, shares.to_string(), Level::Muted),
                     ],
                 );
@@ -1492,11 +1525,16 @@ impl MiasmaApp {
 
     fn files_panel(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
+        let easy = self.mode.is_easy();
         let connected = self.daemon_state == DaemonState::Connected;
-        let transfer_label = self.tr().tab_easy;
 
         // The six actions say what this screen is for: no explanation under the heading.
         kit::page(ui, s.files_heading_easy, None, |ui| {
+            // Not connected: the actions are greyed out, so say why and point at the
+            // one connection card above this page instead of leaving them silent.
+            if easy && !connected {
+                kit::notice(ui, Level::Warn, s.files_not_connected_hint);
+            }
             // Two main tasks side by side, big; storing and restoring under them, still large;
             // what happened (transfers, sent files) as small links at the bottom.
             let gap = kit::SP_3;
@@ -1539,22 +1577,14 @@ impl MiasmaApp {
             }
             ui.add_space(kit::SP_4);
             kit::divider(ui);
-            ui.horizontal(|ui| {
-                if crate::form_check::add_enabled(ui, connected, kit::quiet_button(transfer_label))
-                    .clicked()
-                {
-                    self.tab = Tab::Transfers;
-                }
-                if crate::form_check::add_enabled(
-                    ui,
-                    connected,
-                    kit::quiet_button(s.tab_outbox_easy),
-                )
-                .clicked()
-                {
-                    self.tab = Tab::Outbox;
-                }
-            });
+            ui.add_space(kit::SP_2);
+            // What happened: two views, the first one already open under the strip.
+            self.easy_files_strip(ui, Tab::Transfers);
+            ui.add_space(kit::SP_2);
+            let t = self.tr();
+            for cmd in self.transfers.show_in(ui, t, easy, connected, false) {
+                let _ = self.worker.tx.try_send(cmd);
+            }
         });
     }
 
@@ -1673,9 +1703,49 @@ impl MiasmaApp {
         let t = self.tr();
         let easy = self.mode.is_easy();
         let connected = self.daemon_state == DaemonState::Connected;
+        if easy {
+            self.easy_files_strip(ui, Tab::Transfers);
+            ui.add_space(kit::SP_2);
+        }
         for cmd in self.transfers.show(ui, t, easy, connected) {
             let _ = self.worker.tx.try_send(cmd);
         }
+    }
+
+    /// Easy mode: the two views of what happened to files (transfers, sent files) as a strip
+    /// with the open one marked, instead of two text links under an empty page.
+    fn easy_files_strip(&mut self, ui: &mut egui::Ui, selected: Tab) {
+        let options = [
+            (Tab::Transfers, self.tr().tab_easy),
+            (Tab::Outbox, self.s().tab_outbox_easy),
+        ];
+        if let Some(tab) = kit::segmented_pick(ui, selected, &options) {
+            self.tab = tab;
+        }
+    }
+
+    /// Technical mode: two screens of one group (send and what was sent, receive and restore)
+    /// as a strip with the open one marked.
+    fn tech_pair_strip(&mut self, ui: &mut egui::Ui, pair: [(Tab, &'static str); 2]) {
+        if self.mode.is_easy() {
+            return;
+        }
+        if let Some(tab) = kit::segmented_pick(ui, self.tab, &pair) {
+            self.tab = tab;
+        }
+        ui.add_space(kit::SP_2);
+    }
+
+    fn send_group(&self) -> [(Tab, &'static str); 2] {
+        let s = self.s();
+        [(Tab::Send, s.tab_send), (Tab::Outbox, s.tab_outbox)]
+    }
+
+    fn receive_group(&self) -> [(Tab, &'static str); 2] {
+        [
+            (Tab::Inbox, self.s().tab_inbox),
+            (Tab::Retrieve, crate::uitext::retrieve_by_id(self.locale)),
+        ]
     }
 
     fn retrieve_panel(&mut self, ui: &mut egui::Ui) {
@@ -1693,6 +1763,7 @@ impl MiasmaApp {
         } else {
             s.retrieve_desc
         };
+        self.tech_pair_strip(ui, self.receive_group());
         kit::page(ui, title, Some(desc), |ui| {
             if easy && !connected {
                 kit::notice(ui, Level::Warn, s.retrieve_not_connected_hint);
@@ -1704,6 +1775,8 @@ impl MiasmaApp {
                 } else {
                     s.retrieve_mid_label
                 });
+                // Where the ID comes from: a person who gets here without it is stuck.
+                kit::hint(ui, crate::uitext::restore_id_hint(self.locale));
                 let au = locale::audit_strings(self.locale);
                 let mid_edit = crate::form_check::add_enabled(
                     ui,
@@ -1720,11 +1793,7 @@ impl MiasmaApp {
                     let typed = !self.mid_input.trim().is_empty();
                     let needs = [
                         crate::form_check::Need::general(connected, au.need_connection),
-                        crate::form_check::Need::new(
-                            &mid_edit,
-                            typed,
-                            if easy { au.need_code } else { au.need_mid },
-                        ),
+                        crate::form_check::Need::new(&mid_edit, typed, au.need_mid),
                         // Read with the parser the daemon uses: a text that cannot be an ID keeps
                         // the button off, and the reason says what an ID looks like.
                         crate::form_check::Need::new(
@@ -1819,6 +1888,7 @@ impl MiasmaApp {
         let desc = if easy { s.send_desc_easy } else { s.send_desc };
         let connected = self.daemon_state == DaemonState::Connected;
 
+        self.tech_pair_strip(ui, self.send_group());
         kit::page(ui, title, Some(desc), |ui| {
             kit::surface(ui, |ui| {
                 // Own contact string: what a sender needs to address this device.
@@ -1895,7 +1965,7 @@ impl MiasmaApp {
                     crate::form_check::Need {
                         field: field_id(&contact_field),
                         ok: !self.send_contact.is_empty(),
-                        reason: au.need_contact,
+                        reason: au.need_receive_code,
                     },
                     crate::form_check::Need {
                         field: field_id(&password_field),
@@ -1963,17 +2033,17 @@ impl MiasmaApp {
         let s = self.s();
         let easy = self.mode.is_easy();
         let connected = self.daemon_state == DaemonState::Connected;
+        // Easy mode reuses the Home "Receive a file" label so the button that brings the user
+        // here and the page title are the same words (and stay the same if either is retranslated).
         let title = if easy {
-            s.inbox_heading_easy
+            s.home_receive_action
         } else {
             s.inbox_heading
         };
-        let desc = if easy {
-            s.inbox_desc_easy
-        } else {
-            s.inbox_desc
-        };
+        // The page title says what the page is; a sentence repeating it is not drawn
+        // (`inbox_desc*` stay in the tables).
 
+        self.tech_pair_strip(ui, self.receive_group());
         // Taken out for the frame instead of cloned: the rows need `&mut self` for the password
         // field and the worker.
         let items = std::mem::take(&mut self.inbox_items);
@@ -1981,7 +2051,7 @@ impl MiasmaApp {
         kit::page_actions(
             ui,
             title,
-            Some(desc),
+            None,
             |ui| {
                 if ui.add(kit::compact_button(s.inbox_refresh)).clicked() {
                     refresh_clicked.set(true);
@@ -1996,6 +2066,16 @@ impl MiasmaApp {
                 }
                 if items.is_empty() {
                     ui.label(kit::muted_text(s.inbox_empty));
+                    // The code/invite receive form lives on the Transfers screen; without this
+                    // link an empty inbox gives no way to receive by code. Same destination as
+                    // the "File transfer" link on the Files tab.
+                    ui.add_space(kit::SP_2);
+                    if ui
+                        .add(kit::secondary_button(s.inbox_receive_by_code))
+                        .clicked()
+                    {
+                        self.tab = Tab::Transfers;
+                    }
                     return;
                 }
                 for item in &items {
@@ -2143,18 +2223,19 @@ impl MiasmaApp {
         } else {
             s.outbox_heading
         };
-        let desc = if easy {
-            s.outbox_desc_easy
-        } else {
-            s.outbox_desc
-        };
+        // No sentence under the title: it only repeated it (`outbox_desc*` stay in the tables).
 
+        if easy {
+            self.easy_files_strip(ui, Tab::Outbox);
+            ui.add_space(kit::SP_2);
+        }
+        self.tech_pair_strip(ui, self.send_group());
         let items = std::mem::take(&mut self.outbox_items);
         let refresh_clicked = std::cell::Cell::new(false);
         kit::page_actions(
             ui,
             title,
-            Some(desc),
+            None,
             |ui| {
                 if ui.add(kit::compact_button(s.outbox_refresh)).clicked() {
                     refresh_clicked.set(true);
@@ -2455,12 +2536,7 @@ impl MiasmaApp {
                 g.row(s.status_state, |ui| match self.daemon_state {
                     DaemonState::Connected => {
                         // The same words as the chip in the header.
-                        let (level, text) = header_chip(
-                            &self.daemon_state,
-                            self.relay_down.is_some(),
-                            s,
-                            locale::audit_strings(self.locale),
-                        );
+                        let (level, text) = self.chip();
                         kit::status_dot(ui, level, text);
                     }
                     DaemonState::Starting => {
@@ -2573,7 +2649,7 @@ impl MiasmaApp {
                     table.header(
                         ui,
                         &[
-                            s.status_transport_name,
+                            crate::uitext::transport_column(self.locale),
                             s.status_transport_status,
                             s.status_transport_counts,
                             s.status_transport_details,
@@ -2739,7 +2815,8 @@ impl MiasmaApp {
                     );
                 }
             }
-            {
+            // Bits or bytes, Mbps or MiB/s: for Technical mode only.
+            if !easy {
                 let sp = crate::speed::speed_strings(self.locale);
                 kit::form_row(ui, sp.settings_unit, None, |ui| {
                     let mut unit = self.speed_prefs.unit;
@@ -2790,11 +2867,13 @@ impl MiasmaApp {
         if self.mode.is_easy() {
             // Relay addresses, certificates, retry time and the check are for Technical use.
             let title = self.s().settings_network_details_easy;
+            self.network.set_easy(true);
             egui::CollapsingHeader::new(kit::section_text(title))
                 .id_source("settings_network_advanced")
                 .default_open(false)
                 .show_a11y(ui, |ui| self.network.section(ui, self.locale));
         } else {
+            self.network.set_easy(false);
             self.network.section(ui, self.locale);
         }
     }
@@ -2810,9 +2889,18 @@ impl MiasmaApp {
 
             // ── Actions ──────────────────────────────────────────────
             kit::section(ui, s.settings_actions, |ui| {
+                if !easy {
+                    kit::hint(ui, crate::uitext::diagnostics_live_in_status(self.locale));
+                }
                 kit::button_row(ui, |ui| {
-                    self.copy_diagnostics_button(ui);
-                    self.save_diagnostics_button(ui);
+                    if easy {
+                        // Easy mode has no Status screen: the report is here.
+                        self.copy_diagnostics_button(ui);
+                        self.save_diagnostics_button(ui);
+                    } else if ui.add(kit::secondary_button(s.tab_status)).clicked() {
+                        // Technical mode keeps copy and save on the Status screen only.
+                        self.tab = Tab::Status;
+                    }
                     if ui
                         .add(kit::secondary_button(s.settings_open_folder))
                         .clicked()
@@ -2843,23 +2931,38 @@ impl MiasmaApp {
                                     self.set_msg(MsgKind::Info, s.settings_path_copied);
                                 }
                             });
-                            g.mono(
-                                s.settings_config_file,
-                                &format!("{}{sep}config.toml", &self.data_dir_display),
-                            );
+                            let config_path = format!("{}{sep}config.toml", &self.data_dir_display);
+                            g.row(s.settings_config_file, |ui| {
+                                if kit::mono_copy(ui, &config_path, s.copy) {
+                                    self.set_msg(MsgKind::Info, s.settings_path_copied);
+                                }
+                            });
                             let log_where = if self.logs.writes_files {
                                 format!("{}{sep}lg", &self.data_dir_display)
                             } else {
                                 self.lg().memory_only.to_owned()
                             };
-                            g.mono(s.settings_log, &log_where);
+                            if self.logs.writes_files {
+                                g.row(s.settings_log, |ui| {
+                                    if kit::mono_copy(ui, &log_where, s.copy) {
+                                        self.set_msg(MsgKind::Info, s.settings_path_copied);
+                                    }
+                                });
+                            } else {
+                                g.mono(s.settings_log, &log_where);
+                            }
                             g.mono(
                                 crate::buildinfo::build_row_label(self.locale),
                                 &crate::buildinfo::build_row_value(),
                             );
                             if let Ok(exe) = std::env::current_exe() {
                                 if let Some(dir) = exe.parent() {
-                                    g.mono(s.settings_install, &dir.to_string_lossy());
+                                    let install = dir.to_string_lossy().into_owned();
+                                    g.row(s.settings_install, |ui| {
+                                        if kit::mono_copy(ui, &install, s.copy) {
+                                            self.set_msg(MsgKind::Info, s.settings_path_copied);
+                                        }
+                                    });
                                 }
                             }
                         });
@@ -2916,9 +3019,13 @@ impl MiasmaApp {
 
     // ── Advanced encryption (Settings) ───────────────────────────────────────────
 
-    /// The three choices of `privacy.pqc_mode`, with what each one does. The
-    /// choice is written to the configuration at once; the background service
-    /// reads it when it starts.
+    /// `privacy.pqc_mode` in Settings. The normal (easy) view offers only the
+    /// required default; `off` and `prefer`, which allow a classical fallback,
+    /// appear under an advanced heading in the technical view (they can also be
+    /// set in the configuration file or by the advanced command-line option). A
+    /// warning is shown whenever a value that allows a classical fallback is in
+    /// force. The choice is written to the configuration at once; the background
+    /// service reads it when it starts.
     fn pqc_section(&mut self, ui: &mut egui::Ui) {
         use miasma_core::config::PqcMode;
         let p = self.pq();
@@ -2936,20 +3043,24 @@ impl MiasmaApp {
                 kit::notice(ui, Level::Warn, p.unavailable);
                 ui.add_space(kit::SP_1);
             }
+            // `require` is the default. `off` and `prefer` lower the protection
+            // below it and are set apart under an advanced heading further down;
+            // while one of them is in force a warning says a classical fallback
+            // is allowed.
+            if chosen.allows_classical_fallback() {
+                kit::notice(ui, Level::Warn, p.fallback_warning);
+                ui.add_space(kit::SP_1);
+            }
             // Without the protection in this build the choices are shown switched off: they
             // would be saved but change nothing.
             ui.add_enabled_ui(available, |ui| {
-                for (mode, label) in [
-                    (PqcMode::Off, p.off),
-                    (PqcMode::Prefer, p.prefer),
-                    (PqcMode::Require, p.require),
-                ] {
-                    let r = ui.radio_value(&mut chosen, mode, label);
+                let radio = |ui: &mut egui::Ui, chosen: &mut PqcMode, mode, label| {
+                    let r = ui.radio_value(chosen, mode, label);
                     // Each choice is named by its own label; the heading names the group.
                     r.widget_info(|| {
                         egui::WidgetInfo::selected(
                             egui::WidgetType::RadioButton,
-                            chosen == mode,
+                            *chosen == mode,
                             label,
                         )
                     });
@@ -2957,10 +3068,34 @@ impl MiasmaApp {
                     if !available {
                         crate::form_check::mark_disabled(&r);
                     }
+                };
+                // `require` is the standard and the only everyday choice; it is
+                // always shown first and is selectable.
+                radio(ui, &mut chosen, PqcMode::Require, p.require);
+                kit::hint(ui, p.required_note);
+                // `off` and `prefer` lower the protection below the default. They
+                // are not everyday choices: the normal (easy) settings do not
+                // offer them, so a classical fallback can only be chosen from the
+                // configuration file, the advanced command-line option, or this
+                // technical view. When one is already in force the warning above
+                // is shown whichever view this is.
+                if !easy {
+                    ui.add_space(kit::SP_1);
+                    // The two lower protections sit under their own header, not as a loose line
+                    // between the radios.
+                    egui::CollapsingHeader::new(kit::muted_text(p.advanced_label))
+                        .id_source("settings_pqc_advanced")
+                        .default_open(true)
+                        .show_a11y(ui, |ui| {
+                            kit::hint(ui, p.advanced_hint);
+                            radio(ui, &mut chosen, PqcMode::Prefer, p.prefer);
+                            radio(ui, &mut chosen, PqcMode::Off, p.off);
+                        });
                 }
             });
             // What the protection is and what each choice does: opened on request.
-            egui::CollapsingHeader::new(kit::muted_text(crate::uitext::details(locale)))
+            let details_title = crate::uitext::details_of(locale, p.heading);
+            egui::CollapsingHeader::new(kit::muted_text(details_title))
                 .id_source("settings_pqc_details")
                 .default_open(false)
                 .show_a11y(ui, |ui| {
@@ -3872,7 +4007,9 @@ impl MiasmaApp {
 
         // Transfers: about once a second while that tab is showing or a transfer is running.
         if self.daemon_state == DaemonState::Connected
-            && self.transfers.poll_due(self.tab == Tab::Transfers)
+            && self
+                .transfers
+                .poll_due(self.tab == Tab::Transfers || self.tab == Tab::Files)
             && self.worker.tx.try_send(WorkerCmd::TransferPoll).is_ok()
         {
             self.transfers.note_polled();
@@ -3904,6 +4041,7 @@ impl MiasmaApp {
                 self.chat.mark_seen();
             }
             self.chat.set_locale(self.locale);
+            self.chat.set_easy(self.mode.is_easy());
             self.chat
                 .tick(open, self.daemon_state == DaemonState::Connected);
             let tx = self.worker.tx.clone();
@@ -3955,12 +4093,7 @@ impl MiasmaApp {
                             });
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let (level, label) = header_chip(
-                            &self.daemon_state,
-                            self.relay_down.is_some(),
-                            s,
-                            locale::audit_strings(self.locale),
-                        );
+                        let (level, label) = self.chip();
                         kit::status_dot(ui, level, label);
                     });
                 });
@@ -3979,10 +4112,15 @@ impl MiasmaApp {
                 let ct = locale::contact_strings(self.locale);
                 let contacts_label = match self.contacts.unseen() {
                     0 => ct.tab.to_owned(),
-                    n => format!("{} ({n} {})", ct.tab, ct.nav_new),
+                    n => {
+                        crate::uitext::tab_with_new(self.locale, ct.tab, &n.to_string(), ct.nav_new)
+                    }
                 };
-                let chat_label =
-                    crate::chat::nav_label(locale::chat_strings(self.locale), self.chat.unseen());
+                let chat_label = crate::chat::nav_label(
+                    self.locale,
+                    locale::chat_strings(self.locale),
+                    self.chat.unseen(),
+                );
                 let send_label = if easy { s.tab_send_easy } else { s.tab_send };
                 let inbox_label = if easy { s.tab_inbox_easy } else { s.tab_inbox };
                 let outbox_label = if easy {
@@ -4058,7 +4196,21 @@ impl MiasmaApp {
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
                         for tab in &TECH_FILE_TABS[..count] {
-                            if kit::nav_tab(ui, self.tab == *tab, label_for(*tab)).clicked() {
+                            // Sent files and Retrieve sit inside the Send and Receive entries
+                            // (a strip at the top of those screens switches between them).
+                            let (label, selected) = match tab {
+                                Tab::Outbox | Tab::Retrieve => continue,
+                                Tab::Send => (
+                                    label_for(Tab::Send),
+                                    matches!(self.tab, Tab::Send | Tab::Outbox),
+                                ),
+                                Tab::Inbox => (
+                                    crate::uitext::receive_group(self.locale),
+                                    matches!(self.tab, Tab::Inbox | Tab::Retrieve),
+                                ),
+                                other => (label_for(*other), self.tab == *other),
+                            };
+                            if kit::nav_tab(ui, selected, label).clicked() {
                                 self.tab = *tab;
                             }
                         }
@@ -4263,6 +4415,20 @@ impl MiasmaApp {
 /// Width of the page column below which the task buttons stack in one column.
 const TASK_COLUMNS_MIN_W: f32 = 560.0;
 
+/// How long the relay may stay unreached before it is reported as a problem. A fresh start was
+/// seen (beta.12 review, 2026-10-26) to report it and recover by itself within a minute, so for
+/// that long the window says "connecting".
+const RELAY_GRACE_SECS: u64 = 60;
+
+/// Split the daemon's report of an unreached relay into "still connecting" (down for less than
+/// [`RELAY_GRACE_SECS`]) and the problem to show (down for longer).
+fn relay_after_grace(
+    down: Option<crate::worker::RelayDown>,
+) -> (bool, Option<crate::worker::RelayDown>) {
+    let connecting = down.as_ref().is_some_and(|r| r.secs < RELAY_GRACE_SECS);
+    (connecting, down.filter(|r| r.secs >= RELAY_GRACE_SECS))
+}
+
 /// What the chip in the header says, from what is known: the service is up, and its relay is
 /// reachable or not. Having no peer connected right now is the normal idle state (the direct
 /// connection to a contact is made when something is sent), so it is not a problem state; the
@@ -4335,6 +4501,9 @@ mod tests {
             LaunchIntent::Normal,
         );
         app.daemon_state = state;
+        // This test measures the layout of the three actions and the status line. The
+        // "no contacts yet" card is covered by its own test, so give the app a contact here.
+        app.contacts = ContactsUi::fixture("two", locale::contact_strings(Locale::En)).unwrap();
         let mut used = egui::Rect::NOTHING;
         for _ in 0..3 {
             let input = egui::RawInput {
@@ -4355,6 +4524,71 @@ mod tests {
             });
         }
         used
+    }
+
+    /// Draw only the Easy Files page with AccessKit on and collect every node
+    /// name, so a test can check whether a given line of text is shown.
+    fn files_page_names(state: DaemonState) -> Vec<String> {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let data = tempfile::tempdir().unwrap();
+        let mut app = MiasmaApp::new_with_ctx(
+            &ctx,
+            None,
+            ProductMode::Easy,
+            Locale::En,
+            ThemeMode::Light,
+            data.path().to_path_buf(),
+            LaunchIntent::Normal,
+        );
+        app.daemon_state = state;
+        app.tab = Tab::Files;
+        let mut names = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let out = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    kit::column(ui, |ui| app.files_panel(ui));
+                });
+            });
+            if let Some(update) = out.platform_output.accesskit_update {
+                names = update
+                    .nodes
+                    .iter()
+                    .filter_map(|(_, n)| n.name().map(|s| s.to_owned()))
+                    .collect();
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn before_setup_the_files_tab_gives_the_reason_the_actions_are_off() {
+        // Not connected: the actions are greyed out, so the tab must say why
+        // instead of leaving a silent wall of disabled buttons.
+        let hint = locale::strings(Locale::En).files_not_connected_hint;
+        let names = files_page_names(DaemonState::NeedsInit);
+        assert!(
+            names.iter().any(|n| n == hint),
+            "the files tab did not explain the disabled actions: {names:?}"
+        );
+    }
+
+    #[test]
+    fn once_connected_the_files_tab_drops_the_not_connected_reason() {
+        // Connected: the actions work, so the not-connected reason is gone.
+        let hint = locale::strings(Locale::En).files_not_connected_hint;
+        let names = files_page_names(DaemonState::Connected);
+        assert!(
+            !names.iter().any(|n| n == hint),
+            "the files tab kept the not-connected reason while connected: {names:?}"
+        );
     }
 
     /// One frame of the whole window; returns the accessibility tree of that frame.
@@ -4980,6 +5214,13 @@ mod tests {
             self.request(accesskit::Action::Default, ids[0]);
         }
 
+        /// Invoke the control with this name, whatever its role (a segment of a strip).
+        fn invoke_any(&mut self, name: &str) {
+            let ids = self.named(name, None);
+            assert!(!ids.is_empty(), "nothing named {name:?}");
+            self.request(accesskit::Action::Default, ids[0]);
+        }
+
         fn esc(&mut self) {
             self.frame_with(vec![egui::Event::Key {
                 key: egui::Key::Escape,
@@ -5032,13 +5273,13 @@ mod tests {
     #[test]
     fn dialogs_opened_through_assistive_technology_never_break_the_platform_tree() {
         let c = locale::contact_strings(Locale::En);
-        // Chat: New conversation, Create a new group.
+        // Chat: New conversation, New group (the spoken name is the one on the button).
         let mut rig = A11yRig::new(Tab::Chat);
         rig.app.chat = ChatUi::fixture("list").unwrap();
         rig.app.contacts = ContactsUi::fixture("two", c).unwrap();
         rig.frames(3);
         invoke_opens_a_dialog(&mut rig, "New conversation");
-        invoke_opens_a_dialog(&mut rig, "Create a new group");
+        invoke_opens_a_dialog(&mut rig, "New group");
         // Contacts: Add a contact, My invitation.
         let mut rig = A11yRig::new(Tab::Contacts);
         rig.app.contacts = ContactsUi::fixture("two", c).unwrap();
@@ -5096,6 +5337,461 @@ mod tests {
             assert!(!rig.dialogs().is_empty(), "confirmation {which}: no dialog");
             rig.walk_and_close();
             rig.frames(2);
+        }
+    }
+
+    // Home: with no contacts, the three large actions lead nowhere useful, so a card points the
+    // way to Contacts — the same destination as the chat empty state. With contacts, the card is
+    // gone. (H3)
+    #[test]
+    fn the_home_card_offers_contacts_only_when_there_are_none() {
+        let s = locale::strings(Locale::En);
+        // No contacts: the card and its button are drawn.
+        let mut rig = A11yRig::new(Tab::Home);
+        assert!(rig.app.contacts.contact_list().is_empty());
+        rig.frames(3);
+        assert!(
+            rig.buttons().iter().any(|b| b == s.home_open_contacts),
+            "no {:?} on an empty Home; buttons: {:?}",
+            s.home_open_contacts,
+            rig.buttons()
+        );
+        // Pressing it lands on the Contacts tab.
+        rig.invoke(s.home_open_contacts);
+        rig.frames(3);
+        assert_eq!(rig.app.tab, Tab::Contacts);
+
+        // With contacts, the card is not drawn.
+        let c = locale::contact_strings(Locale::En);
+        let mut rig = A11yRig::new(Tab::Home);
+        rig.app.contacts = ContactsUi::fixture("two", c).unwrap();
+        rig.frames(3);
+        assert!(
+            !rig.buttons().iter().any(|b| b == s.home_open_contacts),
+            "{:?} still on Home with contacts; buttons: {:?}",
+            s.home_open_contacts,
+            rig.buttons()
+        );
+    }
+
+    // Inbox: an empty inbox used to give no way to receive by code. The empty state now offers a
+    // link to the Transfers screen, where the share ID / invite code form lives — the same
+    // destination as the "File transfer" link on the Files tab. (H2)
+    #[test]
+    fn the_empty_inbox_links_to_the_receive_by_code_form() {
+        let s = locale::strings(Locale::En);
+        let mut rig = A11yRig::new(Tab::Inbox);
+        assert!(rig.app.inbox_items.is_empty());
+        rig.frames(3);
+        assert!(
+            rig.buttons().iter().any(|b| b == s.inbox_receive_by_code),
+            "no {:?} on an empty Inbox; buttons: {:?}",
+            s.inbox_receive_by_code,
+            rig.buttons()
+        );
+        rig.invoke(s.inbox_receive_by_code);
+        rig.frames(3);
+        assert_eq!(rig.app.tab, Tab::Transfers);
+    }
+
+    /// (name, role, selected) of every node of the rig's last frame.
+    fn rig_nodes(rig: &A11yRig) -> Vec<(String, accesskit::Role, bool)> {
+        rig.last
+            .nodes
+            .iter()
+            .map(|(_, n)| {
+                let on =
+                    n.is_selected() == Some(true) || n.checked() == Some(accesskit::Checked::True);
+                (n.name().unwrap_or("").to_owned(), n.role(), on)
+            })
+            .collect()
+    }
+
+    fn rig_has(rig: &A11yRig, name: &str) -> bool {
+        rig_nodes(rig).iter().any(|(n, _, _)| n == name)
+    }
+
+    #[test]
+    fn the_easy_files_page_marks_the_open_view_and_has_no_bare_text_links() {
+        let mut rig = A11yRig::new(Tab::Files);
+        rig.frames(3);
+        let transfers = rig.app.tr().tab_easy;
+        let sent = rig.app.s().tab_outbox_easy;
+        let nodes = rig_nodes(&rig);
+        let radio = |name: &str| {
+            nodes
+                .iter()
+                .find(|(n, r, _)| n == name && *r == accesskit::Role::RadioButton)
+                .unwrap_or_else(|| panic!("no segment {name:?}: {nodes:?}"))
+                .2
+        };
+        assert!(radio(transfers), "the first view is open and marked");
+        assert!(!radio(sent), "the other view is not marked");
+        // The open view is drawn under the strip, not an empty page.
+        assert!(
+            !rig.buttons().iter().any(|b| b == transfers || b == sent),
+            "the two views were plain buttons: {:?}",
+            rig.buttons()
+        );
+        // Choosing the other view opens it and marks it there.
+        rig.invoke_any(sent);
+        rig.frames(3);
+        assert_eq!(rig.app.tab, Tab::Outbox);
+        let nodes = rig_nodes(&rig);
+        let on = nodes
+            .iter()
+            .find(|(n, r, _)| n == sent && *r == accesskit::Role::RadioButton)
+            .map(|x| x.2);
+        assert_eq!(on, Some(true), "{nodes:?}");
+    }
+
+    #[test]
+    fn easy_settings_leave_out_the_speed_units_and_technical_settings_keep_them() {
+        let sp = crate::speed::speed_strings(Locale::En);
+        let mut rig = A11yRig::new(Tab::Settings);
+        rig.app.settings_cat = SettingsCat::General;
+        rig.frames(3);
+        assert!(!rig_has(&rig, sp.unit_bits), "Mbps shown in Easy mode");
+        assert!(!rig_has(&rig, sp.unit_bytes), "MiB/s shown in Easy mode");
+        let mut rig = A11yRig::new(Tab::Settings);
+        rig.app.mode = ProductMode::Technical;
+        rig.app.settings_cat = SettingsCat::General;
+        rig.frames(3);
+        assert!(rig_has(&rig, sp.unit_bits));
+    }
+
+    #[test]
+    fn the_report_buttons_have_one_home_in_technical_mode() {
+        let s = locale::strings(Locale::En);
+        let mut rig = A11yRig::new(Tab::Settings);
+        rig.app.mode = ProductMode::Technical;
+        rig.app.settings_cat = SettingsCat::About;
+        rig.frames(3);
+        let buttons = rig.buttons();
+        assert!(
+            !buttons.iter().any(|b| b == s.status_copy_diag),
+            "{buttons:?}"
+        );
+        assert!(
+            !buttons.iter().any(|b| b == s.status_save_diag),
+            "{buttons:?}"
+        );
+        assert!(buttons.iter().any(|b| b == s.tab_status), "{buttons:?}");
+        let mut rig = A11yRig::new(Tab::Status);
+        rig.app.mode = ProductMode::Technical;
+        rig.frames(3);
+        let buttons = rig.buttons();
+        assert!(
+            buttons.iter().any(|b| b == s.status_copy_diag),
+            "{buttons:?}"
+        );
+        assert!(
+            buttons.iter().any(|b| b == s.status_save_diag),
+            "{buttons:?}"
+        );
+        // Easy mode has no Status screen: About keeps the report.
+        let mut rig = A11yRig::new(Tab::Settings);
+        rig.app.settings_cat = SettingsCat::About;
+        rig.frames(3);
+        assert!(rig.buttons().iter().any(|b| b == s.status_save_diag));
+    }
+
+    #[test]
+    fn the_two_details_headers_of_the_privacy_page_have_different_names() {
+        let mut rig = A11yRig::new(Tab::Settings);
+        rig.app.mode = ProductMode::Technical;
+        rig.app.settings_cat = SettingsCat::Privacy;
+        rig.frames(4);
+        let mut names: Vec<String> = rig_nodes(&rig)
+            .into_iter()
+            .filter(|(_, r, _)| *r == accesskit::Role::DisclosureTriangle)
+            .map(|(n, _, _)| n)
+            .filter(|n| n.starts_with("Details"))
+            .collect();
+        assert!(names.len() >= 2, "{names:?}");
+        let before = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), before, "two headers named alike: {names:?}");
+    }
+
+    #[test]
+    fn the_second_row_of_technical_files_pairs_send_with_sent_and_receive_with_restore() {
+        let s = locale::strings(Locale::En);
+        let mut rig = A11yRig::new(Tab::Outbox);
+        rig.app.mode = ProductMode::Technical;
+        rig.frames(3);
+        // Six old entries are four: Sent and Retrieve are segments inside their group.
+        let tabs: Vec<String> = rig_nodes(&rig)
+            .into_iter()
+            .filter(|(_, r, _)| *r == accesskit::Role::Tab)
+            .map(|(n, _, _)| n)
+            .collect();
+        assert!(!tabs.iter().any(|n| n == s.tab_outbox), "{tabs:?}");
+        assert!(!tabs.iter().any(|n| n == s.tab_retrieve), "{tabs:?}");
+        assert!(tabs.iter().any(|n| n == s.tab_send), "{tabs:?}");
+        assert!(
+            tabs.iter()
+                .any(|n| n == crate::uitext::receive_group(Locale::En)),
+            "{tabs:?}"
+        );
+        // The strip marks Sent as the open one of the send group.
+        let nodes = rig_nodes(&rig);
+        let sent = nodes
+            .iter()
+            .find(|(n, r, _)| n == s.tab_outbox && *r == accesskit::Role::RadioButton)
+            .unwrap_or_else(|| panic!("no Sent segment: {nodes:?}"));
+        assert!(sent.2);
+    }
+
+    #[test]
+    fn the_relay_is_a_problem_only_after_the_grace_period() {
+        use crate::worker::RelayDown;
+        use miasma_core::transport::relay_watchdog::RelayCause;
+        let down = |secs| RelayDown {
+            secs,
+            cause: RelayCause::Dns,
+            inspected: None,
+        };
+        let (connecting, shown) = relay_after_grace(Some(down(RELAY_GRACE_SECS - 1)));
+        assert!(connecting && shown.is_none());
+        let (connecting, shown) = relay_after_grace(Some(down(RELAY_GRACE_SECS)));
+        assert!(!connecting && shown.is_some());
+        let (connecting, shown) = relay_after_grace(None);
+        assert!(!connecting && shown.is_none());
+
+        // The header says "connecting", not the error, in the grace period.
+        let ctx = egui::Context::default();
+        let data = tempfile::tempdir().unwrap();
+        let mut app = MiasmaApp::new_with_ctx(
+            &ctx,
+            None,
+            ProductMode::Easy,
+            Locale::En,
+            ThemeMode::Light,
+            data.path().to_path_buf(),
+            LaunchIntent::Normal,
+        );
+        app.daemon_state = DaemonState::Connected;
+        app.relay_connecting = true;
+        let (level, text) = app.chip();
+        assert_eq!(level, Level::Info);
+        assert_eq!(text, crate::uitext::relay_connecting(Locale::En));
+        let au = locale::audit_strings(Locale::En);
+        app.relay_connecting = false;
+        app.relay_down = shown.or(Some(down(RELAY_GRACE_SECS)));
+        assert_eq!(app.chip(), (Level::Warn, au.chip_relay));
+    }
+
+    #[test]
+    fn home_says_ready_once_in_the_header_and_not_again_under_the_buttons() {
+        let au = locale::audit_strings(Locale::En);
+        let mut rig = A11yRig::new(Tab::Home);
+        rig.frames(3);
+        let n = rig_nodes(&rig)
+            .iter()
+            .filter(|(n, _, _)| n == au.chip_ready)
+            .count();
+        assert!(n <= 1, "{n} ready lines on Home");
+    }
+
+    #[test]
+    fn the_restore_page_says_where_a_content_id_comes_from() {
+        let mut rig = A11yRig::new(Tab::Retrieve);
+        rig.frames(3);
+        assert!(rig_has(&rig, crate::uitext::restore_id_hint(Locale::En)));
+    }
+
+    #[test]
+    fn the_cancel_and_done_buttons_of_the_contact_dialogs_are_real_buttons() {
+        // One button hierarchy: filled is the main action, outlined the other ones, and a text
+        // button only opens or closes information. Cancel and Done are never text buttons.
+        let src = include_str!("contacts.rs");
+        let bad: Vec<&str> = src
+            .lines()
+            .filter(|l| {
+                l.contains("quiet_button") && (l.contains("c.cancel") || l.contains("c.done_btn"))
+            })
+            .collect();
+        assert!(bad.is_empty(), "text buttons for Cancel/Done: {bad:?}");
+    }
+
+    #[test]
+    fn the_restore_page_in_easy_mode_asks_for_the_content_id_not_a_code() {
+        for l in Locale::ALL {
+            let au = locale::audit_strings(l);
+            let mut rig = A11yRig::new(Tab::Retrieve);
+            rig.app.locale = l;
+            rig.frames(3);
+            assert!(rig_has(&rig, au.need_mid), "{l:?}: no content ID reason");
+            assert!(!rig_has(&rig, au.need_code), "{l:?}: the vague code reason");
+        }
+    }
+
+    #[test]
+    fn the_private_send_asks_for_the_receive_code() {
+        for l in Locale::ALL {
+            let au = locale::audit_strings(l);
+            let mut rig = A11yRig::new(Tab::Send);
+            rig.app.locale = l;
+            rig.frames(3);
+            assert!(
+                rig_has(&rig, au.need_receive_code),
+                "{l:?}: no receive code reason"
+            );
+            assert!(
+                !rig_has(&rig, au.need_contact),
+                "{l:?}: the contact code reason"
+            );
+        }
+    }
+
+    #[test]
+    fn the_inbox_and_sent_pages_draw_no_sentence_that_repeats_their_title() {
+        let s = locale::strings(Locale::En);
+        for mode in [ProductMode::Easy, ProductMode::Technical] {
+            for tab in [Tab::Inbox, Tab::Outbox] {
+                let mut rig = A11yRig::new(tab);
+                rig.app.mode = mode;
+                rig.frames(3);
+                for text in [
+                    s.inbox_desc,
+                    s.inbox_desc_easy,
+                    s.outbox_desc,
+                    s.outbox_desc_easy,
+                ] {
+                    assert!(!rig_has(&rig, text), "{mode:?} {tab:?} draws {text:?}");
+                }
+            }
+        }
+    }
+
+    /// The tab rows wrap instead of running past the right edge, also with the longest labels
+    /// (Japanese and Chinese file sub-tabs) at a narrow window.
+    #[test]
+    fn the_tab_rows_stay_inside_a_narrow_window_in_every_language() {
+        let width = 640.0_f32;
+        for l in Locale::ALL {
+            for mode in [ProductMode::Easy, ProductMode::Technical] {
+                let ctx = egui::Context::default();
+                ctx.enable_accesskit();
+                let data = tempfile::tempdir().unwrap();
+                let mut app = MiasmaApp::new_with_ctx(
+                    &ctx,
+                    None,
+                    mode,
+                    l,
+                    ThemeMode::Light,
+                    data.path().to_path_buf(),
+                    LaunchIntent::Normal,
+                );
+                app.tab = Tab::Transfers;
+                let mut right = 0.0_f32;
+                let mut tabs = 0;
+                for _ in 0..4 {
+                    app.daemon_state = DaemonState::Connected;
+                    let raw = egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::pos2(0.0, 0.0),
+                            egui::vec2(width, 900.0),
+                        )),
+                        ..Default::default()
+                    };
+                    let out = ctx.run(raw, |ctx| app.update_frame(ctx, None));
+                    let update = out.platform_output.accesskit_update.expect("a tree");
+                    right = 0.0;
+                    tabs = 0;
+                    for (_, n) in &update.nodes {
+                        if n.role() == accesskit::Role::Tab {
+                            if let Some(b) = n.bounds() {
+                                right = right.max(b.x1 as f32);
+                                tabs += 1;
+                            }
+                        }
+                    }
+                }
+                assert!(tabs >= 3, "{l:?} {mode:?}: only {tabs} tabs drawn");
+                assert!(
+                    right <= width,
+                    "{l:?} {mode:?}: a tab ends at {right}, past {width}"
+                );
+            }
+        }
+    }
+
+    /// The smallest window the app allows is 700 px wide (see `main.rs`). No button, tab, radio
+    /// button or check box of any page may run past the right edge there, in every language and
+    /// in both modes, so the wording changed for the beta.12 review cannot clip a control.
+    #[test]
+    fn no_control_runs_past_the_right_edge_at_the_minimum_window_width() {
+        assert!(
+            include_str!("main.rs").contains("with_min_inner_size([700.0, 480.0])"),
+            "main.rs no longer has the 700 px minimum this test is about"
+        );
+        let (width, height) = (700.0_f32, 480.0_f32);
+        let pages = [
+            Tab::Home,
+            Tab::Files,
+            Tab::Contacts,
+            Tab::Chat,
+            Tab::Transfers,
+            Tab::Retrieve,
+            Tab::Send,
+            Tab::Inbox,
+            Tab::Outbox,
+            Tab::Status,
+            Tab::Settings,
+        ];
+        for l in Locale::ALL {
+            for mode in [ProductMode::Easy, ProductMode::Technical] {
+                for page in pages {
+                    let ctx = egui::Context::default();
+                    ctx.enable_accesskit();
+                    let data = tempfile::tempdir().unwrap();
+                    let mut app = MiasmaApp::new_with_ctx(
+                        &ctx,
+                        None,
+                        mode,
+                        l,
+                        ThemeMode::Light,
+                        data.path().to_path_buf(),
+                        LaunchIntent::Normal,
+                    );
+                    app.tab = page;
+                    let mut right = 0.0_f32;
+                    for _ in 0..4 {
+                        app.daemon_state = DaemonState::Connected;
+                        let raw = egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::pos2(0.0, 0.0),
+                                egui::vec2(width, height),
+                            )),
+                            ..Default::default()
+                        };
+                        let out = ctx.run(raw, |ctx| app.update_frame(ctx, None));
+                        let update = out.platform_output.accesskit_update.expect("a tree");
+                        right = 0.0;
+                        for (_, n) in &update.nodes {
+                            let control = matches!(
+                                n.role(),
+                                accesskit::Role::Button
+                                    | accesskit::Role::Tab
+                                    | accesskit::Role::RadioButton
+                                    | accesskit::Role::CheckBox
+                            );
+                            if control {
+                                if let Some(b) = n.bounds() {
+                                    right = right.max(b.x1 as f32);
+                                }
+                            }
+                        }
+                    }
+                    assert!(
+                        right <= width,
+                        "{l:?} {mode:?} {page:?}: a control ends at {right}, past {width}"
+                    );
+                }
+            }
         }
     }
 }
