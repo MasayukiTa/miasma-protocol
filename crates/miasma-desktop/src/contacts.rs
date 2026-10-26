@@ -1890,7 +1890,16 @@ impl ContactsUi {
     }
 
     fn body(&mut self, ui: &mut egui::Ui, c: &ContactStrings, connected: bool, technical: bool) {
-        if !connected || self.availability == Availability::DaemonDown {
+        // When the daemon is not connected (needs setup, stopped, or starting),
+        // the connection card above the tab is the single place that explains
+        // what to do and carries the button; a second notice here would repeat
+        // the reason and point at a button this tab does not have.
+        if !connected {
+            return;
+        }
+        // Connected, but the service dropped the contacts channel after start:
+        // no connection card is shown then, so the reason belongs here.
+        if self.availability == Availability::DaemonDown {
             self.notice_card(ui, c.daemon_down, pal().warning, None);
             return;
         }
@@ -4259,6 +4268,65 @@ mod tests {
         }
         let (used, avail) = seen.unwrap();
         (used, avail, state.row_rects.clone())
+    }
+
+    /// Draw the Contacts page once with AccessKit on and collect every node name,
+    /// so a test can check whether a given line of text is shown. `availability`
+    /// lets a test place the UI in the "service dropped after connect" state.
+    fn contacts_drawn_names(connected: bool, availability: Availability) -> Vec<String> {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        crate::ui_kit::apply_theme(&ctx, false);
+        let c = contact_strings(Locale::En);
+        let mut state = ContactsUi::fixture("two", c).unwrap();
+        state.availability = availability;
+        let mut names = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 2400.0),
+                )),
+                ..Default::default()
+            };
+            let out = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    crate::ui_kit::column(ui, |ui| state.show(ui, c, connected, false));
+                });
+            });
+            if let Some(update) = out.platform_output.accesskit_update {
+                names = update
+                    .nodes
+                    .iter()
+                    .filter_map(|(_, n)| n.name().map(|s| s.to_owned()))
+                    .collect();
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn before_setup_the_contacts_tab_does_not_repeat_the_service_notice() {
+        // Not connected: the connection card above the tab is the single guide, so
+        // the tab body must not repeat the "service" notice.
+        let names = contacts_drawn_names(false, Availability::Unknown);
+        let notice = contact_strings(Locale::En).daemon_down;
+        assert!(
+            !names.iter().any(|n| n == notice),
+            "the contacts tab repeated the service notice while disconnected: {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_dropped_service_after_connect_still_explains_itself_in_contacts() {
+        // Connected but the service stopped answering: no connection card is shown,
+        // so the reason must appear in the tab body.
+        let names = contacts_drawn_names(true, Availability::DaemonDown);
+        let notice = contact_strings(Locale::En).daemon_down;
+        assert!(
+            names.iter().any(|n| n == notice),
+            "the contacts tab did not explain the dropped service: {names:?}"
+        );
     }
 
     #[test]

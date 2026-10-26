@@ -993,7 +993,18 @@ impl ChatUi {
         contacts: &[ContactInfo],
     ) -> Option<ChatAction> {
         let mut action = None;
-        if !connected || self.availability == Availability::DaemonDown {
+        // When the daemon is not connected (needs setup, stopped, or starting),
+        // the connection card above the tab is the single place that explains
+        // what to do and carries the button. Repeating a notice here would show
+        // two reasons at once and point at a button this tab does not have, so
+        // draw only the heading and let that card lead.
+        if !connected {
+            self.heading(ui, c, |_| {});
+            return None;
+        }
+        // Connected, but the service dropped the chat channel after start: no
+        // connection card is shown in this case, so the reason belongs here.
+        if self.availability == Availability::DaemonDown {
             self.heading(ui, c, |_| {});
             self.notice_card(ui, c.daemon_down, Level::Warn, None, c);
             return None;
@@ -2362,6 +2373,68 @@ mod tests {
             true
         });
         v
+    }
+
+    /// Draw the chat area once with AccessKit on and collect every node name, so a
+    /// test can check whether a given line of text is shown.
+    fn drawn_names(chat: &mut ChatUi, connected: bool) -> Vec<String> {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        kit::apply_theme(&ctx, false);
+        let list: Vec<ContactInfo> = Vec::new();
+        let mut names = Vec::new();
+        for _ in 0..3 {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    vec2(700.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let out = ctx.run(raw, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    kit::column(ui, |ui| {
+                        let _ = chat.show(ui, chat_strings(Locale::En), connected, &list);
+                    });
+                });
+            });
+            if let Some(update) = out.platform_output.accesskit_update {
+                names = update
+                    .nodes
+                    .iter()
+                    .filter_map(|(_, n)| n.name().map(|s| s.to_owned()))
+                    .collect();
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn before_setup_the_chat_tab_does_not_repeat_the_service_notice() {
+        // Not connected: the connection card above the tab is the single guide, so
+        // the tab body must not show the "service" notice a second time.
+        let mut chat = ready();
+        chat.availability = Availability::Unknown;
+        let names = drawn_names(&mut chat, false);
+        let notice = chat_strings(Locale::En).daemon_down;
+        assert!(
+            !names.iter().any(|n| n == notice),
+            "the chat tab repeated the service notice while disconnected: {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_dropped_service_after_connect_still_explains_itself_in_chat() {
+        // Connected but the service stopped answering: no connection card is shown,
+        // so the reason must appear in the tab body.
+        let mut chat = ready();
+        chat.availability = Availability::DaemonDown;
+        let names = drawn_names(&mut chat, true);
+        let notice = chat_strings(Locale::En).daemon_down;
+        assert!(
+            names.iter().any(|n| n == notice),
+            "the chat tab did not explain the dropped service: {names:?}"
+        );
     }
 
     fn c() -> &'static ChatStrings {
