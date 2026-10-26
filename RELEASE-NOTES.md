@@ -22,6 +22,18 @@ This beta makes the post-quantum key exchange required by default and adds easie
 - A send that fails after you switch conversations no longer lands in the composer of another chat.
 - In group chats, a message that is still waiting now shows how many members have received it (for example "Waiting 0/2").
 - The window title no longer shows the build hash or the word "Technical"; the build hash is in Settings, under About and Update.
+- The message list in one-to-one and group chats now fills the window down to the message box.
+- In group information, Leave and Delete history stay in view below the scrolling member list, and member status lines are no longer cut off.
+- Group chats now match one-to-one chats more closely: a waiting message gets the same explanation, the message box and send button have matching names, and the header uses the same "..." menu.
+- Chat messages are grouped under day headings (Today, Yesterday, or the date), so each message shows only its time.
+- A search box appears in the conversation list and in the New conversation dialog once you have 8 or more entries.
+- Disabled buttons and fields stay clearly visible in both light and dark themes, and scroll bars are always shown.
+- Cancel, Done and the invite dialog actions now look like buttons, and buttons come in three consistent sizes.
+- The Files screens are easier to follow: Transfers and Sent files are switched by a marked strip, and in Technical mode Send with Sent and Receive with Restore are grouped.
+- In Easy mode the screens no longer show speed unit pickers, a relay service name or an unlabeled network count, and the restore page explains where a content ID comes from.
+- Diagnostics copy and save now live on the Status screen, with a link from Settings, under About.
+- Home shows "ready" only once, and the relay shows "connecting" for up to a minute before it is reported as a problem.
+- The wording and notation of the Japanese, English and Simplified Chinese screens were unified, with one term for each concept (content ID, share ID, receive code, one-time code, verification code).
 
 ## Notes
 
