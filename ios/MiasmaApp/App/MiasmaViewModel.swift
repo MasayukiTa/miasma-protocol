@@ -6,6 +6,7 @@
 import Foundation
 import Combine
 import MiasmaFFI
+import MiasmaBackup
 
 /// Envelope item for the inbox list.
 struct DirectedInboxItem: Identifiable {
@@ -76,6 +77,10 @@ class MiasmaViewModel: ObservableObject {
                         atPath: dir,
                         withIntermediateDirectories: true
                     )
+                    // Keep the data directory out of iCloud/device backups.
+                    // Idempotent; re-applied on every launch. Failures do not
+                    // stop the daemon.
+                    _ = excludeFromBackup(atPath: dir)
                     return try startEmbeddedDaemon(
                         dataDir: dir,
                         storageMb: 512,
