@@ -1508,11 +1508,17 @@ impl MiasmaApp {
 
     fn files_panel(&mut self, ui: &mut egui::Ui) {
         let s = self.s();
+        let easy = self.mode.is_easy();
         let connected = self.daemon_state == DaemonState::Connected;
         let transfer_label = self.tr().tab_easy;
 
         // The six actions say what this screen is for: no explanation under the heading.
         kit::page(ui, s.files_heading_easy, None, |ui| {
+            // Not connected: the actions are greyed out, so say why and point at the
+            // one connection card above this page instead of leaving them silent.
+            if easy && !connected {
+                kit::notice(ui, Level::Warn, s.files_not_connected_hint);
+            }
             // Two main tasks side by side, big; storing and restoring under them, still large;
             // what happened (transfers, sent files) as small links at the bottom.
             let gap = kit::SP_3;
@@ -4411,6 +4417,71 @@ mod tests {
             });
         }
         used
+    }
+
+    /// Draw only the Easy Files page with AccessKit on and collect every node
+    /// name, so a test can check whether a given line of text is shown.
+    fn files_page_names(state: DaemonState) -> Vec<String> {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let data = tempfile::tempdir().unwrap();
+        let mut app = MiasmaApp::new_with_ctx(
+            &ctx,
+            None,
+            ProductMode::Easy,
+            Locale::En,
+            ThemeMode::Light,
+            data.path().to_path_buf(),
+            LaunchIntent::Normal,
+        );
+        app.daemon_state = state;
+        app.tab = Tab::Files;
+        let mut names = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    egui::vec2(900.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let out = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    kit::column(ui, |ui| app.files_panel(ui));
+                });
+            });
+            if let Some(update) = out.platform_output.accesskit_update {
+                names = update
+                    .nodes
+                    .iter()
+                    .filter_map(|(_, n)| n.name().map(|s| s.to_owned()))
+                    .collect();
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn before_setup_the_files_tab_gives_the_reason_the_actions_are_off() {
+        // Not connected: the actions are greyed out, so the tab must say why
+        // instead of leaving a silent wall of disabled buttons.
+        let hint = locale::strings(Locale::En).files_not_connected_hint;
+        let names = files_page_names(DaemonState::NeedsInit);
+        assert!(
+            names.iter().any(|n| n == hint),
+            "the files tab did not explain the disabled actions: {names:?}"
+        );
+    }
+
+    #[test]
+    fn once_connected_the_files_tab_drops_the_not_connected_reason() {
+        // Connected: the actions work, so the not-connected reason is gone.
+        let hint = locale::strings(Locale::En).files_not_connected_hint;
+        let names = files_page_names(DaemonState::Connected);
+        assert!(
+            !names.iter().any(|n| n == hint),
+            "the files tab kept the not-connected reason while connected: {names:?}"
+        );
     }
 
     /// One frame of the whole window; returns the accessibility tree of that frame.
