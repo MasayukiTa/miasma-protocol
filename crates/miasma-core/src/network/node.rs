@@ -1271,14 +1271,21 @@ impl DhtHandle {
     /// (`Ok(None)`, logged) rather than returned as manifest-less: otherwise
     /// corrupting the trailer would silently turn a protected transfer into an
     /// unprotected-looking one.
+    ///
+    /// For a v4 (latest-format) record the returned manifest is a v3 structural
+    /// view of the v4 manifest. Format-aware callers should use the
+    /// verified-record fetch ([`get_signed_record`](Self::get_signed_record))
+    /// to see the original v4 manifest.
     pub async fn get_record_with_manifest(
         &self,
         mid_digest: [u8; 32],
     ) -> Result<Option<(DhtRecord, Option<crate::transfer::TransferManifest>)>, MiasmaError> {
-        Ok(self
-            .get_signed_record(mid_digest, None)
-            .await?
-            .map(|f| (f.record, f.manifest)))
+        Ok(self.get_signed_record(mid_digest, None).await?.map(|f| {
+            let manifest = f
+                .manifest
+                .or_else(|| f.manifest_v4.as_ref().map(|m| m.as_v3_view()));
+            (f.record, manifest)
+        }))
     }
 
     /// As [`get_record_with_manifest`](Self::get_record_with_manifest), also
