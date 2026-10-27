@@ -123,6 +123,10 @@ jobs:
           cargo test -p miasma-core --lib --locked -- secure_file:: control_auth::
           cargo test -p miasma-core --locked --test adversarial_ipc_test -- token_file daemon_does_not_start
 
+      # The root key wrap that uses the Windows data protection API.
+      - name: Test root key wrap
+        run: cargo test -p miasma-core --lib --locked -- "root_key::"
+
       - name: Build CLI
         run: cargo build -p miasma-cli --locked
 
@@ -325,17 +329,31 @@ jobs:
   # The released command-line program must stop, and leave the data directory
   # alone, when master.key is not a plain 32-byte key (see
   # crates/miasma-core/tests/root_key_downgrade_compat.rs for the copied readers).
+  # The released program is downloaded from the GitHub release. Every download
+  # is counted in that release's public download count, and this job runs on
+  # every push, so the count was inflated by CI. The files are kept in the
+  # Actions cache and verified against a SHA-256 pinned in the script, so the
+  # release is downloaded once per cache entry instead of once per run.
   older-release-key-file:
     name: Released CLI against a 64-byte key file (macOS)
     runs-on: macos-latest
     timeout-minutes: 15
+    env:
+      RELEASE_TAG: v0.3.2-beta.11
     steps:
       - uses: actions/checkout@v4
+
+      - name: Cache the released CLI archive
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/released-cli
+          key: released-cli-macos-${{ env.RELEASE_TAG }}-v1
 
       - name: Run the released CLI against the data directory
         env:
           GH_TOKEN: ${{ github.token }}
-        run: bash scripts/check-older-release-key-file.sh v0.3.2-beta.11
+          MIASMA_RELEASE_CACHE: ${{ runner.temp }}/released-cli
+        run: bash scripts/check-older-release-key-file.sh "$RELEASE_TAG"
 
   cross-compile-arm64:
     name: Cross-compile ARM64

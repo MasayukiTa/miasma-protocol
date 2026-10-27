@@ -244,10 +244,14 @@ impl GroupService {
                 Outcome::Retry(why) => {
                     failures += 1;
                     debug!(peer = %fingerprint(&peer), "group delivery waits: {why}");
-                    // "peer_busy" is a device that has not joined yet: that is
-                    // the invited state, not a failure to reach it.
-                    self.core
-                        .note_delivery(&peer, (why != "peer_busy").then_some(why));
+                    // Some waits are not failures to show the person:
+                    // - "peer_busy" is a device that has not joined yet: that
+                    //   is the invited state, not a failure to reach it.
+                    // - "pqc_pending" is the in-progress hybrid exchange under
+                    //   `require` waiting on the member: the body is simply not
+                    //   out yet, so nothing is reported until it settles.
+                    let transient = matches!(why, "peer_busy" | "pqc_pending");
+                    self.core.note_delivery(&peer, (!transient).then_some(why));
                     if self.wait(&wake, &mut stop, failures).await {
                         failures = 0;
                     }
@@ -286,10 +290,15 @@ impl GroupService {
     async fn attempt(
         &self,
         peer: &[u8; 32],
-        _work: &Work,
+        work: &Work,
         plain: &[u8],
         conn_slot: &mut Option<Connection>,
     ) -> Outcome {
+        // `work` is read only by the `require` hybrid gate below, which is
+        // compiled in only with the `pqc` feature; without it the body is
+        // sealed the same way regardless of the item, so mark it used.
+        #[cfg(not(feature = "pqc"))]
+        let _ = work;
         let _awake = crate::power::ActivityGuard::acquire("Delivering a message");
         // A contact whose sending is switched off gets nothing; the items wait.
         if let Some(c) = self.contacts.by_endpoint(peer) {
@@ -303,6 +312,14 @@ impl GroupService {
             // for this ALPN fails there and nothing else is touched.
             Err(e) => return Outcome::Retry(e.reason_code(proto::fail::PEER_NO_GROUP)),
         };
+        // Under `require`, a group message body goes out only once the hybrid
+        // exchange with this member is established, exactly as for the private
+        // chat. The gate drives the exchange and holds, fails or lets the body
+        // through; nothing is sealed on the classical session alone.
+        #[cfg(feature = "pqc")]
+        if let Err(out) = self.pq_gate(peer, work, &conn, conn_slot).await {
+            return out;
+        }
         let (wire, env_id) = match self.core.chat().seal_for(peer, plain) {
             Ok(w) => w,
             Err(PrepareError::Gone) => return Outcome::Skip,
@@ -357,6 +374,141 @@ impl GroupService {
             AckStatus::Busy => Outcome::Retry("peer_busy"),
             AckStatus::Failed => Outcome::Retry("peer_failed"),
             AckStatus::Unknown => Outcome::Retry("peer_status_unknown"),
+        }
+    }
+
+    /// The hybrid-upgrade gate for a group message body under `require`.
+    ///
+    /// A member's pairwise session carries the same hybrid state as the
+    /// private chat, so the rule is the same: a body is sealed on the classical
+    /// session only once the hybrid exchange with that member is established.
+    /// The hybrid records (offer/kex/confirm) are ordinary pairwise envelopes,
+    /// so they travel over the group ALPN and are dispatched by the receiver's
+    /// `accept_raw` exactly as on the private ALPN; this worker can therefore
+    /// drive the exchange itself for a member it only ever meets in a group.
+    ///
+    /// Returns `Ok(())` when the body may go (mode is not `require`, the item
+    /// is a control record rather than a body, or the exchange is established).
+    /// Returns `Err(outcome)` to stop this attempt: a hybrid record was sent
+    /// (retry to continue), the exchange is still running (retry), or it
+    /// cannot be established and the body is refused (permanent, with the
+    /// stated reason the person is shown).
+    #[cfg(feature = "pqc")]
+    async fn pq_gate(
+        &self,
+        peer: &[u8; 32],
+        work: &Work,
+        conn: &Connection,
+        conn_slot: &mut Option<Connection>,
+    ) -> Result<(), Outcome> {
+        use crate::chat::pq::Pass;
+        // Only a `require` message *body* is held back for the hybrid exchange.
+        // `prefer`/`off`, and every control record under any mode, keep the
+        // existing behaviour (the hybrid layer is added if it happens to be
+        // ready, and control records flow so the receiver can learn the
+        // group's epoch and ask for descriptors). This decision is pure and is
+        // unit-tested as `body_is_pqc_gated`.
+        if !body_is_pqc_gated(self.settings.pqc_mode, work) {
+            return Ok(());
+        }
+        // Drive every record this side can send in one go, so the worker's
+        // failure count is never charged for making progress. The loop only
+        // yields back to the worker when it must wait for the member (Hold),
+        // when the body may go (Proceed), when the exchange cannot be
+        // established (Refuse), or when a record could not be delivered.
+        loop {
+            match self.core.chat().pq_step(peer, true, now_ms()) {
+                Pass::Proceed => return Ok(()),
+                // The exchange is still running and the next move is the
+                // member's: wait for its record and look again, without
+                // charging a failure or showing a reason.
+                Pass::Hold => return Err(Outcome::Retry("pqc_pending")),
+                Pass::Send(out) => {
+                    // Seal and deliver one record, then look again at once for
+                    // the next one this side owes (offer, then kex, …).
+                    match self.send_pq_record(peer, &out, conn, conn_slot).await {
+                        Ok(()) => continue,
+                        Err(why) => return Err(Outcome::Retry(why)),
+                    }
+                }
+                Pass::Refuse(refusal) => {
+                    // No classical fallback: the body fails on this device with
+                    // the stated reason, which the worker records for the
+                    // person (through `gave_up`).
+                    return Err(Outcome::Permanent(refusal.reason_str()));
+                }
+            }
+        }
+    }
+
+    /// Seal one hybrid-upgrade record for `peer` and deliver it over the group
+    /// connection, reporting the outcome back to the hybrid state. Mirrors the
+    /// private chat's `send_pq`, but on the group ALPN.
+    #[cfg(feature = "pqc")]
+    async fn send_pq_record(
+        &self,
+        peer: &[u8; 32],
+        out: &crate::chat::pq::Outgoing,
+        conn: &Connection,
+        conn_slot: &mut Option<Connection>,
+    ) -> Result<(), &'static str> {
+        use crate::chat::pq::SendOutcome;
+        let (wire, env_id) = match self.core.chat().seal_for(peer, &out.plain) {
+            Ok(w) => w,
+            Err(PrepareError::Gone) => return Err("session"),
+            Err(PrepareError::Session(_)) => return Err("session"),
+            Err(PrepareError::Storage(_)) => return Err("storage"),
+        };
+        let send_guard = self.activity.enter();
+        let result = tokio::time::timeout(self.settings.ack_timeout, async {
+            let (mut tx, mut rx) = conn.open_bi().await.map_err(|_| "connection_lost")?;
+            proto::write_frame(&mut tx, &Frame::Deliver(wire))
+                .await
+                .map_err(|_| "connection_lost")?;
+            let _ = tx.finish();
+            match proto::read_frame(&mut rx).await {
+                Ok(Frame::Ack(a)) if a.envelope_id == env_id => Ok(a.status),
+                Ok(_) => Err("bad_reply"),
+                Err(_) => Err("connection_lost"),
+            }
+        })
+        .await;
+        drop(send_guard);
+        let status = match result {
+            Ok(Ok(s)) => s,
+            Ok(Err(why)) => {
+                *conn_slot = None;
+                return Err(why);
+            }
+            Err(_) => {
+                *conn_slot = None;
+                return Err("timed_out");
+            }
+        };
+        match status {
+            AckStatus::Stored | AckStatus::Duplicate => {
+                self.core
+                    .chat()
+                    .pq_sent(peer, out, SendOutcome::Delivered, now_ms());
+                Ok(())
+            }
+            // The member opened the envelope but does not know the record: an
+            // older build. The exchange concludes as classical for it.
+            AckStatus::BadRequest | AckStatus::Unsupported | AckStatus::TooBig => {
+                self.core
+                    .chat()
+                    .pq_sent(peer, out, SendOutcome::NotUnderstood, now_ms());
+                Ok(())
+            }
+            AckStatus::NoSession => {
+                self.core.chat().reset_session(peer);
+                Err("no_session")
+            }
+            AckStatus::NotAllowed => Err("not_allowed"),
+            AckStatus::Rate => Err("rate_limited"),
+            AckStatus::Busy => Err("peer_busy"),
+            AckStatus::Failed => Err("peer_failed"),
+            AckStatus::Unknown => Err("peer_status_unknown"),
         }
     }
 
@@ -465,5 +617,65 @@ struct Handler(Arc<GroupService>);
 impl ChatConnectionHandler for Handler {
     async fn handle(&self, conn: Connection) {
         self.0.clone().serve(conn).await
+    }
+}
+
+/// Whether a group item's *body* must pass the hybrid (`require`) gate before
+/// it may be sealed on the classical session.
+///
+/// This is the group-specific part of the no-silent-downgrade rule, kept pure
+/// so it can be unit-tested without a network: a body is gated only when the
+/// mode is `require` **and** the item is a message `Text`. Control records
+/// (`Descs`, `Sync`) are never gated — they must flow so a member can learn
+/// the group's epoch and ask for descriptors — and `prefer`/`off` never hold a
+/// body back. When this returns `true`, `pq_gate` drives the exchange and the
+/// body is never sent classically until the exchange is established (or the
+/// message is refused); when it returns `false`, delivery proceeds unchanged.
+#[cfg(feature = "pqc")]
+fn body_is_pqc_gated(mode: crate::config::PqcMode, work: &Work) -> bool {
+    use crate::config::PqcMode;
+    mode == PqcMode::Require && matches!(work, Work::Text { .. })
+}
+
+#[cfg(all(test, feature = "pqc"))]
+mod pqc_gate_tests {
+    use super::body_is_pqc_gated;
+    use crate::chat::group::engine::Work;
+    use crate::config::PqcMode;
+
+    const TEXT: Work = Work::Text {
+        gid: [1u8; 16],
+        id: [2u8; 16],
+    };
+    const DESCS: Work = Work::Descs { gid: [1u8; 16] };
+    const SYNC: Work = Work::Sync { gid: [1u8; 16] };
+
+    /// Under `require`, only a message body is gated: it is held for the hybrid
+    /// exchange and is never sent on the classical session until the exchange
+    /// is established. This is the group equivalent of the private-chat
+    /// no-classical-fallback rule.
+    #[test]
+    fn require_gates_a_text_body_so_it_never_goes_out_classical_first() {
+        assert!(body_is_pqc_gated(PqcMode::Require, &TEXT));
+    }
+
+    /// Control records are never gated under any mode: they carry no message
+    /// body and must flow so the receiver can learn the epoch and request
+    /// descriptors. Gating them would stall the group.
+    #[test]
+    fn control_records_are_never_gated_even_under_require() {
+        assert!(!body_is_pqc_gated(PqcMode::Require, &DESCS));
+        assert!(!body_is_pqc_gated(PqcMode::Require, &SYNC));
+    }
+
+    /// `prefer` and `off` never hold a body back; the hybrid layer is added
+    /// only if it happens to be ready. Nothing is gated, including a text body.
+    #[test]
+    fn prefer_and_off_never_gate_a_body() {
+        for mode in [PqcMode::Prefer, PqcMode::Off] {
+            assert!(!body_is_pqc_gated(mode, &TEXT));
+            assert!(!body_is_pqc_gated(mode, &DESCS));
+            assert!(!body_is_pqc_gated(mode, &SYNC));
+        }
     }
 }

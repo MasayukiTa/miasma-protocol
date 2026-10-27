@@ -230,6 +230,21 @@ pub fn start_for_daemon(
             cfg.privacy.pqc_mode()
         );
     }
+    // The default is `require` (no classical fallback). A value set explicitly
+    // to `off` or `prefer` lowers that and allows the classical session; warn
+    // while one is in force so the weaker guarantee is visible.
+    if cfg
+        .privacy
+        .pqc_mode
+        .is_some_and(|m| m.allows_classical_fallback())
+        && PqcMode::available()
+    {
+        warn!(
+            "privacy.pqc_mode is {}: a classical fallback is allowed for private \
+             conversations instead of the required post-quantum exchange",
+            cfg.privacy.pqc_mode()
+        );
+    }
     let svc = ChatService::start(
         &crate::paths::chat_dir(data_dir),
         node,
@@ -1020,11 +1035,16 @@ impl ChatService {
                 }
                 PqLoop::Again
             }
-            Pass::Refuse(reason) => {
+            Pass::Refuse(refusal) => {
                 // `require`: nothing goes out in the classical session. The
                 // message stays in the history as failed, with the reason.
+                debug!(
+                    peer = %fingerprint(refusal.peer()),
+                    "private conversation refused (no classical fallback): {}",
+                    refusal.reason_str()
+                );
                 if let Some(e) = first {
-                    self.core.mark_failed(&e.id, reason, now_ms());
+                    self.core.mark_failed(&e.id, refusal.reason_str(), now_ms());
                 }
                 PqLoop::Again
             }

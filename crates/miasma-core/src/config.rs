@@ -62,52 +62,78 @@ pub struct PrivacyConfig {
     #[serde(default)]
     pub old_logs_keep: bool,
     /// Hybrid post-quantum upgrade of private-conversation sessions. Not set
-    /// (the default) means [`PqcMode::DEFAULT`] (`prefer`); the key is written
+    /// (the default) means [`PqcMode::DEFAULT`] (`require`); the key is written
     /// only once a person has chosen a value. Use [`PrivacyConfig::pqc_mode`] for
     /// the value in force. Only builds with the `pqc` cargo feature act on it;
     /// other builds ignore it and report that they cannot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pqc_mode: Option<PqcMode>,
-    /// Which default of `pqc_mode` this file was written under. Files written
-    /// before the default became `prefer` have no such key (read as 0) and
-    /// carry `pqc_mode = "off"` merely because that was then the default; they
-    /// are read as "never chosen". Every save writes the current value, so a
-    /// choice made afterwards (including `off`) is kept as it is.
+    /// Which default of `pqc_mode` this file was written under, so a value an
+    /// older default wrote is not read as a choice. Files written before this
+    /// key existed read it as `0`. See [`PQC_DEFAULT_VERSION`] for the version
+    /// history and [`PrivacyConfig::migrate_pqc_default`] for how each step is
+    /// applied. Every save writes the current value, so a choice made after a
+    /// migration is kept as it is.
     #[serde(default)]
     pub pqc_default_version: u32,
 }
 
 /// Value of [`PrivacyConfig::pqc_default_version`] written by this build.
 ///
-/// Note for a future bump to 2 or more: [`PrivacyConfig::migrate_pqc_default`]
-/// only rewrites an `off` that an earlier default wrote. Before raising this,
-/// make the migration apply per version (version 0 only) so a later explicit
-/// `off` is not read as never chosen.
-pub const PQC_DEFAULT_VERSION: u32 = 1;
+/// Version history (each step is applied once, when the file is read under an
+/// older version; see [`PrivacyConfig::migrate_pqc_default`]):
+/// * `0`: no key in the file (read as `0`). The default was `off`, so an
+///   `off` value written under version `0` was a save, not a choice.
+/// * `1`: the default became `prefer`. An `off` left by version `0` was read
+///   as never chosen and cleared, so the `prefer` default applied.
+/// * `2`: the default becomes `require`. Two values a pre-beta.12 default left
+///   behind are carried forward so beta.12 keeps no setting that would allow a
+///   silent classical fallback: an `off` from version `0` (the sole version
+///   whose default was `off`) is cleared to never chosen, and a `prefer` found
+///   at version `0` or `1` (the standard choice of the old screen) is moved to
+///   `require`. An `off` recorded at version `1` or later, and a `prefer`,
+///   `off` or `require` set at version `2` or later, were explicit choices and
+///   are kept, as is any value set after this migration (the file is then at
+///   version `2`).
+pub const PQC_DEFAULT_VERSION: u32 = 2;
 
 /// `privacy.pqc_mode`: whether private-conversation sessions are upgraded with
 /// a hybrid X25519 + ML-KEM-768 key exchange.
 ///
-/// * `off`: nothing changes. This build offers nothing and answers
-///   nothing, so every peer sees exactly what it saw before.
-/// * `prefer` (default): offer the hybrid exchange. Use it when the peer agrees; when the
-///   peer does not, keep the classical session and show "classical only".
-/// * `require`: messages to a contact are sent only once the hybrid exchange
-///   with that contact has completed. If the contact does not offer it, the
-///   messages fail on this device with a stated reason; nothing is sent in the
-///   classical session. The contact's own settings are not affected.
+/// * `require` (default): messages to a contact are sent only once the hybrid
+///   exchange with that contact has completed. If the contact does not offer
+///   it, the messages fail on this device with a stated reason; nothing is
+///   sent in the classical session. The contact's own settings are not
+///   affected.
+/// * `prefer`: offer the hybrid exchange. Use it when the peer agrees; when
+///   the peer does not, keep the classical session and show "classical only".
+///   This lowers the guarantee to the peer's level, so it is not a value the
+///   normal settings offer: it is honoured only when written into the
+///   configuration file by hand or passed to an advanced command-line option,
+///   and the status then warns that a classical fallback is allowed.
+/// * `off`: nothing changes. This build offers nothing and answers nothing,
+///   so every peer sees exactly what it saw before. Like `prefer`, it is only
+///   honoured when set explicitly (file or advanced option) and the status
+///   warns about the classical fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PqcMode {
     Off,
-    #[default]
     Prefer,
+    #[default]
     Require,
 }
 
 impl PqcMode {
     /// What applies when a person never chose a value.
-    pub const DEFAULT: Self = Self::Prefer;
+    pub const DEFAULT: Self = Self::Require;
+
+    /// True for a value that lowers the guarantee below `require` (a classical
+    /// fallback is then allowed). Such a value is honoured only when set
+    /// explicitly; the status warns while one is in force.
+    pub fn allows_classical_fallback(self) -> bool {
+        matches!(self, Self::Off | Self::Prefer)
+    }
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -188,13 +214,53 @@ impl PrivacyConfig {
         self.pqc_mode.unwrap_or(PqcMode::DEFAULT)
     }
 
-    /// Read a file written under an older default: `pqc_mode = "off"` without
-    /// the version key was written by a save, not chosen, so it counts as not
-    /// set. `prefer` and `require` were always a choice and stay.
+    /// Move a file written under an older default up to the current one, once.
+    /// The step runs only while the file predates the current version, so a
+    /// value a person set after a migration (the file is then at the current
+    /// version) is never read as an older default and is kept.
+    ///
+    /// Two values a pre-beta.12 default left behind are carried forward, so
+    /// beta.12 never keeps a setting that would allow a silent classical
+    /// fallback by default:
+    ///
+    /// * an `off` the version `0` default wrote (no version key) was a save,
+    ///   not a choice, so it is cleared to "never chosen" and the current
+    ///   default (`require`) applies. Version `0` was the only default of
+    ///   `off`, so an `off` recorded at version `1` or later was an explicit
+    ///   choice and is kept.
+    /// * a `prefer` found at version `0` or `1` is the carried-over old
+    ///   default (`prefer` was the standard choice in the pre-beta.12 screen),
+    ///   so it is moved to `require`. A `prefer` set at version `2` or later
+    ///   is an explicit advanced choice and is kept (the status then warns).
+    ///
+    /// What each (version, value) reaches after this runs:
+    ///
+    /// | version | unset   | `off`   | `prefer`  | `require` |
+    /// |---------|---------|---------|-----------|-----------|
+    /// | `0`     | require (unset) | require (cleared) | require | require (kept) |
+    /// | `1`     | require (unset) | off (kept) | require | require (kept) |
+    /// | `2`     | require (unset) | off (kept) | prefer (kept) | require (kept) |
+    ///
+    /// ("unset" means `pqc_mode` is `None`, which resolves to the current
+    /// default `require` through [`PrivacyConfig::pqc_mode`].)
     fn migrate_pqc_default(&mut self) {
         if self.pqc_default_version < PQC_DEFAULT_VERSION {
-            if self.pqc_mode == Some(PqcMode::Off) {
-                self.pqc_mode = None;
+            match self.pqc_mode {
+                // The version `0` default wrote this `off`; it was never
+                // chosen. Versions `1` and `2` never defaulted to `off`, so an
+                // `off` from those versions is an explicit choice and is left
+                // untouched by the guard.
+                Some(PqcMode::Off) if self.pqc_default_version < 1 => {
+                    self.pqc_mode = None;
+                }
+                // A `prefer` from version `0` or `1` is the old standard
+                // default carried over, not an advanced choice, so it moves to
+                // `require`. A `prefer` set at version `2` or later never
+                // reaches here (the outer check excludes it) and is kept.
+                Some(PqcMode::Prefer) => {
+                    self.pqc_mode = Some(PqcMode::Require);
+                }
+                _ => {}
             }
             self.pqc_default_version = PQC_DEFAULT_VERSION;
         }
@@ -1223,18 +1289,28 @@ mod pqc_default_tests {
     }
 
     #[test]
-    fn the_default_is_prefer_and_is_not_written_to_the_file() {
-        assert_eq!(PqcMode::default(), PqcMode::Prefer);
+    fn the_default_is_require_and_is_not_written_to_the_file() {
+        assert_eq!(PqcMode::default(), PqcMode::Require);
         let c = NodeConfig::default();
         assert_eq!(c.privacy.pqc_mode, None);
-        assert_eq!(c.privacy.pqc_mode(), PqcMode::Prefer);
+        assert_eq!(c.privacy.pqc_mode(), PqcMode::Require);
         let dir = tempfile::tempdir().unwrap();
         c.save(dir.path()).unwrap();
         let text = std::fs::read_to_string(crate::paths::config_file(dir.path())).unwrap();
-        assert!(!text.contains("pqc_mode"), "{text}");
-        assert!(text.contains("pqc_default_version = 1"), "{text}");
+        assert!(!text.contains("pqc_mode = "), "{text}");
+        assert!(text.contains("pqc_default_version = 2"), "{text}");
         let back = NodeConfig::load(dir.path()).unwrap();
-        assert_eq!(back.privacy.pqc_mode(), PqcMode::Prefer);
+        assert_eq!(back.privacy.pqc_mode(), PqcMode::Require);
+    }
+
+    #[test]
+    fn only_off_and_prefer_allow_a_classical_fallback() {
+        // `require` holds the message back for a contact that cannot do the
+        // hybrid exchange; `off` and `prefer` let it fall back to a classical
+        // session. The status surfaces warn on exactly the latter two.
+        assert!(!PqcMode::Require.allows_classical_fallback());
+        assert!(PqcMode::Off.allows_classical_fallback());
+        assert!(PqcMode::Prefer.allows_classical_fallback());
     }
 
     #[test]
@@ -1243,7 +1319,7 @@ mod pqc_default_tests {
         legacy_file(dir.path(), PqcMode::Off);
         let c = NodeConfig::load(dir.path()).unwrap();
         assert_eq!(c.privacy.pqc_mode, None);
-        assert_eq!(c.privacy.pqc_mode(), PqcMode::Prefer);
+        assert_eq!(c.privacy.pqc_mode(), PqcMode::Require);
         // A file from before the key existed reads the same way.
         std::fs::write(
             crate::paths::config_file(dir.path()),
@@ -1252,18 +1328,105 @@ mod pqc_default_tests {
         .unwrap();
         assert_eq!(
             NodeConfig::load(dir.path()).unwrap().privacy.pqc_mode(),
-            PqcMode::Prefer
+            PqcMode::Require
         );
     }
 
     #[test]
-    fn an_old_file_with_prefer_or_require_keeps_it() {
+    fn an_old_file_with_require_keeps_it() {
+        // `require` is the current default; a version-`0` file that already
+        // held it stays on it (and is moved up to the current version).
+        let dir = tempfile::tempdir().unwrap();
+        legacy_file(dir.path(), PqcMode::Require);
+        let c = NodeConfig::load(dir.path()).unwrap();
+        assert_eq!(c.privacy.pqc_mode, Some(PqcMode::Require));
+        assert_eq!(c.privacy.pqc_mode(), PqcMode::Require);
+        assert_eq!(c.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
+    }
+
+    /// The owner's real file: a version-`0` `[privacy]` that carries only
+    /// `pqc_mode = "prefer"` (no `pqc_default_version` key). `prefer` was the
+    /// standard choice in the pre-beta.12 screen, so beta.12 reads it as the
+    /// old default carried over and moves it to `require`, leaving no silent
+    /// classical fallback.
+    #[test]
+    fn a_version_0_prefer_moves_to_require() {
+        let dir = tempfile::tempdir().unwrap();
+        legacy_file(dir.path(), PqcMode::Prefer);
+        // The file is the owner's shape: `pqc_mode` present, version key absent.
+        let text = std::fs::read_to_string(crate::paths::config_file(dir.path())).unwrap();
+        assert!(text.contains("pqc_mode = \"prefer\""), "{text}");
+        assert!(!text.contains("pqc_default_version"), "{text}");
+        let c = NodeConfig::load(dir.path()).unwrap();
+        assert_eq!(c.privacy.pqc_mode, Some(PqcMode::Require));
+        assert_eq!(c.privacy.pqc_mode(), PqcMode::Require);
+        assert!(!c.privacy.pqc_mode().allows_classical_fallback());
+        assert_eq!(c.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
+    }
+
+    /// A version-`1` file (default `prefer`) that recorded `prefer` is still
+    /// the carried-over old default, not an advanced choice, so beta.12 moves
+    /// it to `require` as well.
+    #[test]
+    fn a_version_1_prefer_moves_to_require() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            crate::paths::config_file(dir.path()),
+            "[privacy]\nstealth_mode = true\npqc_mode = \"prefer\"\npqc_default_version = 1\n",
+        )
+        .unwrap();
+        let c = NodeConfig::load(dir.path()).unwrap();
+        assert_eq!(c.privacy.pqc_mode, Some(PqcMode::Require));
+        assert_eq!(c.privacy.pqc_mode(), PqcMode::Require);
+        assert!(!c.privacy.pqc_mode().allows_classical_fallback());
+        assert_eq!(c.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
+    }
+
+    /// A `prefer` set at version `2` or later is an explicit advanced choice,
+    /// not a carried-over default, so it is kept; the status then warns about
+    /// the classical fallback it allows. A version-`2` `require` is kept too.
+    #[test]
+    fn a_version_2_prefer_or_require_is_kept() {
         for mode in [PqcMode::Prefer, PqcMode::Require] {
             let dir = tempfile::tempdir().unwrap();
-            legacy_file(dir.path(), mode);
+            std::fs::write(
+                crate::paths::config_file(dir.path()),
+                format!(
+                    "[privacy]\nstealth_mode = true\npqc_mode = \"{mode}\"\npqc_default_version = 2\n"
+                ),
+            )
+            .unwrap();
             let c = NodeConfig::load(dir.path()).unwrap();
             assert_eq!(c.privacy.pqc_mode, Some(mode));
             assert_eq!(c.privacy.pqc_mode(), mode);
+            assert_eq!(c.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
+        }
+        // The kept `prefer` is one the status warns about (classical fallback).
+        assert!(PqcMode::Prefer.allows_classical_fallback());
+    }
+
+    /// Reading the owner's version-`0` `prefer` file, saving it, and reading it
+    /// again must not migrate a second time: the first read moves it to
+    /// `require` at version `2`, and the second read leaves that `require`
+    /// alone (idempotent).
+    #[test]
+    fn the_prefer_migration_runs_once() {
+        let dir = tempfile::tempdir().unwrap();
+        legacy_file(dir.path(), PqcMode::Prefer);
+        // First read: carried-over `prefer` becomes `require` at version 2.
+        let c = NodeConfig::load(dir.path()).unwrap();
+        assert_eq!(c.privacy.pqc_mode, Some(PqcMode::Require));
+        assert_eq!(c.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
+        c.save(dir.path()).unwrap();
+        let text = std::fs::read_to_string(crate::paths::config_file(dir.path())).unwrap();
+        assert!(text.contains("pqc_default_version = 2"), "{text}");
+        // Second read (and a further save) keep the same `require`.
+        for _ in 0..2 {
+            let back = NodeConfig::load(dir.path()).unwrap();
+            assert_eq!(back.privacy.pqc_mode, Some(PqcMode::Require));
+            assert_eq!(back.privacy.pqc_mode(), PqcMode::Require);
+            assert_eq!(back.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
+            back.save(dir.path()).unwrap();
         }
     }
 
@@ -1276,13 +1439,39 @@ mod pqc_default_tests {
         set_pqc_mode_persistent(dir.path(), PqcMode::Off).unwrap();
         let text = std::fs::read_to_string(crate::paths::config_file(dir.path())).unwrap();
         assert!(text.contains("pqc_mode = \"off\""), "{text}");
-        assert!(text.contains("pqc_default_version = 1"), "{text}");
+        assert!(text.contains("pqc_default_version = 2"), "{text}");
         for _ in 0..2 {
             let c = NodeConfig::load(dir.path()).unwrap();
             assert_eq!(c.privacy.pqc_mode, Some(PqcMode::Off));
             assert_eq!(c.privacy.pqc_mode(), PqcMode::Off);
             c.save(dir.path()).unwrap();
         }
+    }
+
+    /// A file written by a version-`1` build (default `prefer`) with an
+    /// explicit `off` must keep that `off` when a version-`2` build reads it:
+    /// `off` was never a version-`1` default, so it was a choice, not a
+    /// carried-over default. The kept value still allows a classical fallback,
+    /// so the status is expected to warn about it (see
+    /// `PqcMode::allows_classical_fallback`).
+    #[test]
+    fn an_explicit_off_written_at_version_1_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        // A version-`1` file: the version key is present and set to 1, with an
+        // explicit `off`. Written directly because no current build emits
+        // version 1 any more.
+        std::fs::write(
+            crate::paths::config_file(dir.path()),
+            "[privacy]\nstealth_mode = true\npqc_mode = \"off\"\npqc_default_version = 1\n",
+        )
+        .unwrap();
+        let c = NodeConfig::load(dir.path()).unwrap();
+        assert_eq!(c.privacy.pqc_mode, Some(PqcMode::Off));
+        assert_eq!(c.privacy.pqc_mode(), PqcMode::Off);
+        // The kept value is one the status warns about (classical fallback).
+        assert!(c.privacy.pqc_mode().allows_classical_fallback());
+        // The file is moved up to the current version but the choice stays.
+        assert_eq!(c.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
     }
 
     #[test]
@@ -1296,7 +1485,7 @@ mod pqc_default_tests {
         assert!(back.privacy.diagnostic_logging);
         assert_eq!(back.privacy.pqc_mode, None);
         assert_eq!(back.privacy.pqc_default_version, PQC_DEFAULT_VERSION);
-        assert_eq!(back.privacy.pqc_mode(), PqcMode::Prefer);
+        assert_eq!(back.privacy.pqc_mode(), PqcMode::Require);
     }
 
     #[test]

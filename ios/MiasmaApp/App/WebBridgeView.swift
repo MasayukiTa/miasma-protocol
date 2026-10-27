@@ -11,6 +11,7 @@
 
 import SwiftUI
 import WebKit
+import MiasmaBackup
 
 // MARK: - SwiftUI Wrapper
 
@@ -99,6 +100,9 @@ class MiasmaBridgeHandler: NSObject, WKScriptMessageHandler {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let dir = support.appendingPathComponent("miasma")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Keep the data directory out of iCloud/device backups. Idempotent;
+        // re-applied on every access. Failures do not stop the bridge.
+        _ = excludeFromBackup(at: dir)
         return dir.path
     }
 

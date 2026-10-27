@@ -67,6 +67,11 @@ pub struct Palette {
     pub danger: Color32,
     /// Running / in progress.
     pub info: Color32,
+    /// Text of a disabled control: at least 3.5:1 on the page and on every surface.
+    pub disabled_text: Color32,
+    /// 1 px outline of a disabled control: at least 2:1 on the page and on every surface, so the
+    /// control stays visible.
+    pub disabled_border: Color32,
 }
 
 /// `0xRRGGBB` to an opaque colour.
@@ -97,6 +102,8 @@ impl Palette {
             warning: hex(0x9A4607),
             danger: hex(0xB91C1C),
             info: hex(0x1D4FD0),
+            disabled_text: hex(0x70707A),
+            disabled_border: hex(0x9A978F),
         }
     }
 
@@ -117,6 +124,8 @@ impl Palette {
             warning: hex(0xF59E0B),
             danger: hex(0xF87171),
             info: hex(0x60A5FA),
+            disabled_text: hex(0x8A8A93),
+            disabled_border: hex(0x5E5E64),
         }
     }
 
@@ -322,6 +331,22 @@ mod tests {
         ];
         for (i, (got, exp)) in want.iter().enumerate() {
             assert_eq!(rgb(*got), *exp, "dark token #{i}");
+        }
+    }
+
+    #[test]
+    fn a_disabled_control_stays_visible_on_every_surface_in_both_modes() {
+        for (name, p) in [("light", Palette::light()), ("dark", Palette::dark())] {
+            for (surface, bg) in [
+                ("bg", p.bg),
+                ("surface", p.surface),
+                ("surface_subtle", p.surface_subtle),
+            ] {
+                let t = contrast(p.disabled_text, bg);
+                assert!(t >= 3.5, "{name} disabled text on {surface}: {t:.2}");
+                let b = contrast(p.disabled_border, bg);
+                assert!(b >= 2.0, "{name} disabled border on {surface}: {b:.2}");
+            }
         }
     }
 
