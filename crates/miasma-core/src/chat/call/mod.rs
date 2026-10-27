@@ -11,6 +11,7 @@
 
 pub mod frame;
 pub mod media;
+pub mod state;
 
 pub use frame::{open_frame, seal_frame, AdvanceReason, ReplayWindow, SendChain};
 pub use media::{
