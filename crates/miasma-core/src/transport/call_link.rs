@@ -67,7 +67,7 @@ impl DatagramLink for IrohDatagramLink {
             .map_or(false, |max| packet.len() <= max)
             && self
                 .connection
-                .send_datagram(bytes::Bytes::copy_from_slice(packet))
+                .send_datagram(packet.to_vec().into())
                 .is_ok()
     }
 
