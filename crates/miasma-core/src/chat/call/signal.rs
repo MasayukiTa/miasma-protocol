@@ -653,7 +653,7 @@ mod tests {
     /// Empty input is a clean truncation error, not a panic.
     #[test]
     fn empty_input_is_truncated() {
-        assert_eq!(Record::decode(&[]), Err(SignalError::Truncated));
+        assert!(matches!(Record::decode(&[]), Err(SignalError::Truncated)));
     }
 
     /// Trailing bytes after a complete record are rejected.
@@ -669,9 +669,8 @@ mod tests {
         ] {
             let mut bytes = r.encode();
             bytes.push(0x00);
-            assert_eq!(
-                Record::decode(&bytes),
-                Err(SignalError::TrailingBytes),
+            assert!(
+                matches!(Record::decode(&bytes), Err(SignalError::TrailingBytes)),
                 "trailing byte after a {:?} must be rejected",
                 r.kind()
             );
@@ -688,7 +687,10 @@ mod tests {
                 "{bad:#x} is not a call kind"
             );
             let body = [bad; 40];
-            assert_eq!(Record::decode(&body), Err(SignalError::UnknownKind));
+            assert!(matches!(
+                Record::decode(&body),
+                Err(SignalError::UnknownKind)
+            ));
         }
         for good in 0x30u8..=0x37 {
             assert!(Kind::from_byte(good).is_some(), "{good:#x} is a call kind");
@@ -703,7 +705,10 @@ mod tests {
         // The reason byte is the last byte of a reject record.
         let last = bytes.len() - 1;
         bytes[last] = 0x7f; // not a known reason code
-        assert_eq!(Record::decode(&bytes), Err(SignalError::UnknownReason));
+        assert!(matches!(
+            Record::decode(&bytes),
+            Err(SignalError::UnknownReason)
+        ));
     }
 
     /// An oversized length prefix is rejected before any buffer is sized.
@@ -718,7 +723,10 @@ mod tests {
         bytes.extend_from_slice(&1u64.to_be_bytes()); // created_at
         bytes.extend_from_slice(&2u64.to_be_bytes()); // expires_at
         bytes.extend_from_slice(&((MAX_CAPABILITIES_LEN as u16) + 1).to_be_bytes());
-        assert_eq!(Record::decode(&bytes), Err(SignalError::Oversized));
+        assert!(matches!(
+            Record::decode(&bytes),
+            Err(SignalError::Oversized)
+        ));
     }
 
     /// A length prefix at the maximum is accepted.
