@@ -911,6 +911,9 @@ impl ChatUi {
             }
             // Group answers go to the group screen (see `on_reply`).
             ChatResponse::Group(_) => {}
+            // Other responses are not handled by the chat screen.
+            #[allow(unreachable_patterns)]
+            _ => {}
         }
     }
 
