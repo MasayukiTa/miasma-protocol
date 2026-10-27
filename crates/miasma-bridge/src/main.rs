@@ -46,6 +46,7 @@ fn main() {
         default_filter: "miasma_bridge=info",
         process_hardening: true,
     });
+    miasma_core::root_key::install_default_platform_provider();
     if args.len() < 2 {
         print_usage();
         std::process::exit(1);
