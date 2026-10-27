@@ -906,12 +906,19 @@ async fn start_iroh(
             // Trusted-contact push rides on the same endpoint (ALPN miasma/push/1).
             let push = crate::push::service::start_for_daemon(data_dir, iroh.clone());
             // One-to-one chat (ALPN miasma/chat/1) shares the contact list.
-            crate::chat::service::start_for_daemon(
+            let chat = crate::chat::service::start_for_daemon(
                 data_dir,
                 iroh.clone(),
                 &seed,
                 push.contacts().clone(),
             );
+            #[cfg(feature = "pqc")]
+            if let Some(svc) = chat {
+                let runtime = crate::chat::call::runtime::CallRuntime::start(svc);
+                crate::chat::call::runtime::register_runtime(data_dir, runtime);
+            }
+            #[cfg(not(feature = "pqc"))]
+            let _ = chat;
             iroh.spawn_relay_watchdog();
             iroh_direct::register_node(data_dir, iroh);
             true
@@ -938,6 +945,10 @@ async fn start_iroh(
 
 #[cfg(feature = "iroh")]
 async fn stop_iroh(data_dir: &std::path::Path) {
+    #[cfg(feature = "pqc")]
+    if let Some(runtime) = crate::chat::call::runtime::unregister(data_dir) {
+        runtime.stop().await;
+    }
     crate::chat::service::unregister_service(data_dir);
     crate::push::service::unregister_service(data_dir);
     if let Some(node) = crate::transport::iroh_direct::unregister_node(data_dir) {

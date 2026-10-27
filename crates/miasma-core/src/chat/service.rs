@@ -407,6 +407,11 @@ impl ChatService {
         }
     }
 
+    #[cfg(feature = "pqc")]
+    pub(crate) fn call_shutdown(&self) -> watch::Receiver<bool> {
+        self.shutdown.subscribe()
+    }
+
     pub fn shutdown(&self) {
         let _ = self.shutdown.send(true);
         if let Some(g) = self.groups.get() {

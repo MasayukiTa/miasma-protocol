@@ -38,6 +38,10 @@ impl core::fmt::Debug for CallError {
         f.write_str("CallError")
     }
 }
+pub struct SendTicket {
+    effect: Effect,
+}
+
 struct PendingSend {
     peer: [u8; 32],
     effect: Effect,
@@ -799,27 +803,42 @@ impl<P: CallPorts> CallController<P> {
         record.encode().ok()
     }
 
-    pub fn flush_sends(&mut self, sender: &mut dyn CallSender) {
+    pub fn drain_encoded(&mut self) -> Vec<([u8; 32], Vec<u8>, SendTicket)> {
+        let mut encoded = Vec::new();
         for send in self.take_sends() {
-            let delivered = self
-                .encode_send(&send.effect)
-                .map_or(false, |bytes| sender.send(&send.peer, bytes));
-            if !delivered {
-                self.notices.push(CallNotice::SendFailed);
-                if let Effect::Send {
-                    control: Control::Offer,
-                    call_id,
-                    ..
-                } = send.effect
-                {
-                    if self.machine.state() == State::Calling
-                        && self.machine.matches_active(&call_id)
-                    {
-                        // Timeout uses the machine's existing cleanup path for an undeliverable offer.
-                        self.apply_event(Event::Timeout, self.ports.now_ms());
-                    }
+            let ticket = SendTicket {
+                effect: send.effect,
+            };
+            if let Some(bytes) = self.encode_send(&ticket.effect) {
+                encoded.push((send.peer, bytes, ticket));
+            } else {
+                self.report_send_result(ticket, false);
+            }
+        }
+        encoded
+    }
+
+    pub fn report_send_result(&mut self, ticket: SendTicket, ok: bool) {
+        if !ok {
+            self.notices.push(CallNotice::SendFailed);
+            if let Effect::Send {
+                control: Control::Offer,
+                call_id,
+                ..
+            } = ticket.effect
+            {
+                if self.machine.state() == State::Calling && self.machine.matches_active(&call_id) {
+                    // Timeout uses the machine's existing cleanup path for an undeliverable offer.
+                    self.apply_event(Event::Timeout, self.ports.now_ms());
                 }
             }
+        }
+    }
+
+    pub fn flush_sends(&mut self, sender: &mut dyn CallSender) {
+        for (peer, bytes, ticket) in self.drain_encoded() {
+            let ok = sender.send(&peer, bytes);
+            self.report_send_result(ticket, ok);
         }
     }
 
@@ -934,6 +953,24 @@ mod tests {
 
     fn controller() -> CallController<FakePorts> {
         CallController::new(FakePorts { now: 1_000 })
+    }
+
+    #[test]
+    fn encoded_offer_results_preserve_controller_state() {
+        for ok in [false, true] {
+            let mut c = controller();
+            assert!(c.dial([1; 32]).is_ok());
+            let sends = c.drain_encoded();
+            assert_eq!(sends.len(), 1);
+            for (_, _, ticket) in sends {
+                c.report_send_result(ticket, ok);
+            }
+            assert_eq!(
+                c.status().state,
+                if ok { State::Calling } else { State::Idle }
+            );
+            assert_eq!(c.take_notices().0.contains(&CallNotice::SendFailed), !ok);
+        }
     }
 
     #[test]
