@@ -1313,7 +1313,11 @@ impl DhtHandle {
         if !signed.verify_for_key(&mid_digest) {
             return None;
         }
-        let (record, _) = crate::transfer::decode_record_value(&signed.value).ok()?;
+        // Accept a v3 or a v4 record here with `decode_record_value_any`: this
+        // path only validates the record and re-serves the signed envelope whole,
+        // so a v4 record is served onward exactly as a v3 one is. The envelope is
+        // handed out unchanged, so a pre-v4 peer still refuses a v4 record itself.
+        let (record, _) = crate::transfer::decode_record_value_any(&signed.value).ok()?;
         if record.dht_key().as_slice() != mid_digest.as_slice() || record.validate().is_err() {
             return None;
         }
