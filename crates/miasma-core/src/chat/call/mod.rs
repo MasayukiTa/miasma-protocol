@@ -14,6 +14,8 @@ pub mod controller;
 pub mod frame;
 pub mod inbound;
 pub mod media;
+#[cfg(feature = "iroh")]
+pub mod runtime;
 pub mod signal;
 pub mod state;
 

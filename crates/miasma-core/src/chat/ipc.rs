@@ -55,7 +55,7 @@ pub enum ChatRequest {
     Call(CallRequest),
 }
 
-/// Call control requests. The controller is not yet connected to IPC.
+/// Call control requests.
 #[cfg(feature = "pqc")]
 #[derive(Clone, Serialize, Deserialize)]
 pub enum CallRequest {
@@ -360,6 +360,10 @@ fn err(kind: &str, message: impl Into<String>) -> ChatResponse {
 pub async fn handle_ipc(data_dir: &Path, req: ChatRequest) -> ChatResponse {
     #[cfg(feature = "pqc")]
     if matches!(&req, ChatRequest::Call(_)) {
+        #[cfg(feature = "iroh")]
+        if let Some(svc) = super::service::service_for(data_dir) {
+            return handle_with(&svc, req);
+        }
         return ChatResponse::Call(CallResponse::Unavailable);
     }
     #[cfg(feature = "iroh")]
@@ -421,7 +425,16 @@ pub fn handle_with(
 
     match req {
         #[cfg(feature = "pqc")]
-        ChatRequest::Call(_) => ChatResponse::Call(CallResponse::Unavailable),
+        ChatRequest::Call(request) => {
+            let Some(runtime) = super::call::runtime::runtime_for_service(svc) else {
+                return ChatResponse::Call(CallResponse::Unavailable);
+            };
+            let peer = match &request {
+                CallRequest::Dial { contact } => resolve(contact).map(|(peer, _)| peer),
+                _ => None,
+            };
+            ChatResponse::Call(runtime.handle(request, peer))
+        }
         ChatRequest::Group(g) => match svc.groups() {
             Some(gs) => ChatResponse::Group(super::group::ipc::handle_with(gs, g)),
             None => err("unavailable", "group chat is not running"),
