@@ -7,7 +7,8 @@
 //! buffers user-facing notices for a UI to drain, and a per-incoming-call
 //! approval token so a stale user interface cannot approve a replacement call.
 //!
-//! Inbound records and timeouts drive the machine; sending remains for later work.
+//! Inbound records, user commands and timeouts drive the machine; an injected
+//! sender carries encoded control records to the host transport.
 //!
 //! Privacy: anything that holds a call id or a peer id must not derive `Debug`
 //! (a call id is secret-adjacent, see [`state`]). [`CallNotice`], [`CallStatus`]
@@ -16,11 +17,47 @@
 
 use std::collections::VecDeque;
 
+use super::caps::{self, Capabilities};
 use super::inbound::CallInbound;
-use super::signal::Record;
+use super::signal::{self, Record};
 use super::state::{
-    CallId, CallMachine, Effect, Event, Notice, Offer, PeerId, State, OFFER_TTL_MS,
+    CallId, CallMachine, Control, Effect, Event, Notice, Offer, PeerId, Reason, State, OFFER_TTL_MS,
 };
+
+pub trait CallSender {
+    fn send(&mut self, peer: &[u8; 32], encoded: Vec<u8>) -> bool;
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum CallError {
+    NotAllowed,
+    Busy,
+}
+impl core::fmt::Debug for CallError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("CallError")
+    }
+}
+struct PendingSend {
+    peer: [u8; 32],
+    effect: Effect,
+}
+struct OfferContext {
+    call_id: CallId,
+    nonce: [u8; 16],
+}
+
+fn wire_reason(reason: Option<Reason>) -> u8 {
+    match reason {
+        Some(Reason::Declined) => signal::reason::DECLINED, // Direct equivalent.
+        Some(Reason::Canceled) => signal::reason::CANCELED, // Direct equivalent.
+        Some(Reason::Timeout) => signal::reason::TIMEOUT,   // Direct equivalent.
+        Some(Reason::Busy) => signal::reason::BUSY,         // Direct equivalent.
+        Some(Reason::CollisionLost) => signal::reason::COLLISION_LOST, // Direct equivalent.
+        Some(Reason::EstablishmentFailed) => signal::reason::DECLINED, // No corresponding wire code.
+        None => signal::reason::DECLINED,                              // Generic refusal.
+    }
+}
 
 /// Host services the controller needs but does not own: the clock and the
 /// contact check. Injected so the controller stays testable and performs no I/O
@@ -77,7 +114,168 @@ mod inbound_tests {
             call_id: id,
             call_nonce: new_call_nonce(),
             created_at_ms: 0,
-            capabilities: vec![],
+            capabilities: Capabilities::default_local().encode(),
+        }
+    }
+
+    struct Sender {
+        accepted: bool,
+        records: Vec<([u8; 32], Vec<u8>)>,
+    }
+    impl CallSender for Sender {
+        fn send(&mut self, peer: &[u8; 32], encoded: Vec<u8>) -> bool {
+            self.records.push((*peer, encoded));
+            self.accepted
+        }
+    }
+
+    #[test]
+    fn commands_and_sends() {
+        let peer = [1; 32];
+        let mut c = controller();
+        c.ports.allowed = false;
+        assert_eq!(c.dial(peer), Err(CallError::NotAllowed));
+        c.ports.allowed = true;
+        assert_eq!(c.dial(peer), Ok(()));
+        assert_eq!(c.dial(peer), Err(CallError::Busy));
+        let mut sender = Sender {
+            accepted: true,
+            records: Vec::new(),
+        };
+        c.flush_sends(&mut sender);
+        assert!(sender.records[0].0 == peer);
+        match Record::decode(&sender.records[0].1) {
+            Ok(Record::Offer { capabilities, .. }) => {
+                assert!(Capabilities::decode(&capabilities).is_ok())
+            }
+            _ => panic!("expected offer"),
+        }
+        let mut c = controller();
+        c.on_inbound(inbound(peer, offer(new_call_id(), 2000)));
+        let token = c.status().pending_token.unwrap();
+        assert!(!c.accept(token.wrapping_add(1)));
+        c.on_inbound(inbound([2; 32], offer(new_call_id(), 2000)));
+        assert!(c.accept(token));
+        let mut sender = Sender {
+            accepted: true,
+            records: Vec::new(),
+        };
+        c.flush_sends(&mut sender);
+        assert!(sender.records[0].0 == [2; 32]);
+        assert!(matches!(
+            Record::decode(&sender.records[0].1),
+            Ok(Record::Busy { .. })
+        ));
+        assert!(sender.records[1].0 == peer);
+        assert!(matches!(
+            Record::decode(&sender.records[1].1),
+            Ok(Record::Answer { .. })
+        ));
+        let mut c = controller();
+        c.on_inbound(inbound(peer, offer(new_call_id(), 2000)));
+        assert!(c.reject(c.status().pending_token.unwrap()));
+        let mut sender = Sender {
+            accepted: true,
+            records: Vec::new(),
+        };
+        c.flush_sends(&mut sender);
+        assert!(matches!(
+            Record::decode(&sender.records[0].1),
+            Ok(Record::Reject { .. })
+        ));
+    }
+
+    #[test]
+    fn failure_and_incompatible_answer() {
+        let peer = [1; 32];
+        let mut c = controller();
+        assert!(c.dial(peer).is_ok());
+        let mut sender = Sender {
+            accepted: false,
+            records: Vec::new(),
+        };
+        c.flush_sends(&mut sender);
+        assert_eq!(c.status().state, State::Idle);
+        assert!(c.take_notices().0.contains(&CallNotice::SendFailed));
+        let mut c = controller();
+        assert!(c.dial(peer).is_ok());
+        let sends = c.take_sends();
+        let id = match sends[0].effect {
+            Effect::Send { call_id, .. } => call_id.0,
+            _ => panic!("expected send"),
+        };
+        c.on_inbound(inbound(
+            peer,
+            Record::Answer {
+                call_id: id,
+                call_nonce: new_call_nonce(),
+                created_at_ms: 0,
+                capabilities: vec![1, 0, 0, 0],
+            },
+        ));
+        assert_eq!(c.status().state, State::Idle);
+        let mut sender = Sender {
+            accepted: true,
+            records: Vec::new(),
+        };
+        c.flush_sends(&mut sender);
+        assert!(matches!(
+            Record::decode(&sender.records[0].1),
+            Ok(Record::Cancel {
+                reason: signal::reason::DECLINED,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn reason_mapping_and_commands_in_each_state() {
+        for (reason, expected) in [
+            (Reason::Declined, signal::reason::DECLINED),
+            (Reason::Canceled, signal::reason::CANCELED),
+            (Reason::Timeout, signal::reason::TIMEOUT),
+            (Reason::Busy, signal::reason::BUSY),
+            (Reason::CollisionLost, signal::reason::COLLISION_LOST),
+            (Reason::EstablishmentFailed, signal::reason::DECLINED),
+        ] {
+            assert_eq!(wire_reason(Some(reason)), expected);
+        }
+        assert_eq!(wire_reason(None), signal::reason::DECLINED);
+        for state in [
+            State::Idle,
+            State::Calling,
+            State::Ringing,
+            State::Connected,
+        ] {
+            for command in 0..4 {
+                let mut c = controller();
+                let peer = [1; 32];
+                if state == State::Calling || state == State::Connected {
+                    assert!(c.dial(peer).is_ok());
+                    if state == State::Connected {
+                        let id = match c.pending_sends[0].effect {
+                            Effect::Send { call_id, .. } => call_id,
+                            _ => panic!("expected send"),
+                        };
+                        c.apply_event(Event::ReceivedAnswer { call_id: id }, 1000);
+                    }
+                } else if state == State::Ringing {
+                    c.on_inbound(inbound(peer, offer(new_call_id(), 2000)));
+                }
+                assert_eq!(c.status().state, state);
+                match command {
+                    0 => {
+                        let _ = c.dial(peer);
+                    }
+                    1 => {
+                        let _ = c.accept(0);
+                    }
+                    2 => {
+                        let _ = c.reject(0);
+                    }
+                    _ => c.hang_up(),
+                }
+            }
         }
     }
 
@@ -360,7 +558,8 @@ pub struct CallController<P: CallPorts> {
     notices: NoticeQueue,
     pending_token: Option<u64>,
     next_token: u64,
-    pending_effects: VecDeque<Effect>,
+    pending_sends: VecDeque<PendingSend>,
+    offer_contexts: VecDeque<OfferContext>,
     entered_at_ms: Option<u64>,
 }
 
@@ -374,7 +573,8 @@ impl<P: CallPorts> CallController<P> {
             notices: NoticeQueue::new(),
             pending_token: None,
             next_token: 0,
-            pending_effects: VecDeque::with_capacity(16),
+            pending_sends: VecDeque::with_capacity(16),
+            offer_contexts: VecDeque::with_capacity(32),
             entered_at_ms: None,
         }
     }
@@ -384,21 +584,52 @@ impl<P: CallPorts> CallController<P> {
         let now = self.ports.now_ms();
         let old_state = self.machine.state();
         let peer = inbound.peer;
+        let mut incoming_context = None;
         let event = match inbound.signal {
             Record::Offer {
                 call_id,
+                call_nonce,
                 expires_at_ms,
                 ..
-            } => Event::ReceivedOffer(Offer {
-                call_id: CallId(call_id),
-                peer_id: PeerId(peer),
-                from_contact: self.ports.is_contact_allowed(&peer),
-                expired: expires_at_ms < now,
-                other_call_active: old_state != State::Idle,
-            }),
-            Record::Answer { call_id, .. } if self.peer == Some(peer) => Event::ReceivedAnswer {
-                call_id: CallId(call_id),
-            },
+            } => {
+                incoming_context = Some((CallId(call_id), call_nonce));
+                Event::ReceivedOffer(Offer {
+                    call_id: CallId(call_id),
+                    peer_id: PeerId(peer),
+                    from_contact: self.ports.is_contact_allowed(&peer),
+                    expired: expires_at_ms < now,
+                    other_call_active: old_state != State::Idle,
+                })
+            }
+            Record::Answer {
+                call_id,
+                capabilities,
+                ..
+            } if self.peer == Some(peer) => {
+                let id = CallId(call_id);
+                if old_state == State::Calling && self.machine.matches_active(&id) {
+                    if let Err(error) = Capabilities::decode(&capabilities)
+                        .and_then(|remote| caps::negotiate(&Capabilities::default_local(), &remote))
+                    {
+                        // UserHangUp cancels the pending call and clears the machine.
+                        self.apply_event(Event::UserHangUp, now);
+                        if let Some(send) = self.pending_sends.back_mut() {
+                            if let Effect::Send {
+                                control: Control::Cancel,
+                                reason,
+                                ..
+                            } = &mut send.effect
+                            {
+                                if error.reason() == signal::reason::DECLINED {
+                                    *reason = Some(Reason::Declined);
+                                }
+                            }
+                        }
+                        return;
+                    }
+                }
+                Event::ReceivedAnswer { call_id: id }
+            }
             Record::Reject { call_id, .. } if self.peer == Some(peer) => Event::ReceivedReject {
                 call_id: CallId(call_id),
             },
@@ -415,9 +646,12 @@ impl<P: CallPorts> CallController<P> {
             _ => return,
         };
         let is_offer = matches!(event, Event::ReceivedOffer(_));
-        self.apply_event(event, now);
+        self.apply_event_to(event, now, if is_offer { Some(peer) } else { None });
         if is_offer && old_state != State::Ringing && self.machine.state() == State::Ringing {
             self.peer = Some(peer);
+            if let Some((id, nonce)) = incoming_context {
+                self.remember_offer(id, nonce);
+            }
             self.begin_incoming();
         }
     }
@@ -434,12 +668,166 @@ impl<P: CallPorts> CallController<P> {
         }
     }
 
-    /// Take buffered send effects in order.
-    pub fn take_effects(&mut self) -> Vec<Effect> {
-        self.pending_effects.drain(..).collect()
+    fn remember_offer(&mut self, call_id: CallId, nonce: [u8; 16]) {
+        if self.offer_contexts.len() >= 32 {
+            self.offer_contexts.pop_front();
+        }
+        self.offer_contexts
+            .push_back(OfferContext { call_id, nonce });
+    }
+
+    pub fn dial(&mut self, peer: [u8; 32]) -> Result<(), CallError> {
+        if !self.ports.is_contact_allowed(&peer) {
+            return Err(CallError::NotAllowed);
+        }
+        if self.machine.state() != State::Idle {
+            return Err(CallError::Busy);
+        }
+        let now = self.ports.now_ms();
+        let call_id = CallId(signal::new_call_id());
+        self.peer = Some(peer);
+        self.remember_offer(call_id, signal::new_call_nonce());
+        self.apply_event(
+            Event::UserDial {
+                call_id,
+                peer_id: PeerId(peer),
+            },
+            now,
+        );
+        Ok(())
+    }
+
+    pub fn accept(&mut self, token: u64) -> bool {
+        if !self.approve(token) {
+            return false;
+        }
+        self.apply_event(Event::UserAccept, self.ports.now_ms());
+        true
+    }
+
+    pub fn reject(&mut self, token: u64) -> bool {
+        if !self.approve(token) {
+            return false;
+        }
+        self.apply_event(Event::UserReject, self.ports.now_ms());
+        true
+    }
+
+    pub fn hang_up(&mut self) {
+        self.apply_event(Event::UserHangUp, self.ports.now_ms());
+    }
+
+    fn take_sends(&mut self) -> Vec<PendingSend> {
+        self.pending_sends.drain(..).collect()
+    }
+
+    #[cfg(test)]
+    fn take_effects(&mut self) -> Vec<Effect> {
+        self.take_sends()
+            .into_iter()
+            .map(|send| send.effect)
+            .collect()
+    }
+
+    fn encode_send(&self, effect: &Effect) -> Option<Vec<u8>> {
+        let now = self.ports.now_ms();
+        let record = match *effect {
+            Effect::Send {
+                control,
+                call_id,
+                reason,
+            } => {
+                let id = call_id.0;
+                match control {
+                    Control::Offer | Control::Answer => {
+                        let nonce = self
+                            .offer_contexts
+                            .iter()
+                            .rev()
+                            .find(|c| c.call_id == call_id)?
+                            .nonce;
+                        let capabilities = Capabilities::default_local().encode();
+                        if control == Control::Offer {
+                            Record::Offer {
+                                call_id: id,
+                                call_nonce: nonce,
+                                created_at_ms: now,
+                                expires_at_ms: now.saturating_add(OFFER_TTL_MS),
+                                capabilities,
+                            }
+                        } else {
+                            Record::Answer {
+                                call_id: id,
+                                call_nonce: nonce,
+                                created_at_ms: now,
+                                capabilities,
+                            }
+                        }
+                    }
+                    Control::Reject => Record::Reject {
+                        call_id: id,
+                        created_at_ms: now,
+                        reason: wire_reason(reason),
+                    },
+                    Control::Busy => Record::Busy {
+                        call_id: id,
+                        created_at_ms: now,
+                        reason: wire_reason(reason),
+                    },
+                    Control::Cancel => Record::Cancel {
+                        call_id: id,
+                        created_at_ms: now,
+                        reason: wire_reason(reason),
+                    },
+                    Control::Bye => Record::Bye {
+                        call_id: id,
+                        created_at_ms: now,
+                    },
+                    Control::Collide => return None, // A plain Send has no second call id.
+                }
+            }
+            Effect::Collide {
+                call_id,
+                peer_call_id,
+            } => Record::Collide {
+                call_id: call_id.0,
+                peer_call_id: peer_call_id.0,
+                created_at_ms: now,
+            },
+            _ => return None,
+        };
+        record.encode().ok()
+    }
+
+    pub fn flush_sends(&mut self, sender: &mut dyn CallSender) {
+        for send in self.take_sends() {
+            let delivered = self
+                .encode_send(&send.effect)
+                .map_or(false, |bytes| sender.send(&send.peer, bytes));
+            if !delivered {
+                self.notices.push(CallNotice::SendFailed);
+                if let Effect::Send {
+                    control: Control::Offer,
+                    call_id,
+                    ..
+                } = send.effect
+                {
+                    if self.machine.state() == State::Calling
+                        && self.machine.matches_active(&call_id)
+                    {
+                        // Timeout uses the machine's existing cleanup path for an undeliverable offer.
+                        self.apply_event(Event::Timeout, self.ports.now_ms());
+                    }
+                }
+            }
+        }
     }
 
     fn apply_event(&mut self, event: Event, now: u64) {
+        self.apply_event_to(event, now, None);
+    }
+
+    fn apply_event_to(&mut self, event: Event, now: u64, offer_sender: Option<[u8; 32]>) {
         let old_state = self.machine.state();
         let transition = self.machine.step(event, now);
         if transition.next != old_state {
@@ -453,10 +841,25 @@ impl<P: CallPorts> CallController<P> {
             match effect {
                 Effect::Show(notice) => self.notices.push(CallNotice::from(notice)),
                 Effect::Send { .. } | Effect::Collide { .. } => {
-                    if self.pending_effects.len() >= 16 {
-                        self.pending_effects.pop_front();
+                    let recipient = if matches!(
+                        effect,
+                        Effect::Send {
+                            control: Control::Busy,
+                            ..
+                        }
+                    ) {
+                        offer_sender.or(self.peer)
+                    } else {
+                        self.peer
+                    };
+                    if let Some(peer) = recipient {
+                        if self.pending_sends.len() >= 16 {
+                            self.pending_sends.pop_front();
+                        }
+                        self.pending_sends.push_back(PendingSend { peer, effect });
+                    } else {
+                        self.notices.push(CallNotice::SendFailed);
                     }
-                    self.pending_effects.push_back(effect);
                 }
                 Effect::ZeroizeKeys | Effect::ReplaceSasInput { .. } => {}
             }
@@ -488,8 +891,13 @@ impl<P: CallPorts> CallController<P> {
     /// token cannot approve a replacement call.
     pub fn begin_incoming(&mut self) -> u64 {
         let token = self.next_token;
-        self.next_token += 1;
-        self.pending_token = Some(token);
+        if let Some(next) = self.next_token.checked_add(1) {
+            self.next_token = next;
+            self.pending_token = Some(token);
+        } else {
+            // Exhaustion fails closed rather than reusing an approval token.
+            self.pending_token = None;
+        }
         token
     }
 

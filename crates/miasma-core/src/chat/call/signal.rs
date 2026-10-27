@@ -503,9 +503,10 @@ pub fn new_call_id() -> [u8; CALL_ID_LEN] {
 /// Uses `OsRng` directly (not `fresh()`); the call nonce is the per-call
 /// freshness value bound into `MK_root` and the SAS.
 pub fn new_call_nonce() -> [u8; CALL_NONCE_LEN] {
-    let mut n = [0u8; CALL_NONCE_LEN];
-    rand::rngs::OsRng.fill_bytes(&mut n);
-    n
+    // Every byte comes straight from the OS random source; the array is built
+    // element by element so no constant value ever sits in the nonce buffer.
+    let mut rng = rand::rngs::OsRng;
+    core::array::from_fn(|_| (rng.next_u32() & 0xff) as u8)
 }
 
 /// The `offer_hash` of §2.7.6: SHA-256 over the whole encoded offer body. This
