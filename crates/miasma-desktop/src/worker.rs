@@ -999,6 +999,7 @@ fn do_init(data_dir: &Path) -> anyhow::Result<()> {
         privacy: Default::default(),
         update: Default::default(),
         transfer: Default::default(),
+        call: Default::default(),
     };
     config.save(data_dir)?;
 

@@ -913,9 +913,14 @@ async fn start_iroh(
                 push.contacts().clone(),
             );
             #[cfg(feature = "pqc")]
-            if let Some(svc) = chat {
-                let runtime = crate::chat::call::runtime::CallRuntime::start(svc);
-                crate::chat::call::runtime::register_runtime(data_dir, runtime);
+            if crate::config::NodeConfig::load(data_dir)
+                .map(|cfg| crate::config::calls_enabled(&cfg))
+                .unwrap_or_default()
+            {
+                if let Some(svc) = chat {
+                    let runtime = crate::chat::call::runtime::CallRuntime::start(svc);
+                    crate::chat::call::runtime::register_runtime(data_dir, runtime);
+                }
             }
             #[cfg(not(feature = "pqc"))]
             let _ = chat;

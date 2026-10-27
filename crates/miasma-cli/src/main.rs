@@ -864,6 +864,7 @@ fn cmd_init(
         privacy: Default::default(),
         update: Default::default(),
         transfer: Default::default(),
+        call: Default::default(),
     };
     config.save(data_dir).context("cannot save config")?;
 

@@ -32,6 +32,20 @@ pub struct NodeConfig {
     /// How published transfers are written on the wire.
     #[serde(default)]
     pub transfer: TransferConfig,
+    /// Calls are disabled by default and unfinished (no audio device yet).
+    #[serde(default)]
+    pub call: CallConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CallConfig {
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// Whether the unfinished call runtime is enabled.
+pub fn calls_enabled(cfg: &NodeConfig) -> bool {
+    cfg.call.enabled
 }
 
 /// `[privacy]` in `config.toml`: what the programs may leave behind.
@@ -1697,6 +1711,47 @@ mod push_send_rate_config_tests {
                     .push
                     .max_send_kib_per_sec,
                 cap
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod call_config_tests {
+    use super::*;
+
+    #[test]
+    fn calls_are_disabled_by_default() {
+        assert!(!calls_enabled(&NodeConfig::default()));
+    }
+
+    #[test]
+    fn a_file_without_a_call_section_disables_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            crate::paths::config_file(dir.path()),
+            "[chat]\nenabled = true\n",
+        )
+        .unwrap();
+        assert!(!calls_enabled(&NodeConfig::load(dir.path()).unwrap()));
+    }
+
+    #[test]
+    fn a_call_section_can_enable_calls() {
+        let cfg: NodeConfig = toml::from_str("[call]\nenabled = true\n").unwrap();
+        assert!(calls_enabled(&cfg));
+    }
+
+    #[test]
+    fn the_call_setting_round_trips_through_save_and_load() {
+        for enabled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut cfg = NodeConfig::default();
+            cfg.call.enabled = enabled;
+            cfg.save(dir.path()).unwrap();
+            assert_eq!(
+                calls_enabled(&NodeConfig::load(dir.path()).unwrap()),
+                enabled
             );
         }
     }
