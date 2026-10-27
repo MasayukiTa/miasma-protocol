@@ -1,5 +1,5 @@
 //! Media over two real endpoints on a local relay. This does not assert a direct path.
-#![cfg(feature = "iroh")]
+#![cfg(all(feature = "iroh", feature = "pqc"))]
 
 use std::{
     sync::{Arc, Mutex},
