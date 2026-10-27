@@ -11,6 +11,7 @@
 
 pub mod frame;
 pub mod media;
+pub mod signal;
 pub mod state;
 
 pub use frame::{open_frame, seal_frame, AdvanceReason, ReplayWindow, SendChain};
@@ -19,4 +20,9 @@ pub use media::{
     AAD_LEN, EPOCH_MAX_PACKETS, EPOCH_RETAIN, FRAME_PLAINTEXT_LEN, FRAME_WIRE_LEN, KEY_EPOCH_MAX,
     MAX_EPOCH_JUMP, MEDIA_PROTOCOL_VERSION, MEDIA_REKEY_SECONDS, MEDIA_REPLAY_WINDOW, NONCE_LEN,
     TAG_LEN, WIRE_HEADER_LEN,
+};
+pub use signal::{
+    new_call_id, new_call_nonce, offer_hash, reason, Kind, Record, SignalError, CALL_ID_LEN,
+    CALL_NONCE_LEN, CALL_TTL_SECONDS_DEFAULT, CALL_TTL_SECONDS_MAX, CALL_TTL_SECONDS_MIN,
+    OFFER_HASH_LEN,
 };
