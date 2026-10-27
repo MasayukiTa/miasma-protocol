@@ -11,6 +11,7 @@
 
 pub mod caps;
 pub mod controller;
+pub mod device;
 pub mod frame;
 pub mod inbound;
 pub mod jitter;
@@ -20,6 +21,7 @@ pub mod receiver;
 #[cfg(feature = "iroh")]
 pub mod runtime;
 pub mod sender;
+pub mod session;
 pub mod signal;
 pub mod state;
 
