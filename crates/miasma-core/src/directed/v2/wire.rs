@@ -292,6 +292,14 @@ pub mod codes {
     pub const ID_CONFLICT: &str = "id_conflict";
     /// The suite is not supported.
     pub const UNSUPPORTED_SUITE: &str = "unsupported_suite";
+    /// Persisting the record failed for a transient reason (I/O, inbox limit).
+    /// Distinct from `offer_unknown`: the offer was known, storage just failed,
+    /// so the caller may retry.
+    pub const STORAGE_FAILED: &str = "storage_failed";
+    /// A lifecycle field carried a value other than the fixed one the recipient
+    /// requires. Distinct from `unsupported_suite` so a caller can tell a bad
+    /// lifecycle state from an unsupported suite.
+    pub const BAD_LIFECYCLE: &str = "bad_lifecycle";
 }
 
 /// Build the coded error string `directed-v2:<code>: <detail>`.
