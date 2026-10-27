@@ -224,8 +224,13 @@ enum Commands {
         /// part of it. Default output is unchanged without this flag.
         #[arg(long)]
         invite: bool,
-        /// Object format to write: `compat` (the default receivers read) or
-        /// `latest`. Omitted: the configured `transfer.object_format` is used.
+        /// Object format to write: `compat` (the default, and what every
+        /// released build can read) or `latest`. `latest` is experimental: a
+        /// transfer sent with `latest` can be received by current builds, but
+        /// it is not yet registered for upkeep and replication, so it is not
+        /// maintained like a default (`compat`) send, and older builds refuse
+        /// it with the update message. Omitted: the configured
+        /// `transfer.object_format` is used.
         #[arg(long, value_name = "FORMAT")]
         format: Option<ObjectFormat>,
     },
