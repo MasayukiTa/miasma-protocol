@@ -133,7 +133,7 @@ impl ReplayWindow {
     }
 
     /// Decide whether `seq` may be accepted. Does not mutate on rejection.
-    /// Call `accept` only after the AEAD tag passed.
+    /// Use `open_frame_and_accept` to authenticate and record a frame.
     pub fn check(&self, seq: u64) -> Result<(), MediaError> {
         if !self.seen_any {
             return Ok(());
@@ -151,9 +151,29 @@ impl ReplayWindow {
         Ok(())
     }
 
-    /// Record `seq` as received, sliding the window if it is newer. Must be
-    /// called only after both `check` and the AEAD tag succeeded.
-    pub fn accept(&mut self, seq: u64) {
+    /// Reject replays, authenticate the frame, and only then update the window.
+    /// Use a separate window for each direction and key epoch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_frame_and_accept(
+        &mut self,
+        msg_key: &[u8; 32],
+        call_id: &[u8; 16],
+        direction: Direction,
+        key_epoch: u32,
+        packet_seq: u64,
+        media_type: u8,
+        frame: &[u8],
+    ) -> Result<Zeroizing<Vec<u8>>, MediaError> {
+        self.check(packet_seq)?;
+        let plaintext = open_frame(
+            msg_key, call_id, direction, key_epoch, packet_seq, media_type, frame,
+        )?;
+        self.accept(packet_seq);
+        Ok(plaintext)
+    }
+
+    /// Record a sequence after replay checking and authentication succeed.
+    fn accept(&mut self, seq: u64) {
         if !self.seen_any {
             self.seen_any = true;
             self.max_seq = seq;
@@ -472,11 +492,50 @@ mod tests {
         for &i in &[2usize, 0, 1] {
             let (seq, ref pt, ref f) = frames[i];
             assert!(w.check(seq).is_ok());
-            let opened = open_frame(&key, &call_id, Direction::Caller, 0, seq, 0x00, f).unwrap();
+            let opened = w
+                .open_frame_and_accept(&key, &call_id, Direction::Caller, 0, seq, 0x00, f)
+                .unwrap();
             assert_eq!(opened.as_slice(), &pt[..]);
-            w.accept(seq);
         }
         assert_eq!(w.check(0).unwrap_err(), MediaError::Replay);
+    }
+
+    #[test]
+    fn failed_open_does_not_advance_or_poison_window() {
+        let key = Zeroizing::new(fresh_msg_key());
+        let call_id = rand16();
+        let pt = Zeroizing::new(rand_plaintext());
+        let frame = seal_frame(&key, &call_id, Direction::Caller, 0, 1, 0x00, &pt[..]).unwrap();
+        let mut window = ReplayWindow::new();
+        let mut bad = frame.clone();
+        bad[0] ^= 1;
+
+        assert!(matches!(
+            window.open_frame_and_accept(&key, &call_id, Direction::Caller, 0, 1, 0x00, &bad),
+            Err(MediaError::Authentication)
+        ));
+        assert!(window.check(1).is_ok());
+        assert!(matches!(
+            window.open_frame_and_accept(
+                &key,
+                &call_id,
+                Direction::Caller,
+                0,
+                u64::MAX,
+                0x00,
+                &frame,
+            ),
+            Err(MediaError::Authentication)
+        ));
+        assert!(window.check(1).is_ok());
+        let opened = window
+            .open_frame_and_accept(&key, &call_id, Direction::Caller, 0, 1, 0x00, &frame)
+            .unwrap();
+        assert!(opened.as_slice() == &pt[..]);
+        assert!(matches!(
+            window.open_frame_and_accept(&key, &call_id, Direction::Caller, 0, 1, 0x00, &frame),
+            Err(MediaError::Replay)
+        ));
     }
 
     // §7.4 epoch time trigger: advancing the injected clock by

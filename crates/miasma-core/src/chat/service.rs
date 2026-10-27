@@ -25,6 +25,12 @@ use iroh::endpoint::{Connection, ConnectionError};
 use tokio::sync::{watch, Notify, Semaphore};
 use tracing::{debug, info, warn};
 
+#[cfg(feature = "pqc")]
+#[path = "call/immediate.rs"]
+mod immediate;
+#[cfg(feature = "pqc")]
+pub use immediate::{CallControlError, CALL_CONTROL_SEND_TTL_MS};
+
 use super::{
     activity::ChatActivity,
     crypto::Identity,
