@@ -255,13 +255,22 @@ impl RecordEndpoint for IrohDirectClient {
 ///
 /// This form cannot tell who signed the record: see
 /// [`fetch_verified_record_via`].
+///
+/// For a v4 (latest-format) record the returned manifest is a v3 structural
+/// view of the v4 manifest. Format-aware callers should use the verified-record
+/// fetch ([`fetch_verified_record_via`]) to see the original v4 manifest.
 pub async fn fetch_record_and_manifest_via(
     clients: &[Arc<WsDirectClient>],
     mid: &ContentId,
 ) -> Result<(DhtRecord, Option<TransferManifest>), MiasmaError> {
     fetch_verified_record_via(clients, mid, None)
         .await
-        .map(|f| (f.record, f.manifest))
+        .map(|f| {
+            let manifest = f
+                .manifest
+                .or_else(|| f.manifest_v4.as_ref().map(|m| m.as_v3_view()));
+            (f.record, manifest)
+        })
 }
 
 /// As [`fetch_record_and_manifest_via`], over the signed record envelope each
