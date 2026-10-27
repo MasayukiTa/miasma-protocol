@@ -608,6 +608,10 @@ async fn main() -> Result<()> {
         process_hardening: true,
     });
 
+    // Wrap the root key with the system's key protection (Windows: the signed-in
+    // user's); an existing plain key is moved over without any prompt.
+    miasma_core::root_key::install_default_platform_provider();
+
     // Stamp version for future upgrade detection.
     if miasma_core::paths::config_file(&data_dir).exists() {
         miasma_core::config::stamp_version(&data_dir, env!("CARGO_PKG_VERSION"));

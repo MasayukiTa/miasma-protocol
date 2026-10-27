@@ -123,6 +123,10 @@ jobs:
           cargo test -p miasma-core --lib --locked -- secure_file:: control_auth::
           cargo test -p miasma-core --locked --test adversarial_ipc_test -- token_file daemon_does_not_start
 
+      # The root key wrap that uses the Windows data protection API.
+      - name: Test root key wrap
+        run: cargo test -p miasma-core --lib --locked -- "root_key::"
+
       - name: Build CLI
         run: cargo build -p miasma-cli --locked
 
