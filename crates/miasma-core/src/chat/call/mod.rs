@@ -9,12 +9,14 @@
 //! buffers live in `Zeroizing`, and no key, nonce, call id, peer id or media
 //! sample ever reaches a log, an error message or a `Debug` output.
 
+pub mod caps;
 pub mod frame;
 pub mod inbound;
 pub mod media;
 pub mod signal;
 pub mod state;
 
+pub use caps::{negotiate, Capabilities, CapsError, Negotiated};
 pub use frame::{open_frame, seal_frame, AdvanceReason, ReplayWindow, SendChain};
 pub use inbound::CallInbound;
 pub use media::{
