@@ -364,11 +364,10 @@ pub struct TransferConfig {
     /// [`ObjectFormat::Compat`]: the output is byte-for-byte what shipped
     /// builds write, which every released build can read. [`ObjectFormat::Latest`]
     /// writes a newer record format (a version-4 manifest and version-2
-    /// shares) that current builds can receive, but it is still being
-    /// completed: a transfer sent with `latest` is not yet kept alive and
-    /// copied to other nodes the way a default (`compat`) send is, and older
-    /// builds answer it with an update message. `compat` stays the default
-    /// and is what every released build can read.
+    /// shares) that current builds can receive and keep alive like `compat`
+    /// transfers. Streaming receive of `latest` is not supported yet; use the
+    /// normal receive command. Older builds answer with an update message.
+    /// `compat` stays the default and is what every released build can read.
     /// A publish with no manifest (a single share) is unaffected and stays on
     /// the compatible format regardless of this setting.
     #[serde(default)]

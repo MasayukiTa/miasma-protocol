@@ -44,10 +44,10 @@ fn params() -> DissolutionParams {
     }
 }
 
-/// A deterministic signing key; its public key is the publisher a valid manifest
+/// A fresh signing key; its public key is the publisher a valid manifest
 /// must name, and the signer `open_signed_record` reports.
 fn signing_key() -> SigningKey {
-    SigningKey::from_bytes(&[0x11; 32])
+    SigningKey::from_bytes(&rand::random::<[u8; 32]>())
 }
 
 fn record() -> DhtRecord {

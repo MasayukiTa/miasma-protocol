@@ -226,11 +226,10 @@ enum Commands {
         invite: bool,
         /// Object format to write: `compat` (the default, and what every
         /// released build can read) or `latest`. `latest` writes a newer
-        /// record format that current builds can receive, but it is still
-        /// being completed: a transfer sent with `latest` is not yet kept
-        /// alive and copied to other nodes the way a default (`compat`) send
-        /// is, and older builds answer it with an update message. Omitted: the
-        /// configured `transfer.object_format` is used.
+        /// record format that current builds can receive and keep alive like
+        /// `compat` transfers. Streaming receive of `latest` is not supported
+        /// yet; use the normal receive command. Older builds answer with an
+        /// update message. Omitted: the configured `transfer.object_format` is used.
         #[arg(long, value_name = "FORMAT")]
         format: Option<ObjectFormat>,
     },

@@ -419,14 +419,11 @@ async fn run_from_record<S: PieceSource>(
         progress.set_state(TransferState::Failed, Some(e.to_string()), false);
         e
     };
-    let output = resolve_receive_target(
-        output_path,
-        &mid,
-        fetched.manifest.as_ref(),
-        password.as_ref(),
-    )
-    .await
-    .map_err(fail)?;
+    let v3_view = fetched.manifest_v4.as_ref().map(|m| m.as_v3_view());
+    let name_manifest = fetched.manifest.as_ref().or(v3_view.as_ref());
+    let output = resolve_receive_target(output_path, &mid, name_manifest, password.as_ref())
+        .await
+        .map_err(fail)?;
     if output != output_path {
         progress.set_name(output.to_string_lossy());
     }
