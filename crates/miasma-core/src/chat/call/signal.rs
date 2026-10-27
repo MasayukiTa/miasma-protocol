@@ -43,7 +43,7 @@ pub const CALL_TTL_SECONDS_MAX: u64 = 60;
 /// Upper bound on a decoded capability field, so a hostile length prefix cannot
 /// ask us to size a huge buffer. The capability block is small (codec/CBR/DTX
 /// flags); a few hundred bytes is already generous.
-const MAX_CAPABILITIES_LEN: usize = 1024;
+pub(super) const MAX_CAPABILITIES_LEN: usize = 1024;
 
 /// Reason codes carried by reject/busy/cancel records, §3.1.2.
 ///
