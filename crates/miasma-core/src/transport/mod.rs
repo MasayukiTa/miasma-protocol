@@ -29,6 +29,8 @@
 /// - A shared secret (`probe_secret`) is required to distinguish Miasma
 ///   traffic from a real TLS handshake.  Without the secret, the server
 ///   proxies the connection to a legitimate CDN, defeating active probing.
+#[cfg(all(feature = "iroh", feature = "pqc"))]
+pub mod call_link;
 pub mod diagnostics;
 #[cfg(feature = "iroh")]
 pub mod iroh_direct;
