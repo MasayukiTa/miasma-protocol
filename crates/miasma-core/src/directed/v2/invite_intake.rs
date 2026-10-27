@@ -483,6 +483,18 @@ pub fn intake_invite(
 /// Whether a stored record is the same Invite as the one just verified: the same
 /// bound sender PeerId and the same transcript hash.
 ///
+/// # Contract
+///
+/// Callers MUST have verified the transcript signature before calling this: the
+/// `transcript_hash` argument has to come from a signature that already checked
+/// out (as [`verify_invite`] and [`verify_invite_no_offer`] produce it). This
+/// function only compares a bound PeerId and a hash; it performs no
+/// cryptographic check of its own. If it were called on a hash recomputed from
+/// an *unverified* transcript, a forged Invite under a stored id could be
+/// matched as an idempotent resend and echoed back. Both call sites
+/// ([`intake_invite`] and [`intake_resend_if_stored`]) verify the signature
+/// first; keep that order on any refactor.
+///
 /// A v2 intake pins the transcript hash on the record's local part when it
 /// writes it, so a resend is judged on both the bound PeerId and that stored
 /// hash: a match on both is idempotent, and the same id carrying a different
