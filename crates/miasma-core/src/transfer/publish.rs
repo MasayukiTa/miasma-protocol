@@ -38,14 +38,20 @@ use super::{
     share_id::ShareId,
 };
 use crate::{
+    config::ObjectFormat,
     crypto::hash::ContentId,
-    dissolution::{segment::dissolve_segment_with, DEFAULT_SEGMENT_SIZE},
+    dissolution::{
+        segment::{dissolve_segment_v2_at, dissolve_segment_with},
+        DEFAULT_SEGMENT_SIZE,
+    },
+    format::ObjectSuite,
     network::{
         coordinator::{estimated_local_share_storage_bytes, max_segment_size_for},
         types::{DhtRecord, ShardLocation},
         MiasmaCoordinator, PublishOptions, PublishReport,
     },
     pipeline::DissolutionParams,
+    transfer::manifest::{ManifestV4, MANIFEST_V4_MAX_EXT_BYTES},
     MiasmaError,
 };
 
@@ -58,6 +64,11 @@ pub struct PublishSpec {
     pub journal_dir: Option<PathBuf>,
     /// Ignore any journal and start again from the beginning.
     pub restart: bool,
+    /// Which object format a *new* publish writes. `Compat` (the default) writes
+    /// exactly what shipped builds write; `Latest` writes a version-4 manifest
+    /// and version-2 shares. A resumed publish ignores this and keeps the format
+    /// it was started with (recorded in the journal header's `suite`).
+    pub object_format: ObjectFormat,
 }
 
 #[derive(Debug)]
@@ -131,6 +142,7 @@ impl MiasmaCoordinator {
             password,
             journal_dir,
             restart,
+            object_format,
         } = spec;
 
         if password.as_ref().is_some_and(|p| p.is_empty()) {
@@ -237,6 +249,11 @@ impl MiasmaCoordinator {
                         (Protection::Password(prot), Some(Arc::new(key)))
                     }
                 };
+                // The writer's choice (R2): `Latest` writes Suite2, `Compat`
+                // (the default) writes Suite1 — byte-for-byte what shipped
+                // builds write. A resumed publish does not reach this arm; it
+                // keeps the suite recorded in its journal header.
+                let suite = object_format.object_suite();
                 let header = PublishHeader {
                     version: PUBLISH_JOURNAL_VERSION,
                     path: path_string.clone(),
@@ -249,8 +266,7 @@ impl MiasmaCoordinator {
                     mid: mid.to_string(),
                     protection: protection.clone(),
                     started_at: super::journal::now_secs(),
-                    // The writer is unchanged in R1: a publish is always Suite1.
-                    suite: crate::format::ObjectSuite::Suite1.id(),
+                    suite: suite.id(),
                 };
                 if let Some(jp) = &journal_path {
                     PublishJournal::create(jp, &header)?;
@@ -259,6 +275,17 @@ impl MiasmaCoordinator {
             }
         };
         progress.set_mid(mid.to_string());
+
+        // The object format this publish writes, valid for both a fresh and a
+        // resumed run. A new run recorded the suite chosen from `object_format`
+        // in its journal header above; a resumed run keeps whatever suite it
+        // started with (the header's `suite`, defaulting to Suite1 for a journal
+        // written before the field existed). The writer branches on this below.
+        let publish_suite = match &resumed {
+            Some(r) => ObjectSuite::from_id(r.header.suite)
+                .map_err(|e| MiasmaError::InvalidManifest(e.to_string()))?,
+            None => object_format.object_suite(),
+        };
 
         // ── Rebuild what the finished segments contributed. ─────────────────
         // The key this node signs its records with: the manifest names it, and
@@ -341,8 +368,26 @@ impl MiasmaCoordinator {
             let chunk = segment_buf.as_slice();
 
             let dissolve_started = Instant::now();
-            let (_meta, shares) =
-                dissolve_segment_with(chunk, &mid, seg, offset, params, key.as_deref())?;
+            // The one place the writer's format choice reaches the data: Suite1
+            // uses the unchanged v1 path (byte-for-byte what shipped builds
+            // write); Suite2 uses the v2 path (AAD-bound AES-256-GCM, version-2
+            // shares). Both Shamir-split a fresh random K_enc and RS-encode the
+            // ciphertext, so everything downstream (store, distribute, the piece
+            // commitments in the manifest) is identical.
+            let (_meta, shares) = match publish_suite {
+                ObjectSuite::Suite1 => {
+                    dissolve_segment_with(chunk, &mid, seg, offset, params, key.as_deref())?
+                }
+                ObjectSuite::Suite2 => dissolve_segment_v2_at(
+                    chunk,
+                    &mid,
+                    seg,
+                    offset,
+                    params,
+                    key.as_deref(),
+                    super::journal::now_secs(),
+                )?,
+            };
             manifest.push_segment(SegmentEntry::from_dissolved(seg, &mid, chunk, &shares)?)?;
             drop(segment_buf); // wiped and returned to the pool before any await
             let dissolve_time = dissolve_started.elapsed();
@@ -413,16 +458,40 @@ impl MiasmaCoordinator {
                 .unwrap_or_default()
                 .as_secs(),
         };
-        // The record and manifest are the ones just signed and announced; both
-        // are bounded by the DHT value limit, so keeping a copy for the
-        // observer does not change the publish's memory profile.
-        let for_observer = self.publish_observer().map(|_| record.clone());
-        self.dht_handle()
-            .put_with_manifest(record, Some(&manifest))
-            .await?;
-        if let (Some(observer), Some(announced)) = (self.publish_observer(), for_observer) {
-            if let Err(e) = observer(&announced, &manifest) {
-                tracing::warn!("published content could not be registered for upkeep: {e}");
+        match publish_suite {
+            // Suite1 (compat): the record, the manifest trailer and the observer
+            // call are exactly what shipped builds do. Not one byte of this path
+            // changes with the writer's-choice feature.
+            ObjectSuite::Suite1 => {
+                // The record and manifest are the ones just signed and announced;
+                // both are bounded by the DHT value limit, so keeping a copy for
+                // the observer does not change the publish's memory profile.
+                let for_observer = self.publish_observer().map(|_| record.clone());
+                self.dht_handle()
+                    .put_with_manifest(record, Some(&manifest))
+                    .await?;
+                if let (Some(observer), Some(announced)) = (self.publish_observer(), for_observer) {
+                    if let Err(e) = observer(&announced, &manifest, None) {
+                        tracing::warn!("published content could not be registered for upkeep: {e}");
+                    }
+                }
+            }
+            // Suite2 (latest): the same record rides a version-4 manifest trailer
+            // instead of a version-3 one. The manifest was built and validated as
+            // a v3 structure above (same name sealing, same per-segment piece
+            // commitments); promoting it to v4 only names the suite and adds the
+            // empty extension area.
+            ObjectSuite::Suite2 => {
+                let manifest_v4 = promote_manifest_to_v4(&manifest, publish_suite)?;
+                let for_observer = self.publish_observer().map(|_| record.clone());
+                self.dht_handle()
+                    .put_with_manifest_v4(record, &manifest_v4)
+                    .await?;
+                if let (Some(observer), Some(announced)) = (self.publish_observer(), for_observer) {
+                    if let Err(e) = observer(&announced, &manifest, Some(&manifest_v4)) {
+                        tracing::warn!("published content could not be registered for upkeep: {e}");
+                    }
+                }
             }
         }
         if let Some(jp) = &journal_path {
@@ -539,6 +608,49 @@ impl MiasmaCoordinator {
             key,
         }))
     }
+}
+
+/// Promote a validated version-3 [`TransferManifest`] to the version-4
+/// [`ManifestV4`] of a Suite2 publish.
+///
+/// Every structural field is carried over unchanged — the same MID, publisher,
+/// sealed or plain name, shard counts, segment size, total bytes, protection and
+/// per-segment piece commitments the v3 manifest already holds. The two added
+/// fields are the suite id (which must name a version-4 manifest) and an empty
+/// extension area reserved for a later version. The source manifest is validated
+/// by the caller before this runs; the result is validated here so a v4 trailer
+/// is never announced for an inconsistent manifest.
+fn promote_manifest_to_v4(
+    v3: &super::manifest::TransferManifest,
+    suite: ObjectSuite,
+) -> Result<ManifestV4, MiasmaError> {
+    debug_assert_eq!(
+        suite.spec().manifest_version,
+        4,
+        "a v4 manifest is promoted only for a suite that names version 4"
+    );
+    let manifest = ManifestV4 {
+        version: suite.spec().manifest_version,
+        mid: v3.mid,
+        publisher: v3.publisher,
+        name: v3.name.clone(),
+        data_shards: v3.data_shards,
+        total_shards: v3.total_shards,
+        segment_size: v3.segment_size,
+        total_bytes: v3.total_bytes,
+        protection: v3.protection.clone(),
+        segments: v3.segments.clone(),
+        suite: suite.id(),
+        // Reserved for a later version; a v4 publish writes it empty. The cap is
+        // referenced so an over-long area would be a compile-visible mistake
+        // rather than only a run-time one.
+        ext: Vec::new(),
+    };
+    debug_assert!(manifest.ext.len() <= MANIFEST_V4_MAX_EXT_BYTES);
+    manifest.validate().map_err(|e| {
+        MiasmaError::InvalidManifest(format!("version-4 manifest inconsistent: {e}"))
+    })?;
+    Ok(manifest)
 }
 
 /// The MID of the file at `path`, read once, reporting progress. Same value as

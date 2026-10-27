@@ -44,9 +44,9 @@ where
 {
     let work = async {
         let fetched = fetch.await?;
-        let name = carried_name(fetched.manifest.as_ref(), password)
-            .await
-            .ok()??;
+        let v3_view = fetched.manifest_v4.as_ref().map(|m| m.as_v3_view());
+        let name_manifest = fetched.manifest.as_ref().or(v3_view.as_ref());
+        let name = carried_name(name_manifest, password).await.ok()??;
         sanitize_file_name(&name)
     };
     tokio::time::timeout(limit, work).await.ok().flatten()
@@ -107,6 +107,7 @@ mod tests {
                 published_at: 1,
             },
             manifest,
+            manifest_v4: None,
             signer: [9; 32],
         }
     }
@@ -144,6 +145,28 @@ mod tests {
 
     async fn peek(f: Option<FetchedRecord>, p: Option<&Zeroizing<String>>) -> Option<String> {
         peek_name_with(async { f }, p, Duration::from_secs(5)).await
+    }
+
+    #[tokio::test]
+    async fn latest_manifest_returns_its_carried_name() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+        let mut rec = plain(Some(NAME));
+        let m = rec.manifest.take().unwrap();
+        rec.manifest_v4 = Some(crate::transfer::ManifestV4 {
+            version: crate::transfer::MANIFEST_VERSION_V4,
+            mid: m.mid,
+            publisher: key.verifying_key().to_bytes(),
+            name: m.name,
+            data_shards: m.data_shards,
+            total_shards: m.total_shards,
+            segment_size: m.segment_size,
+            total_bytes: m.total_bytes,
+            protection: m.protection,
+            segments: m.segments,
+            suite: crate::format::ObjectSuite::Suite2.id(),
+            ext: Vec::new(),
+        });
+        assert_eq!(peek(Some(rec), None).await.as_deref(), Some(NAME));
     }
 
     #[tokio::test]
@@ -210,6 +233,7 @@ mod tests {
             FetchedRecord {
                 record: self.record.clone(),
                 manifest: self.manifest.clone(),
+                manifest_v4: self.manifest_v4.clone(),
                 signer: self.signer,
             }
         }

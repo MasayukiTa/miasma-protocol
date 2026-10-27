@@ -530,10 +530,14 @@ impl DaemonServer {
         // maintenance can upkeep it, as for `publish_content`.
         {
             let queue = queue.clone();
-            coord.set_publish_observer(Arc::new(move |record, manifest| {
+            coord.set_publish_observer(Arc::new(move |record, manifest, manifest_v4| {
                 let mid = crate::ContentId::from_digest(record.mid_digest).to_string();
-                let pending =
-                    PendingReplication::with_manifest(mid, record.clone(), manifest.clone());
+                let pending = match manifest_v4 {
+                    Some(m) => PendingReplication::with_manifest_v4(mid, record.clone(), m.clone()),
+                    None => {
+                        PendingReplication::with_manifest(mid, record.clone(), manifest.clone())
+                    }
+                };
                 let mut q = queue
                     .lock()
                     .map_err(|_| "replication queue unavailable".to_string())?;
@@ -1211,6 +1215,20 @@ pub(crate) fn process_request(
     ))
 }
 
+/// Resolve the object format for a publish: the value the request carried, or
+/// the configured `transfer.object_format` when the request omitted it (an
+/// older client). A config that cannot be read falls back to the default.
+fn resolve_object_format(
+    requested: Option<crate::config::ObjectFormat>,
+    data_dir: &std::path::Path,
+) -> crate::config::ObjectFormat {
+    requested.unwrap_or_else(|| {
+        crate::config::NodeConfig::load(data_dir)
+            .map(|c| c.transfer.object_format)
+            .unwrap_or_default()
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn process_request_inner(
     req: ControlRequest,
@@ -1290,18 +1308,28 @@ async fn process_request_inner(
             file_path,
             data_shards,
             total_shards,
+            object_format,
         } => {
             let params = DissolutionParams {
                 data_shards: data_shards as usize,
                 total_shards: total_shards as usize,
             };
+            let object_format = resolve_object_format(object_format, &data_dir);
             let path = std::path::Path::new(&file_path);
             let gate = store.wipe_gate();
             match gate
                 .run_result(async {
                     // Test hold point; returns at once outside tests.
                     gate.stall_point().await;
-                    coord.dissolve_and_publish_file(path, params).await
+                    coord
+                        .dissolve_and_publish_file_with_format(
+                            path,
+                            params,
+                            crate::network::PublishOptions::default(),
+                            object_format,
+                        )
+                        .await
+                        .map(|report| report.mid)
                 })
                 .await
             {
@@ -1317,6 +1345,7 @@ async fn process_request_inner(
             data_shards,
             total_shards,
             password,
+            object_format,
         } => {
             // Wiped from memory when this arm ends.
             let password = Zeroizing::new(password);
@@ -1324,13 +1353,15 @@ async fn process_request_inner(
                 data_shards: data_shards as usize,
                 total_shards: total_shards as usize,
             };
+            let object_format = resolve_object_format(object_format, &data_dir);
             let path = std::path::Path::new(&file_path);
             match coord
-                .dissolve_and_publish_file_protected(
+                .dissolve_and_publish_file_protected_with_format(
                     path,
                     params,
                     crate::network::PublishOptions::default(),
                     password.as_str(),
+                    object_format,
                 )
                 .await
             {
@@ -1426,12 +1457,17 @@ async fn process_request_inner(
             total_shards,
             password,
             restart,
+            object_format,
         } => {
             let password = password.map(Zeroizing::new);
             let params = DissolutionParams {
                 data_shards: data_shards as usize,
                 total_shards: total_shards as usize,
             };
+            // The request carries the format for a new publish; when it is
+            // absent (an older client) the configured value is used. A resume
+            // still honours whatever suite its journal recorded.
+            let object_format = resolve_object_format(object_format, &data_dir);
             let registry = crate::transfer::jobs::registry_for(&data_dir);
             let id = registry.start_publish(
                 coord.clone(),
@@ -1439,6 +1475,7 @@ async fn process_request_inner(
                 params,
                 password,
                 restart,
+                object_format,
             );
             ControlResponse::TransferStarted { id }
         }
@@ -2804,10 +2841,20 @@ async fn retry_due(coord: &MiasmaCoordinator, queue: &Arc<Mutex<ReplicationQueue
         let _ = queue.lock().unwrap().record_attempt(&mid_digest);
 
         // An item published with a manifest is announced with it every time.
-        if let Err(e) = coord
-            .publish_record_with_manifest(item.record, item.manifest.as_ref())
-            .await
-        {
+        let result = match item.manifest_v4.as_ref() {
+            Some(manifest) => {
+                coord
+                    .dht_handle()
+                    .put_with_manifest_v4(item.record, manifest)
+                    .await
+            }
+            None => {
+                coord
+                    .publish_record_with_manifest(item.record, item.manifest.as_ref())
+                    .await
+            }
+        };
+        if let Err(e) = result {
             warn!(mid = %item.mid_str, "replication retry failed: {e}");
         }
         // Marking as replicated happens via the rep_success_rx channel
@@ -2885,6 +2932,64 @@ async fn environment_detector_loop(
 #[cfg(test)]
 mod large_file_stream_integrity_tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retry_announces_the_stored_latest_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::state_crypto::provision_master_key(dir.path()).unwrap();
+        let store = Arc::new(crate::LocalShareStore::open(dir.path(), 1000).unwrap());
+        let queue = Arc::new(Mutex::new(
+            ReplicationQueue::load_or_create(dir.path()).unwrap(),
+        ));
+        let key: [u8; 32] = rand::random();
+        let mut node =
+            crate::MiasmaNode::new(&key, crate::NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let addrs = node.collect_listen_addrs(400).await;
+        let coord = MiasmaCoordinator::start(node, store, vec![addrs[0].to_string()]).await;
+        let capture = queue.clone();
+        coord.set_publish_observer(Arc::new(move |record, _, v4| {
+            let item = PendingReplication::with_manifest_v4(
+                crate::ContentId::from_digest(record.mid_digest).to_string(),
+                record.clone(),
+                v4.unwrap().clone(),
+            );
+            capture
+                .lock()
+                .unwrap()
+                .push(item)
+                .map_err(|e| e.to_string())
+        }));
+        let path = dir.path().join("retry-payload");
+        std::fs::write(&path, b"retry latest manifest").unwrap();
+        let report = coord
+            .dissolve_and_publish_file_with_format(
+                &path,
+                DissolutionParams::default(),
+                crate::PublishOptions::default(),
+                crate::config::ObjectFormat::Latest,
+            )
+            .await
+            .unwrap();
+        let digest = *report.mid.as_bytes();
+        let item = queue.lock().unwrap().get(&digest).unwrap().clone();
+        let manifest = item.manifest_v4.as_ref().unwrap();
+        // Make the retry's effect observable even though the initial publish succeeded.
+        coord
+            .dht_handle()
+            .put_with_manifest(item.record.clone(), Some(&manifest.as_v3_view()))
+            .await
+            .unwrap();
+        retry_due(&coord, &queue).await;
+        let envelope = coord.dht_handle().local_record_value(digest).await.unwrap();
+        let fetched = crate::transfer::open_signed_record(
+            &digest,
+            &envelope,
+            coord.dht_handle().publisher_key().as_ref(),
+        )
+        .unwrap();
+        assert_eq!(fetched.manifest_v4.as_ref(), Some(manifest));
+        assert!(fetched.manifest.is_none());
+    }
 
     #[test]
     fn streamed_mid_matches_chunked_content() {

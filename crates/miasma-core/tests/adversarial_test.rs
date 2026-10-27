@@ -5857,6 +5857,7 @@ fn ipc_publish_file_serde_roundtrip() {
         file_path: "/tmp/test-file.bin".to_string(),
         data_shards: 3,
         total_shards: 5,
+        object_format: None,
     };
     let json = serde_json::to_string(&req).unwrap();
     let deser: ControlRequest = serde_json::from_str(&json).unwrap();
@@ -5865,12 +5866,98 @@ fn ipc_publish_file_serde_roundtrip() {
             file_path,
             data_shards,
             total_shards,
+            object_format,
         } => {
             assert_eq!(file_path, "/tmp/test-file.bin");
             assert_eq!(data_shards, 3);
             assert_eq!(total_shards, 5);
+            assert_eq!(object_format, None);
         }
         _ => panic!("deserialized to wrong variant"),
+    }
+}
+
+/// TransferStartPublish keeps an explicit object_format across serde round-trip.
+#[test]
+fn ipc_transfer_start_publish_object_format_roundtrip() {
+    use miasma_core::config::ObjectFormat;
+    use miasma_core::daemon::ipc::ControlRequest;
+
+    for fmt in [ObjectFormat::Compat, ObjectFormat::Latest] {
+        let req = ControlRequest::TransferStartPublish {
+            file_path: "/tmp/start-publish.bin".to_string(),
+            data_shards: 2,
+            total_shards: 3,
+            password: None,
+            restart: false,
+            object_format: Some(fmt),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let deser: ControlRequest = serde_json::from_str(&json).unwrap();
+        match deser {
+            ControlRequest::TransferStartPublish { object_format, .. } => {
+                assert_eq!(object_format, Some(fmt));
+            }
+            _ => panic!("deserialized to wrong variant"),
+        }
+    }
+}
+
+/// PublishFile keeps an explicit object_format across serde round-trip,
+/// for every variant and for the absent (older-client) case.
+#[test]
+fn ipc_publish_file_object_format_roundtrip() {
+    use miasma_core::config::ObjectFormat;
+    use miasma_core::daemon::ipc::ControlRequest;
+
+    for expected in [None, Some(ObjectFormat::Compat), Some(ObjectFormat::Latest)] {
+        let req = ControlRequest::PublishFile {
+            file_path: "/tmp/publish-file.bin".to_string(),
+            data_shards: 4,
+            total_shards: 7,
+            object_format: expected,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let deser: ControlRequest = serde_json::from_str(&json).unwrap();
+        match deser {
+            ControlRequest::PublishFile { object_format, .. } => {
+                assert_eq!(object_format, expected);
+            }
+            _ => panic!("deserialized to wrong variant"),
+        }
+    }
+}
+
+/// PublishFileProtected keeps both its password and an explicit object_format
+/// across serde round-trip. The password is drawn at run time so no fixed
+/// secret appears in the test.
+#[test]
+fn ipc_publish_file_protected_object_format_roundtrip() {
+    use miasma_core::config::ObjectFormat;
+    use miasma_core::daemon::ipc::ControlRequest;
+
+    let password = format!("pw-{:032x}", rand::random::<u128>());
+    for fmt in [ObjectFormat::Compat, ObjectFormat::Latest] {
+        let req = ControlRequest::PublishFileProtected {
+            file_path: "/tmp/publish-file-protected.bin".to_string(),
+            data_shards: 2,
+            total_shards: 3,
+            password: password.clone(),
+            object_format: Some(fmt),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let deser: ControlRequest = serde_json::from_str(&json).unwrap();
+        match deser {
+            ControlRequest::PublishFileProtected {
+                password: got_password,
+                object_format,
+                ..
+            } => {
+                assert_eq!(got_password, password);
+                assert_eq!(object_format, Some(fmt));
+            }
+            _ => panic!("deserialized to wrong variant"),
+        }
     }
 }
 

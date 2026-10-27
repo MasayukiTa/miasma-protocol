@@ -38,7 +38,9 @@ pub mod segment;
 
 pub use distributor::{DistributionResult, ShareDistributor, ShareSink};
 pub use manifest::{DissolutionManifest, SegmentMeta, DEFAULT_SEGMENT_SIZE};
-pub use segment::{dissolve_segment, retrieve_segment};
+pub use segment::{
+    dissolve_segment, dissolve_segment_v2_at, retrieve_segment, retrieve_segment_v2,
+};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 

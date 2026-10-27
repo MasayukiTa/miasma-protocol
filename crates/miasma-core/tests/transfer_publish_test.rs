@@ -89,6 +89,50 @@ fn write_temp(bytes: &[u8]) -> std::path::PathBuf {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn streamed_publishes_notify_observer_with_the_announced_format() {
+    use miasma_core::{config::ObjectFormat, daemon::replication::PendingReplication};
+    use std::sync::Mutex;
+
+    let dir = tempfile::tempdir().unwrap();
+    miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
+    let store = Arc::new(LocalShareStore::open(dir.path(), 1000).unwrap());
+    let key: [u8; 32] = rand::random();
+    let mut node = MiasmaNode::new(&key, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+    let addrs = node.collect_listen_addrs(400).await;
+    let coord = MiasmaCoordinator::start(node, store, vec![addrs[0].to_string()]).await;
+    let observed = Arc::new(Mutex::new(Vec::<PendingReplication>::new()));
+    let capture = observed.clone();
+    coord.set_publish_observer(Arc::new(move |record, manifest, v4| {
+        let mid = miasma_core::ContentId::from_digest(record.mid_digest).to_string();
+        let item = match v4 {
+            Some(m) => PendingReplication::with_manifest_v4(mid, record.clone(), m.clone()),
+            None => PendingReplication::with_manifest(mid, record.clone(), manifest.clone()),
+        };
+        capture.lock().unwrap().push(item);
+        Ok(())
+    }));
+
+    let path = write_temp(b"observer format test");
+    for format in [ObjectFormat::Compat, ObjectFormat::Latest] {
+        coord
+            .dissolve_and_publish_file_with_format(
+                &path,
+                params(),
+                PublishOptions::default(),
+                format,
+            )
+            .await
+            .unwrap();
+    }
+    let items = observed.lock().unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items[0].manifest.is_some());
+    assert!(items[0].manifest_v4.is_none());
+    assert!(items[1].manifest.is_none());
+    assert_eq!(items[1].manifest_v4.as_ref().unwrap().version, 4);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_published_file_carries_a_manifest_that_matches_what_was_stored() {
     timeout(Duration::from_secs(120), async {
         let (a, store_a, b) = connected_pair(0xA7, 0xB7).await;
@@ -491,6 +535,7 @@ fn send_spec(
         password: password.map(|p| zeroize::Zeroizing::new(p.to_owned())),
         journal_dir: Some(journal_dir.to_path_buf()),
         restart: false,
+        object_format: miasma_core::config::ObjectFormat::Compat,
     }
 }
 

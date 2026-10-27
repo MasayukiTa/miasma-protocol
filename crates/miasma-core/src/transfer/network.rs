@@ -111,6 +111,9 @@ impl MiasmaCoordinator {
 
     /// Read the record and manifest for `mid` from the DHT, retrying with backoff.
     ///
+    /// For v4 records, the manifest is a v3 structural view. Use
+    /// [`fetch_verified_record`](Self::fetch_verified_record) for the original format.
+    ///
     /// Every attempt first makes sure the node has a link to the network (see
     /// `DhtHandle::ensure_connected`): a lookup on an empty routing table answers
     /// "not found" at once, so without the wait the attempts are spent before the
@@ -122,9 +125,12 @@ impl MiasmaCoordinator {
         &self,
         mid: &ContentId,
     ) -> Result<(DhtRecord, Option<TransferManifest>), MiasmaError> {
-        self.fetch_verified_record(mid, None)
-            .await
-            .map(|f| (f.record, f.manifest))
+        self.fetch_verified_record(mid, None).await.map(|f| {
+            let manifest = f
+                .manifest
+                .or_else(|| f.manifest_v4.as_ref().map(|m| m.as_v3_view()));
+            (f.record, manifest)
+        })
     }
 
     /// As [`fetch_record_and_manifest`](Self::fetch_record_and_manifest), also
@@ -223,14 +229,11 @@ impl MiasmaCoordinator {
             .fetch_verified_record(&mid, expect.as_ref().map(|s| *s.publisher()))
             .await
             .map_err(fail)?;
-        let output = resolve_receive_target(
-            output_path,
-            &mid,
-            fetched.manifest.as_ref(),
-            password.as_ref(),
-        )
-        .await
-        .map_err(fail)?;
+        let v3_view = fetched.manifest_v4.as_ref().map(|m| m.as_v3_view());
+        let name_manifest = fetched.manifest.as_ref().or(v3_view.as_ref());
+        let output = resolve_receive_target(output_path, &mid, name_manifest, password.as_ref())
+            .await
+            .map_err(fail)?;
         if output != output_path {
             progress.set_name(output.to_string_lossy());
         }
@@ -241,6 +244,7 @@ impl MiasmaCoordinator {
                 mid,
                 record: fetched.record,
                 manifest: fetched.manifest,
+                manifest_v4: fetched.manifest_v4,
                 password,
                 output_path: output,
                 journal_dir: journal_dir.to_path_buf(),

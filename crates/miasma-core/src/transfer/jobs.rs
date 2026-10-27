@@ -229,6 +229,7 @@ impl TransferRegistry {
         params: DissolutionParams,
         password: Option<Zeroizing<String>>,
         restart: bool,
+        object_format: crate::config::ObjectFormat,
     ) -> String {
         let id = send_id(&file_path);
         let progress = {
@@ -250,6 +251,9 @@ impl TransferRegistry {
             password,
             journal_dir: Some(self.journal_dir()),
             restart,
+            // A new publish writes this format; a resume ignores it and keeps the
+            // suite recorded in its journal header.
+            object_format,
         };
         let watched = progress.clone();
         let for_wipe = progress.clone();

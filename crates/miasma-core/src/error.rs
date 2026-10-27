@@ -49,6 +49,10 @@ pub enum MiasmaError {
     #[error("wrong password")]
     WrongPassword,
 
+    /// The requested object format is not supported for streaming.
+    #[error("latest-format objects do not support streaming receive yet; use the normal receive command instead")]
+    UnsupportedStreamingFormat,
+
     /// A transfer manifest is internally inconsistent or out of bounds.
     #[error("invalid transfer manifest: {0}")]
     InvalidManifest(String),

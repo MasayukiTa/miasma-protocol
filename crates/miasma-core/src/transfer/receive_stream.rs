@@ -54,7 +54,7 @@ use super::{
     },
     share_id::ShareId,
 };
-use crate::{crypto::hash::ContentId, network::types::DhtRecord, MiasmaError};
+use crate::{crypto::hash::ContentId, format::ObjectSuite, network::types::DhtRecord, MiasmaError};
 
 /// How often a waiting stream looks at its cancel flag.
 const CANCEL_POLL: Duration = Duration::from_millis(20);
@@ -222,10 +222,16 @@ async fn run_stream<S: PieceSource + ?Sized>(
         total_bytes,
         candidates,
         expect: _,
+        // The host refuses v4 objects before this Suite1-only path, which carries no
+        // `manifest_v4`, so `prepare` resolves Suite1 here; the suite is unused
+        // because this path has its own Suite1 reconstruction.
+        suite: _,
     } = prepare(
         &mid,
         &record,
         &manifest,
+        // No v4 manifest on the stream path.
+        &None,
         password,
         expect,
         record_signer,
@@ -294,6 +300,9 @@ async fn run_stream<S: PieceSource + ?Sized>(
                 key: key.as_ref(),
                 entry,
                 manifest: manifest.as_ref(),
+                // The RAM-only stream path is Suite1 only; its `prepare` call
+                // resolves Suite1 and it has no v4 reconstruction.
+                suite: ObjectSuite::Suite1,
             };
             decode_with_fallback(source, &ctx, progress, &mut suspects, &mut pool).await
         };

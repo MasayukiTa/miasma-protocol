@@ -142,6 +142,9 @@ pub struct PendingReplication {
     /// manifest together stay under the DHT value limit, so this is small.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest: Option<TransferManifest>,
+    /// The original v4 manifest, when the object was published in latest format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_v4: Option<crate::transfer::ManifestV4>,
 }
 
 impl PendingReplication {
@@ -157,6 +160,7 @@ impl PendingReplication {
             state: ItemState::Pending,
             promotion_generation: 0,
             manifest: None,
+            manifest_v4: None,
         }
     }
 
@@ -164,6 +168,16 @@ impl PendingReplication {
     pub fn with_manifest(mid_str: String, record: DhtRecord, manifest: TransferManifest) -> Self {
         let mut item = Self::new(mid_str, record);
         item.manifest = Some(manifest);
+        item
+    }
+
+    pub fn with_manifest_v4(
+        mid_str: String,
+        record: DhtRecord,
+        manifest: crate::transfer::ManifestV4,
+    ) -> Self {
+        let mut item = Self::new(mid_str, record);
+        item.manifest_v4 = Some(manifest);
         item
     }
 }
@@ -351,6 +365,7 @@ impl ReplicationQueue {
                 state,
                 promotion_generation: 0,
                 manifest: None,
+                manifest_v4: None,
             };
             self.items.insert(item.record.mid_digest, item);
         }
@@ -683,6 +698,16 @@ mod tests {
 
     fn dummy_item(id: u8) -> PendingReplication {
         PendingReplication::new(format!("mid-{id}"), dummy_record(id))
+    }
+
+    #[test]
+    fn old_entry_without_v4_manifest_defaults_to_compat() {
+        let item = dummy_item(1);
+        let mut stored = serde_json::to_value(&item).unwrap();
+        stored.as_object_mut().unwrap().remove("manifest_v4");
+        let loaded: PendingReplication = serde_json::from_value(stored).unwrap();
+        assert!(loaded.manifest_v4.is_none());
+        assert_eq!(loaded.record.mid_digest, item.record.mid_digest);
     }
 
     // ── Backoff tests ────────────────────────────────────────────────────────

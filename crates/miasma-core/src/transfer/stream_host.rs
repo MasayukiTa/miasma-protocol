@@ -20,6 +20,7 @@ use super::{
     receive::RetryConfig,
     receive_stream::{receive_stream, SegmentSink, StreamOutcome, StreamSpec},
     share_id::TransferId,
+    FetchedRecord,
 };
 use crate::{
     network::MiasmaCoordinator,
@@ -70,6 +71,7 @@ impl StreamHost for MiasmaCoordinator {
                 return Err(e);
             }
         };
+        check_stream_format(&fetched, sink, &progress)?;
         let source = self.piece_source();
         let mut spec = StreamSpec::new(mid, fetched.record, fetched.manifest);
         spec.password = password;
@@ -78,6 +80,20 @@ impl StreamHost for MiasmaCoordinator {
         spec.record_signer = Some(fetched.signer);
         receive_stream(&source, spec, sink, progress).await
     }
+}
+
+fn check_stream_format(
+    fetched: &FetchedRecord,
+    sink: &mut dyn SegmentSink,
+    progress: &TransferProgress,
+) -> Result<(), MiasmaError> {
+    if fetched.manifest_v4.is_some() {
+        let error = MiasmaError::UnsupportedStreamingFormat;
+        progress.set_state(TransferState::Failed, Some(error.to_string()), false);
+        sink.abort();
+        return Err(error);
+    }
+    Ok(())
 }
 
 /// A host whose receives are registered with a [`WipeGate`].
@@ -251,6 +267,47 @@ mod tests {
             b"stream-host-test",
             &params.to_param_bytes(),
         ))
+    }
+
+    #[test]
+    fn latest_format_is_refused_before_streaming() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&rand::random::<[u8; 32]>());
+        let mid = some_target().mid();
+        let publisher = key.verifying_key().to_bytes();
+        let fetched = FetchedRecord {
+            record: crate::network::types::DhtRecord {
+                mid_digest: *mid.as_bytes(),
+                data_shards: 2,
+                total_shards: 3,
+                version: 1,
+                locations: vec![],
+                published_at: 1,
+            },
+            manifest: None,
+            manifest_v4: Some(crate::transfer::ManifestV4 {
+                version: crate::transfer::MANIFEST_VERSION_V4,
+                mid: *mid.as_bytes(),
+                publisher,
+                name: None,
+                data_shards: 2,
+                total_shards: 3,
+                segment_size: 1024,
+                total_bytes: 0,
+                protection: crate::transfer::Protection::None,
+                segments: vec![],
+                suite: crate::format::ObjectSuite::Suite2.id(),
+                ext: vec![],
+            }),
+            signer: publisher,
+        };
+        let mut sink = Probe::default();
+        let error =
+            check_stream_format(&fetched, &mut sink, &TransferProgress::new("test")).unwrap_err();
+        assert!(matches!(error, MiasmaError::UnsupportedStreamingFormat));
+        assert!(error.to_string().contains("normal receive command"));
+        assert!(sink.aborted.load(Ordering::SeqCst));
+        assert_eq!(sink.chunks.load(Ordering::SeqCst), 0);
+        assert!(!sink.completed.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

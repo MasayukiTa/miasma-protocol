@@ -41,7 +41,7 @@ pub mod transport;
 pub mod update;
 pub mod wipe;
 
-pub use config::{default_data_dir, NodeConfig, TransportConfig};
+pub use config::{default_data_dir, NodeConfig, ObjectFormat, TransferConfig, TransportConfig};
 pub use cover_traffic::{
     CoverTrafficConfig, CoverTrafficEngine, CoverTrafficMetrics, CoverTrafficMetricsSnapshot,
     TrafficShapePolicy,

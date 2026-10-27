@@ -35,7 +35,7 @@ use zeroize::Zeroizing;
 
 use super::{
     journal::{journal_path, now_secs, part_path_for, ReceiveJournal, JOURNAL_VERSION},
-    manifest::{sanitize_file_name, SegmentEntry, TransferManifest, MAX_SEGMENT_SIZE},
+    manifest::{sanitize_file_name, ManifestV4, SegmentEntry, TransferManifest, MAX_SEGMENT_SIZE},
     plaintext_pool::{PlaintextPool, SegmentBuf},
     progress::{Phase, TransferProgress, TransferState},
     protection::{Protection, UnlockedKey},
@@ -43,7 +43,11 @@ use super::{
 };
 use crate::{
     crypto::hash::ContentId,
-    dissolution::{segment::retrieve_segment_with, SegmentMeta},
+    dissolution::{
+        segment::{retrieve_segment_v2, retrieve_segment_with},
+        SegmentMeta,
+    },
+    format::ObjectSuite,
     network::types::{DhtRecord, ShardLocation, MAX_SEGMENTS},
     pipeline::DissolutionParams,
     share::{MiasmaShare, ShareVerification},
@@ -94,6 +98,9 @@ pub struct ReceiveSpec {
     pub record: DhtRecord,
     /// `None` for a record published before manifests existed.
     pub manifest: Option<TransferManifest>,
+    /// The v4 (Suite2) manifest, present only for a v4 record. When set, the
+    /// engine drives a Suite2 receive from it; `manifest` is then `None`.
+    pub manifest_v4: Option<ManifestV4>,
     pub password: Option<Zeroizing<String>>,
     pub output_path: PathBuf,
     /// Directory the journal lives in (usually `<data_dir>/transfers`).
@@ -159,6 +166,7 @@ async fn run_inner<S: PieceSource + ?Sized>(
         mid,
         record,
         manifest,
+        manifest_v4,
         password,
         output_path,
         journal_dir,
@@ -182,16 +190,26 @@ async fn run_inner<S: PieceSource + ?Sized>(
         total_bytes,
         candidates,
         expect,
+        suite,
     } = prepare(
         &mid,
         &record,
         &manifest,
+        &manifest_v4,
         password,
         expect,
         record_signer,
         progress,
     )
     .await?;
+
+    // From here the engine reads one effective v3-shaped manifest: the real v3
+    // manifest, or the v3 view of the v4 manifest. The leading fields a v4
+    // manifest shares with a v3 one drive the journal, the resume check, the
+    // per-segment hash and the per-piece checks unchanged; only reconstruction
+    // branches on `suite`. A manifest-less record keeps `None` here.
+    let manifest: Option<TransferManifest> =
+        manifest.or_else(|| manifest_v4.as_ref().map(|m| m.as_v3_view()));
 
     // ── 4. Fresh start or resume. ───────────────────────────────────────────
     if let Some(parent) = output_path.parent() {
@@ -362,6 +380,7 @@ async fn run_inner<S: PieceSource + ?Sized>(
             key: key.as_ref(),
             entry,
             manifest: manifest.as_ref(),
+            suite,
         };
         // The only plaintext of the segment. It is a `SegmentBuf` from the moment
         // the decoder returns it, so an error, a cancel (this future dropped at
@@ -450,20 +469,51 @@ pub(super) struct Prepared {
     /// Per segment: the holders, data slots first.
     pub(super) candidates: Vec<Vec<(u16, ShardLocation)>>,
     pub(super) expect: Option<ShareId>,
+    /// The object suite that reconstructs every segment: Suite1 for a v3 or a
+    /// manifest-less record, the v4 manifest's own suite (Suite2) for a v4 one.
+    pub(super) suite: ObjectSuite,
 }
 
 /// Steps 1 to 3 of a receive, shared by the file engine and the RAM-only stream:
 /// the record, the manifest and the parameters must agree; a password is checked
 /// before any piece is fetched; candidates are listed per segment.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn prepare(
     mid: &ContentId,
     record: &DhtRecord,
     manifest: &Option<TransferManifest>,
+    manifest_v4: &Option<ManifestV4>,
     password: Option<Zeroizing<String>>,
     expect: Option<ShareId>,
     record_signer: Option<[u8; 32]>,
     progress: &Arc<TransferProgress>,
 ) -> Result<Prepared, MiasmaError> {
+    // A v4 record carries its manifest as `manifest_v4`; its leading fields are
+    // exactly a v3 manifest's, so a v3 view of it reuses every param, key,
+    // segment-count and candidate derivation below unchanged. The suite it names
+    // selects the reconstructor later. A v3 record has no v4 manifest, so this is
+    // `None` and nothing on the v3 path changes, byte for byte.
+    if let Some(m) = manifest_v4.as_ref() {
+        // Validate the v4-only rules (version byte, suite, ext bounds) that a v3
+        // view cannot cover; the structural rules are re-checked as the v3 view
+        // below.
+        m.validate()?;
+    }
+    let v4_view: Option<TransferManifest> = manifest_v4.as_ref().map(|m| m.as_v3_view());
+    let suite = match manifest_v4 {
+        Some(m) => m
+            .object_suite()
+            .map_err(|e| MiasmaError::InvalidManifest(e.to_string()))?,
+        None => ObjectSuite::Suite1,
+    };
+    // The effective manifest the steps below read: the real v3 manifest, or the
+    // v3 view of the v4 manifest. A record never carries both.
+    let manifest: &Option<TransferManifest> = if manifest.is_some() {
+        manifest
+    } else {
+        &v4_view
+    };
+
     // ── 1. The record, the manifest and the parameters must agree. ──────────
     if record.mid_digest != *mid.as_bytes() {
         return Err(MiasmaError::InvalidMid(
@@ -581,6 +631,7 @@ pub(super) async fn prepare(
         total_bytes,
         candidates,
         expect,
+        suite,
     })
 }
 
@@ -790,6 +841,9 @@ pub(super) struct SegmentCtx<'a> {
     pub(super) key: Option<&'a Arc<UnlockedKey>>,
     pub(super) entry: Option<&'a SegmentEntry>,
     pub(super) manifest: Option<&'a TransferManifest>,
+    /// The object suite that reconstructs this segment: Suite1 reassembles with
+    /// `retrieve_segment_with`, Suite2 with `retrieve_segment_v2`.
+    pub(super) suite: ObjectSuite,
 }
 
 /// Top `pool` up to `want` verified pieces, refusing any that do not match the
@@ -873,17 +927,19 @@ async fn decode_once(
     let params = ctx.params;
     let expected = ctx.entry.map(|e| (e.plaintext_len, e.plain_hash));
     let seg = ctx.seg;
+    let suite = ctx.suite;
     tokio::task::spawn_blocking(move || {
         // Held in a zeroizing buffer from the moment it exists, so a mismatch
         // below, or a result nobody collects because the caller went away, wipes
-        // it instead of freeing it as-is.
-        let plaintext = Zeroizing::new(retrieve_segment_with(
-            &mid,
-            &pieces,
-            &meta,
-            params,
-            key.as_deref(),
-        )?);
+        // it instead of freeing it as-is. The suite the manifest named selects
+        // the reconstructor: Suite1 is the original key schedule, Suite2 is the
+        // v4 one.
+        let plaintext = Zeroizing::new(match suite {
+            ObjectSuite::Suite2 => {
+                retrieve_segment_v2(&mid, &pieces, &meta, params, key.as_deref())?
+            }
+            _ => retrieve_segment_with(&mid, &pieces, &meta, params, key.as_deref())?,
+        });
         if let Some((len, hash)) = expected {
             if plaintext.len() != len as usize || *blake3::hash(&plaintext).as_bytes() != hash {
                 return Err(MiasmaError::InvalidManifest(format!(

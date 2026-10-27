@@ -998,6 +998,7 @@ fn do_init(data_dir: &Path) -> anyhow::Result<()> {
         chat: Default::default(),
         privacy: Default::default(),
         update: Default::default(),
+        transfer: Default::default(),
     };
     config.save(data_dir)?;
 
@@ -1244,10 +1245,18 @@ async fn retrieve_mid(mid_str: &str, data_dir: &Path, params: DissolutionParams)
 }
 
 async fn publish_file(path: &Path, data_dir: &Path, params: DissolutionParams) -> WorkerResult {
+    // The configured object format is resolved here and carried on the request;
+    // the daemon still falls back to the same value if the field is absent.
+    let object_format = Some(
+        miasma_core::NodeConfig::load(data_dir)
+            .map(|c| c.transfer.object_format)
+            .unwrap_or_default(),
+    );
     let req = ControlRequest::PublishFile {
         file_path: path.to_string_lossy().into_owned(),
         data_shards: params.data_shards as u8,
         total_shards: params.total_shards as u8,
+        object_format,
     };
     match daemon_request(data_dir, req).await {
         Ok(ControlResponse::Published { mid }) => WorkerResult::Dissolved { mid },
@@ -1858,12 +1867,20 @@ async fn do_transfer_start_publish(
     } else {
         file_path.to_owned()
     };
+    // A new publish writes the configured object format; a resume ignores this
+    // and keeps the suite its journal recorded.
+    let object_format = Some(
+        miasma_core::NodeConfig::load(data_dir)
+            .map(|c| c.transfer.object_format)
+            .unwrap_or_default(),
+    );
     let req = ControlRequest::TransferStartPublish {
         file_path: path.to_string_lossy().into_owned(),
         data_shards,
         total_shards,
         password: password.filter(|p| !p.is_empty()).map(str::to_owned),
         restart,
+        object_format,
     };
     transfer_started(daemon_request(data_dir, req).await)
 }

@@ -236,6 +236,7 @@ async fn a_protected_multi_segment_transfer_is_received_through_a_daemon_with_on
                 data_shards: 2,
                 total_shards: 3,
                 password: password.clone(),
+                object_format: None,
             },
         )
         .await
@@ -582,6 +583,7 @@ async fn when_every_piece_is_tampered_nothing_is_written_and_the_transfer_pauses
                 mid: mid.clone(),
                 record,
                 manifest,
+                manifest_v4: None,
                 password: None,
                 output_path: out.clone(),
                 journal_dir: work.path().join("transfers"),

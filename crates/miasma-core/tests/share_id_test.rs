@@ -760,6 +760,7 @@ async fn daemons_publish_reports_the_share_id_and_a_folder_target_gets_the_origi
                 total_shards: 3,
                 password: None,
                 restart: false,
+                object_format: None,
             },
         )
         .await

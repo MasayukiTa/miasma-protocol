@@ -474,7 +474,11 @@ impl ManifestV4 {
     /// reuse the v3 structural validation. Its `version` is set to 3 so the
     /// shared [`TransferManifest::validate`] accepts it; the v4-only fields are
     /// not part of that structural check.
-    fn as_v3_view(&self) -> TransferManifest {
+    ///
+    /// The receive engine also uses this view to reuse every v3 param, key,
+    /// segment-count and candidate derivation for a v4 record, while dispatching
+    /// reconstruction by the manifest's own [`ObjectSuite`].
+    pub(crate) fn as_v3_view(&self) -> TransferManifest {
         TransferManifest {
             version: MANIFEST_VERSION,
             mid: self.mid,
@@ -775,6 +779,27 @@ pub fn encode_record_value(
     Ok(value)
 }
 
+/// Serialize `record` followed by a version-4 manifest's trailer, as the signed
+/// value. The version-2 publish path's counterpart to [`encode_record_value`];
+/// the record bytes are identical, only the trailer version byte (4) and the
+/// manifest payload differ. A reader on [`decode_record_value_any`] accepts it;
+/// a pre-v4 reader on [`decode_record_value`] refuses it with "update Miasma".
+pub fn encode_record_value_v4(
+    record: &DhtRecord,
+    manifest: &ManifestV4,
+) -> Result<Vec<u8>, MiasmaError> {
+    record.validate()?;
+    if manifest.mid != record.mid_digest {
+        return Err(MiasmaError::InvalidManifest(
+            "manifest MID does not match the record it rides on".into(),
+        ));
+    }
+    let mut value =
+        bincode::serialize(record).map_err(|e| MiasmaError::Serialization(e.to_string()))?;
+    value.extend_from_slice(&manifest.encode_trailer()?);
+    Ok(value)
+}
+
 /// Decode a record value into `(record, optional manifest)`.
 ///
 /// A value with no trailer is a legacy record and yields `(record, None)`.
@@ -838,8 +863,12 @@ pub fn decode_record_value(
 pub struct FetchedRecord {
     pub record: DhtRecord,
     pub manifest: Option<TransferManifest>,
-    /// The key that signed the envelope. If `manifest` is present it names this
-    /// key as its publisher.
+    /// The v4 (Suite2) manifest, present only for a v4 record. A v3 record
+    /// leaves this `None` and carries its manifest in `manifest`, byte for byte
+    /// as before; the receive engine reads this to drive a Suite2 receive.
+    pub manifest_v4: Option<ManifestV4>,
+    /// The key that signed the envelope. If `manifest` or `manifest_v4` is
+    /// present it names this key as its publisher.
     pub signer: [u8; 32],
 }
 
@@ -900,7 +929,12 @@ pub fn open_signed_record(
             }
         }
     }
-    let (record, manifest) = decode_record_value(&signed.value)
+    // Accept both a v3 and a v4 record trailer here: `decode_record_value_any`
+    // decodes a v3 trailer exactly as the v3-only `decode_record_value` does, and
+    // additionally opts in to reading a v4 trailer instead of refusing it. A
+    // pre-v4 build (or a copied v3-only decoder) still rejects a v4 record with
+    // "update Miasma", so versions stay interoperable.
+    let (record, decoded) = decode_record_value_any(&signed.value)
         .map_err(|e| SignedRecordError::InvalidInner(inner_message(e)))?;
     if record.dht_key().as_slice() != expected_key {
         return Err(SignedRecordError::InnerMidMismatch);
@@ -908,15 +942,27 @@ pub fn open_signed_record(
     record
         .validate()
         .map_err(|e| SignedRecordError::InvalidInner(inner_message(e)))?;
-    if manifest
+    // The publisher check applies to both versions: `DecodedManifest::publisher`
+    // returns the named publisher of a v3 or a v4 manifest.
+    if decoded
         .as_ref()
-        .is_some_and(|m| m.publisher != signed.signer_pubkey)
+        .is_some_and(|m| m.publisher() != signed.signer_pubkey)
     {
         return Err(SignedRecordError::ManifestPublisher);
     }
+    // Split the decoded manifest by version. A v3 record keeps carrying its
+    // manifest in `manifest`, byte for byte as before, and `manifest_v4` stays
+    // `None`; a v4 record carries its manifest in `manifest_v4` (and `manifest`
+    // stays `None`) so the receive engine can drive a Suite2 receive from it.
+    let (manifest, manifest_v4) = match decoded {
+        Some(DecodedManifest::V3(m)) => (Some(m), None),
+        Some(DecodedManifest::V4(m)) => (None, Some(m)),
+        None => (None, None),
+    };
     Ok(FetchedRecord {
         record,
         manifest,
+        manifest_v4,
         signer: signed.signer_pubkey,
     })
 }

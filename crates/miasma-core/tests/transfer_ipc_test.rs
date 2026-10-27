@@ -91,6 +91,7 @@ async fn a_weak_publish_password_is_refused_with_machine_readable_codes() {
                 data_shards: 2,
                 total_shards: 3,
                 password: weak.into(),
+                object_format: None,
             },
         )
         .await
@@ -112,6 +113,7 @@ async fn a_weak_publish_password_is_refused_with_machine_readable_codes() {
                 total_shards: 3,
                 password: Some(weak.into()),
                 restart: false,
+                object_format: None,
             },
         )
         .await
@@ -151,6 +153,7 @@ async fn a_receive_job_reports_status_completes_and_a_wrong_password_fails_clean
                 data_shards: 2,
                 total_shards: 3,
                 password: password.clone(),
+                object_format: None,
             },
         )
         .await

@@ -152,6 +152,7 @@ async fn a_streamed_publish_is_repaired_by_maintenance_and_survives_restarts() {
                 total_shards: 3,
                 password: Some(password),
                 restart: false,
+                object_format: None,
             },
         )
         .await

@@ -87,6 +87,10 @@ pub enum ControlRequest {
         file_path: String,
         data_shards: u8,
         total_shards: u8,
+        /// Object format the publish writes. Absent in requests from older
+        /// clients; the daemon then falls back to the configured value.
+        #[serde(default)]
+        object_format: Option<crate::config::ObjectFormat>,
     },
     /// As `PublishFile`, with a password mixed into the content encryption key
     /// (see `transfer::protection`). The receiver must supply the same
@@ -99,6 +103,10 @@ pub enum ControlRequest {
         data_shards: u8,
         total_shards: u8,
         password: String,
+        /// Object format the publish writes. Absent in requests from older
+        /// clients; the daemon then falls back to the configured value.
+        #[serde(default)]
+        object_format: Option<crate::config::ObjectFormat>,
     },
     /// Retrieve content by MID string from the P2P network.
     Get {
@@ -173,6 +181,10 @@ pub enum ControlRequest {
         total_shards: u8,
         password: Option<String>,
         restart: bool,
+        /// Object format the publish writes. Absent in requests from older
+        /// clients; the daemon then falls back to the configured value.
+        #[serde(default)]
+        object_format: Option<crate::config::ObjectFormat>,
     },
     /// Progress of one transfer, by the id `TransferStartReceive` /
     /// `TransferStartPublish` returned.
