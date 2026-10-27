@@ -51,7 +51,66 @@ pub enum ChatRequest {
     },
     /// Group chat (create, add, remove, leave, send, history, list).
     Group(super::group::ipc::GroupRequest),
+    #[cfg(feature = "pqc")]
+    Call(CallRequest),
 }
+
+/// Call control requests. The controller is not yet connected to IPC.
+#[cfg(feature = "pqc")]
+#[derive(Clone, Serialize, Deserialize)]
+pub enum CallRequest {
+    Dial { contact: String },
+    Accept { token: u64 },
+    Reject { token: u64 },
+    HangUp,
+    Status,
+    Events { since: u64 },
+}
+
+#[cfg(feature = "pqc")]
+#[derive(Clone, Serialize, Deserialize)]
+pub enum CallResponse {
+    Unavailable,
+    Ok,
+    Status(CallStatusDto),
+    Events {
+        next: u64,
+        gap: bool,
+        notices: Vec<CallNoticeDto>,
+    },
+    Error(String),
+}
+
+#[cfg(feature = "pqc")]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CallStatusDto {
+    /// One of `idle`, `calling`, `ringing`, or `connected`.
+    pub state: String,
+    pub pending_token: Option<u64>,
+    pub signalling_connected: bool,
+}
+
+#[cfg(feature = "pqc")]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct CallNoticeDto {
+    /// A fixed lowercase notice code, such as `incoming_ringing` or `call_ended`.
+    pub code: String,
+}
+
+// IPC values may contain untrusted strings or tokens, so never format their contents.
+#[cfg(feature = "pqc")]
+macro_rules! redacted_debug {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl std::fmt::Debug for $ty {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(concat!(stringify!($ty), "(redacted)"))
+            }
+        }
+    )+};
+}
+
+#[cfg(feature = "pqc")]
+redacted_debug!(CallRequest, CallResponse, CallStatusDto, CallNoticeDto);
 
 fn default_true() -> bool {
     true
@@ -285,6 +344,8 @@ pub enum ChatResponse {
         kind: String,
         message: String,
     },
+    #[cfg(feature = "pqc")]
+    Call(CallResponse),
 }
 
 #[cfg_attr(not(feature = "iroh"), allow(dead_code))]
@@ -297,6 +358,10 @@ fn err(kind: &str, message: impl Into<String>) -> ChatResponse {
 
 /// Handle one chat request for the daemon that owns `data_dir`.
 pub async fn handle_ipc(data_dir: &Path, req: ChatRequest) -> ChatResponse {
+    #[cfg(feature = "pqc")]
+    if matches!(&req, ChatRequest::Call(_)) {
+        return ChatResponse::Call(CallResponse::Unavailable);
+    }
     #[cfg(feature = "iroh")]
     {
         let Some(svc) = super::service::service_for(data_dir) else {
@@ -355,6 +420,8 @@ pub fn handle_with(
     let core = svc.core();
 
     match req {
+        #[cfg(feature = "pqc")]
+        ChatRequest::Call(_) => ChatResponse::Call(CallResponse::Unavailable),
         ChatRequest::Group(g) => match svc.groups() {
             Some(gs) => ChatResponse::Group(super::group::ipc::handle_with(gs, g)),
             None => err("unavailable", "group chat is not running"),
@@ -535,6 +602,60 @@ pub fn handle_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn call_ipc_json_round_trips() {
+        let requests = [
+            CallRequest::Dial {
+                contact: "alice".into(),
+            },
+            CallRequest::Accept { token: 1 },
+            CallRequest::Reject { token: 2 },
+            CallRequest::HangUp,
+            CallRequest::Status,
+            CallRequest::Events { since: 3 },
+        ];
+        for request in requests {
+            let value = serde_json::to_value(ChatRequest::Call(request)).unwrap();
+            let decoded: ChatRequest = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+        }
+        let responses = [
+            CallResponse::Unavailable,
+            CallResponse::Ok,
+            CallResponse::Status(CallStatusDto {
+                state: "ringing".into(),
+                pending_token: Some(1),
+                signalling_connected: true,
+            }),
+            CallResponse::Events {
+                next: 4,
+                gap: true,
+                notices: vec![CallNoticeDto {
+                    code: "incoming_ringing".into(),
+                }],
+            },
+            CallResponse::Error("unavailable".into()),
+        ];
+        for response in responses {
+            let value = serde_json::to_value(ChatResponse::Call(response)).unwrap();
+            let decoded: ChatResponse = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), value);
+        }
+        let old: ChatRequest = serde_json::from_str(r#"{"Conversations":{}}"#).unwrap();
+        assert!(matches!(old, ChatRequest::Conversations {}));
+    }
+
+    #[cfg(feature = "pqc")]
+    #[tokio::test]
+    async fn call_ipc_is_unavailable_without_a_controller() {
+        let response = handle_ipc(Path::new(""), ChatRequest::Call(CallRequest::Status)).await;
+        assert!(matches!(
+            response,
+            ChatResponse::Call(CallResponse::Unavailable)
+        ));
+    }
 
     #[test]
     fn requests_and_responses_round_trip_as_json() {
