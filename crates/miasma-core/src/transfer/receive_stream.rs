@@ -222,10 +222,16 @@ async fn run_stream<S: PieceSource + ?Sized>(
         total_bytes,
         candidates,
         expect: _,
+        // The RAM-only stream path predates the v4 manifest and carries no
+        // `manifest_v4`, so `prepare` resolves Suite1 here; the suite is unused
+        // because this path has its own Suite1 reconstruction.
+        suite: _,
     } = prepare(
         &mid,
         &record,
         &manifest,
+        // No v4 manifest on the stream path.
+        &None,
         password,
         expect,
         record_signer,

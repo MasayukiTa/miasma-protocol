@@ -631,6 +631,7 @@ pub(super) async fn prepare(
         total_bytes,
         candidates,
         expect,
+        suite,
     })
 }
 
