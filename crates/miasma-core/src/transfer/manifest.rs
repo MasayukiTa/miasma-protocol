@@ -900,12 +900,7 @@ pub fn open_signed_record(
             }
         }
     }
-    // Accept both a v3 and a v4 record trailer here: `decode_record_value_any`
-    // decodes a v3 trailer exactly as the v3-only `decode_record_value` does, and
-    // additionally opts in to reading a v4 trailer instead of refusing it. A
-    // pre-v4 build (or a copied v3-only decoder) still rejects a v4 record with
-    // "update Miasma", so versions stay interoperable.
-    let (record, decoded) = decode_record_value_any(&signed.value)
+    let (record, manifest) = decode_record_value(&signed.value)
         .map_err(|e| SignedRecordError::InvalidInner(inner_message(e)))?;
     if record.dht_key().as_slice() != expected_key {
         return Err(SignedRecordError::InnerMidMismatch);
@@ -913,23 +908,12 @@ pub fn open_signed_record(
     record
         .validate()
         .map_err(|e| SignedRecordError::InvalidInner(inner_message(e)))?;
-    // The publisher check applies to both versions: `DecodedManifest::publisher`
-    // returns the named publisher of a v3 or a v4 manifest.
-    if decoded
+    if manifest
         .as_ref()
-        .is_some_and(|m| m.publisher() != signed.signer_pubkey)
+        .is_some_and(|m| m.publisher != signed.signer_pubkey)
     {
         return Err(SignedRecordError::ManifestPublisher);
     }
-    // The receive engine downstream of `FetchedRecord` takes a v3
-    // `TransferManifest`. A v3 record keeps carrying its manifest, byte for byte
-    // as before; a v4 record is accepted here (not refused, no panic) but its
-    // manifest is not yet threaded through the engine, so it rides as `None` --
-    // see the follow-up note on the pull request.
-    let manifest = match decoded {
-        Some(DecodedManifest::V3(m)) => Some(m),
-        Some(DecodedManifest::V4(_)) | None => None,
-    };
     Ok(FetchedRecord {
         record,
         manifest,
