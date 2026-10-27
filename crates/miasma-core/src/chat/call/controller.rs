@@ -470,7 +470,17 @@ impl CallController {
                     self.do_collide(ports, call_id, peer_call_id);
                 }
                 Effect::Show(n) => self.push_notice(CallNotice::from_state(n)),
-                Effect::ZeroizeKeys => self.wipe_contexts(),
+                Effect::ZeroizeKeys => {
+                    // Wipe only the OUTGOING offer context (the half-built call
+                    // we are tearing down or abandoning). Media keys do not
+                    // exist yet. The incoming context, when present, is the
+                    // answer context of a call we are still ringing on (e.g.
+                    // after losing a simultaneous-offer tie-break); it is wiped
+                    // when the call finally returns to idle, not here.
+                    if let Some(mut c) = self.outgoing.take() {
+                        c.wipe();
+                    }
+                }
                 Effect::ReplaceSasInput { .. } => {
                     // Media keys do not exist yet; the only SAS input the
                     // controller holds is the offer context it is abandoning.
@@ -675,7 +685,11 @@ impl CallController {
             for effect in t.effects {
                 match effect {
                     Effect::Show(n) => self.push_notice(CallNotice::from_state(n)),
-                    Effect::ZeroizeKeys => self.wipe_contexts(),
+                    Effect::ZeroizeKeys => {
+                        if let Some(mut c) = self.outgoing.take() {
+                            c.wipe();
+                        }
+                    }
                     _ => {}
                 }
             }
