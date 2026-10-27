@@ -7787,14 +7787,19 @@ mod directed_v2_receive_tests {
 
     /// Block the create-only write for one envelope id by occupying its on-disk
     /// path with a directory, so `store_incoming_v2_new` cannot create the file
-    /// and the intake returns a Storage error. The layout is
-    /// `<data_dir>/directed/v2_incoming/<id_hex>.json` (see `DirectedInbox`).
+    /// and the intake returns a Storage error. The record path is taken from the
+    /// same registry the inbox uses (`directed_v2_incoming_dir`), so the test
+    /// tracks the real layout rather than hard-coding it.
     fn block_v2_record_path(data_dir: &std::path::Path, envelope_id: &[u8; 32]) {
-        let blocking = data_dir
-            .join("directed")
-            .join("v2_incoming")
-            .join(format!("{}.json", hex::encode(envelope_id)));
+        let blocking = v2_record_path(data_dir, envelope_id);
         std::fs::create_dir_all(&blocking).expect("occupy the record path with a directory");
+    }
+
+    /// The on-disk path of a v2 incoming record for `envelope_id`, resolved the
+    /// same way the inbox resolves it.
+    fn v2_record_path(data_dir: &std::path::Path, envelope_id: &[u8; 32]) -> std::path::PathBuf {
+        crate::paths::directed_v2_incoming_dir(data_dir)
+            .join(format!("{}.json", hex::encode(envelope_id)))
     }
 
     #[tokio::test]
@@ -7852,13 +7857,8 @@ mod directed_v2_receive_tests {
 
         // Clear the blocking directory and retry a fresh invite answering the
         // same, still-unspent offer: the write now succeeds and stores once.
-        std::fs::remove_dir_all(
-            dir.path()
-                .join("directed")
-                .join("v2_incoming")
-                .join(format!("{}.json", hex::encode(envelope_id))),
-        )
-        .expect("clear the blocking directory");
+        std::fs::remove_dir_all(v2_record_path(dir.path(), &envelope_id))
+            .expect("clear the blocking directory");
         let (retry, retry_peer) = build_invite(
             &sender_sk,
             recipient_identity,
