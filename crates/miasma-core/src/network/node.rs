@@ -1928,7 +1928,7 @@ fn directed_v2_intake_error_response(err: InviteIntakeError) -> DirectedResponse
             (directed_v2_codes::UNSUPPORTED_SUITE, "unsupported suite")
         }
         InviteIntakeError::BadLifecycle => {
-            (directed_v2_codes::UNSUPPORTED_SUITE, "bad lifecycle fields")
+            (directed_v2_codes::BAD_LIFECYCLE, "bad lifecycle fields")
         }
         InviteIntakeError::KdfOutOfRange => {
             (directed_v2_codes::KDF_OUT_OF_RANGE, "kdf cost out of range")
@@ -1957,7 +1957,7 @@ fn directed_v2_intake_error_response(err: InviteIntakeError) -> DirectedResponse
             directed_v2_codes::ID_CONFLICT,
             "envelope id reused with different content",
         ),
-        InviteIntakeError::Storage => (directed_v2_codes::OFFER_UNKNOWN, "persist failed"),
+        InviteIntakeError::Storage => (directed_v2_codes::STORAGE_FAILED, "persist failed"),
     };
     DirectedResponseV2::Error(directed_v2_error(code, detail))
 }
@@ -5127,8 +5127,10 @@ impl MiasmaNode {
         }
 
         // No stored record matched, so this is a first delivery. Take the offer
-        // out (design 3.4 item 4, one-shot): any later failure must not put it
-        // back, so a second invite with the same offer id cannot be tried.
+        // out (design 3.4 item 4, one-shot). The offer is restored below only on
+        // a transient Storage error after a clean verification, so a retry of the
+        // same invite is still possible; every verification failure keeps the
+        // burn, which is what makes the offer one-shot.
         let now_secs = self.directed_v2_offer_secs();
         let Some(offer) = self.directed_v2_offers.take(&peer, &ext.offer_id, now_secs) else {
             // Absent or expired. Distinguish only by what the table can tell us:
@@ -5139,19 +5141,25 @@ impl MiasmaNode {
             ));
         };
 
-        let ctx = InviteRecipientContext {
-            own_identity: &own_identity,
-            own_sharing: &own_sharing,
-            expected_offer_id: &ext.offer_id,
-            offer_r_eph_pub: &offer.r_eph_pub,
-            offer_r_eph_secret: &offer.r_eph_secret,
-            sender_identity_peer_id: &sender_identity_peer_id,
-            transport_peer_id: &transport_peer_id,
-            sender_peer_id_display: &sender_peer_id_display,
+        // Run the intake in a scope so the `ctx` borrow of `offer` is released
+        // before the restore path below, which must move `offer` back into the
+        // table on a Storage error.
+        let now = self.directed_v2_now();
+        let result = {
+            let ctx = InviteRecipientContext {
+                own_identity: &own_identity,
+                own_sharing: &own_sharing,
+                expected_offer_id: &ext.offer_id,
+                offer_r_eph_pub: &offer.r_eph_pub,
+                offer_r_eph_secret: &offer.r_eph_secret,
+                sender_identity_peer_id: &sender_identity_peer_id,
+                transport_peer_id: &transport_peer_id,
+                sender_peer_id_display: &sender_peer_id_display,
+            };
+            intake_invite(&inbox, &envelope, &ext, &ctx, now)
         };
 
-        let now = self.directed_v2_now();
-        match intake_invite(&inbox, &envelope, &ext, &ctx, now) {
+        match result {
             Ok(outcome) => {
                 if outcome.created {
                     if let Some(ref tx) = self.topology_tx {
@@ -5167,6 +5175,23 @@ impl MiasmaNode {
                     envelope_id: envelope.envelope_id,
                     transcript_hash: outcome.transcript_hash,
                 }
+            }
+            // A transient storage failure (I/O, inbox limit) after the offer was
+            // taken but before the record was written must not burn the offer:
+            // put it back so the sender can retry. The write is create-only, so
+            // restoring the offer cannot cause a double store. Every other error
+            // is a verification failure (bad signature, wrong epoch, id
+            // conflict) and keeps the burn: those are not retryable.
+            Err(InviteIntakeError::Storage) => {
+                // Re-insert under the same offer id. The table keys its age off
+                // the insert instant, so the restored offer ages from `now_secs`
+                // (the take instant) onward; this at most extends its life by the
+                // handling time and never shortens the retry window.
+                let _ = self
+                    .directed_v2_offers
+                    .insert(peer, ext.offer_id, offer, now_secs);
+                info!(peer = %peer, envelope_id = %id_hex, "directed_v2.invite_storage_failed_offer_restored");
+                directed_v2_intake_error_response(InviteIntakeError::Storage)
             }
             Err(e) => directed_v2_intake_error_response(e),
         }
@@ -7757,6 +7782,262 @@ mod directed_v2_receive_tests {
         match node.handle_directed_v2_request(sender_peer, invite) {
             DirectedResponseV2::InviteStored { .. } => {}
             other => panic!("expected InviteStored for a live-window invite, got {other:?}"),
+        }
+    }
+
+    /// Block the create-only write for one envelope id by occupying its on-disk
+    /// path with a directory, so `store_incoming_v2_new` cannot create the file
+    /// and the intake returns a Storage error. The layout is
+    /// `<data_dir>/directed/v2_incoming/<id_hex>.json` (see `DirectedInbox`).
+    fn block_v2_record_path(data_dir: &std::path::Path, envelope_id: &[u8; 32]) {
+        let blocking = data_dir
+            .join("directed")
+            .join("v2_incoming")
+            .join(format!("{}.json", hex::encode(envelope_id)));
+        std::fs::create_dir_all(&blocking).expect("occupy the record path with a directory");
+    }
+
+    #[tokio::test]
+    async fn a_storage_failure_after_taking_the_offer_does_not_burn_it() {
+        // M1/M2: the offer is one-shot, but a transient storage failure after the
+        // offer was taken must not burn it. Here the create-only write is forced
+        // to fail by occupying the record's on-disk path with a directory. The
+        // intake returns a Storage error, and the offer must be put back so a
+        // retry (with the write path cleared) still stores exactly once.
+        let (mut node, dir, sharing) = recipient_node();
+        let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
+        let sender_sk = signing_key();
+        let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
+
+        let offer = request_offer(&mut node, requester);
+        let (invite, sender_peer) = build_invite(
+            &sender_sk,
+            recipient_identity,
+            sharing,
+            &offer,
+            now_wall_secs(),
+        );
+        let envelope_id = match &invite {
+            DirectedRequestV2::Invite { envelope, .. } => envelope.envelope_id,
+            _ => unreachable!("built an Invite"),
+        };
+
+        // One live offer is held for this peer before the attempt.
+        let before = node
+            .directed_v2_offers
+            .len_for_peer(&requester, node.directed_v2_offer_secs());
+        assert_eq!(before, 1, "the requested offer is in the table");
+
+        // Force the create-only write to fail.
+        block_v2_record_path(dir.path(), &envelope_id);
+        match node.handle_directed_v2_request(sender_peer, invite) {
+            DirectedResponseV2::Error(msg) => {
+                assert!(
+                    msg.contains(crate::directed::v2::wire::codes::STORAGE_FAILED),
+                    "a storage failure must use the storage_failed code, got {msg}"
+                );
+            }
+            other => panic!("expected Error(storage_failed), got {other:?}"),
+        }
+
+        // The offer was taken for the attempt but restored on the storage error,
+        // so it is still held and the swarm edge is not lost.
+        let after = node
+            .directed_v2_offers
+            .len_for_peer(&requester, node.directed_v2_offer_secs());
+        assert_eq!(
+            after, 1,
+            "a storage failure must put the one-shot offer back, not burn it"
+        );
+
+        // Clear the blocking directory and retry a fresh invite answering the
+        // same, still-unspent offer: the write now succeeds and stores once.
+        std::fs::remove_dir_all(
+            dir.path()
+                .join("directed")
+                .join("v2_incoming")
+                .join(format!("{}.json", hex::encode(envelope_id))),
+        )
+        .expect("clear the blocking directory");
+        let (retry, retry_peer) = build_invite(
+            &sender_sk,
+            recipient_identity,
+            sharing,
+            &offer,
+            now_wall_secs(),
+        );
+        match node.handle_directed_v2_request(retry_peer, retry) {
+            DirectedResponseV2::InviteStored { .. } => {}
+            other => panic!("the restored offer must still be redeemable, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resend_of_an_expired_window_invite_under_a_stored_id_is_idempotent() {
+        // L3: swarm healing. A node that missed the ack resends its invite. By the
+        // time the resend arrives the invite's own window has closed, and the
+        // one-shot offer was already spent by the first delivery. Because the id
+        // is already stored, the resend is judged against the stored record
+        // (signature verified first) and accepted idempotently -- the closed
+        // window and the spent offer do not matter for an already-stored id. This
+        // acceptance is intended: it is what lets a lost-ack resend heal the edge.
+        let (mut node, _dir, sharing) = recipient_node();
+        let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
+        let sender_sk = signing_key();
+        let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
+
+        let offer = request_offer(&mut node, requester);
+        // The first delivery is anchored to the live wall clock so it stores.
+        let (invite, sender_peer) = build_invite(
+            &sender_sk,
+            recipient_identity,
+            sharing,
+            &offer,
+            now_wall_secs(),
+        );
+        let envelope_id = match &invite {
+            DirectedRequestV2::Invite { envelope, .. } => envelope.envelope_id,
+            _ => unreachable!("built an Invite"),
+        };
+        match node.handle_directed_v2_request(sender_peer, invite.clone()) {
+            DirectedResponseV2::InviteStored { .. } => {}
+            other => panic!("the first delivery must store, got {other:?}"),
+        }
+        // The offer is now spent: the table holds nothing for this peer.
+        assert_eq!(
+            node.directed_v2_offers
+                .len_for_peer(&requester, node.directed_v2_offer_secs()),
+            0,
+            "the first delivery spends the one-shot offer"
+        );
+
+        // Re-read the stored transcript hash so the resend can be checked to echo
+        // it rather than mint a new record.
+        let stored_inbox = crate::directed::DirectedInbox::open(_dir.path()).unwrap();
+        let first_hash = stored_inbox
+            .load_incoming_v2(&hex::encode(envelope_id))
+            .expect("the first delivery is stored")
+            .local
+            .expect("a local part was written")
+            .transcript_hash
+            .expect("the transcript hash is pinned on the record");
+
+        // Advance the monotonic base so that even if any offer remained it would
+        // be well past its TTL: the resend below must not depend on an offer at
+        // all, only on the stored id.
+        node.directed_v2_mono_base = std::time::Instant::now()
+            - std::time::Duration::from_secs(crate::directed::v2::offer_table::OFFER_TTL + 5);
+
+        // A genuine retry re-sends the *identical* invite (the window the sender
+        // set has since closed, but the bytes are unchanged, so its transcript
+        // hash still matches the stored record). The resend path verifies the
+        // signature, then matches it against the stored record, skipping both the
+        // offer table and the expiry check. It is accepted idempotently with the
+        // stored transcript hash, no new record written and no offer consumed.
+        // This is the intended swarm-healing behaviour for a node that missed the
+        // ack: the closed window and the spent/aged offer do not matter once the
+        // id is stored.
+        match node.handle_directed_v2_request(sender_peer, invite) {
+            DirectedResponseV2::InviteStored {
+                envelope_id: got,
+                transcript_hash,
+            } => {
+                assert_eq!(
+                    got, envelope_id,
+                    "the idempotent resend echoes the stored id"
+                );
+                assert_eq!(
+                    transcript_hash, first_hash,
+                    "the resend returns the stored transcript hash, not a new one"
+                );
+            }
+            other => {
+                panic!("a resend under a stored id must be accepted idempotently, got {other:?}")
+            }
+        }
+
+        // Exactly one record exists for the id: the resend did not write a second.
+        let count = stored_inbox
+            .list_incoming_v2()
+            .into_iter()
+            .filter(|r| r.wire.envelope_id == envelope_id)
+            .count();
+        assert_eq!(
+            count, 1,
+            "an idempotent resend must not create a second record"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resend_under_a_stored_id_with_a_bad_signature_is_refused_before_the_stored_match() {
+        // M3: the node handler verifies the transcript signature before it judges
+        // the resend against the stored record (existing_matches). This pins that
+        // order: a resend under an already-stored id whose signature is corrupt
+        // must be refused with bad_signature, not echoed back as an idempotent
+        // InviteStored. If a refactor reordered the checks -- matching first on an
+        // unverified transcript -- a forged invite under a stored id would be
+        // accepted, and this test would catch it.
+        let (mut node, _dir, sharing) = recipient_node();
+        let recipient_identity = node.dht_signing_key.verifying_key().to_bytes();
+        let sender_sk = signing_key();
+        let requester = peer_id_of(&sender_sk.verifying_key().to_bytes());
+
+        let offer = request_offer(&mut node, requester);
+        let (invite, sender_peer) = build_invite(
+            &sender_sk,
+            recipient_identity,
+            sharing,
+            &offer,
+            now_wall_secs(),
+        );
+        let envelope_id = match &invite {
+            DirectedRequestV2::Invite { envelope, .. } => envelope.envelope_id,
+            _ => unreachable!("built an Invite"),
+        };
+        // Store the genuine invite so the id is present for the resend. Keep an
+        // identical copy to re-send below once the forged one is refused.
+        match node.handle_directed_v2_request(sender_peer, invite.clone()) {
+            DirectedResponseV2::InviteStored { .. } => {}
+            other => panic!("the first delivery must store, got {other:?}"),
+        }
+
+        // A resend under the same stored id but with a corrupt transcript
+        // signature. Corrupt one signature byte of the identical invite, so only
+        // the signature differs from the stored record. Because the handler
+        // verifies the signature before the stored-record match, this is refused
+        // on the signature rather than echoed back as an idempotent store.
+        let corrupt = match invite.clone() {
+            DirectedRequestV2::Invite { envelope, mut ext } => {
+                let idx = (rand::random::<u8>() as usize) % ext.signature.len();
+                let delta = 1u8 + (rand::random::<u8>() % 255); // 1..=255, never zero
+                ext.signature[idx] = ext.signature[idx].wrapping_add(delta);
+                DirectedRequestV2::Invite { envelope, ext }
+            }
+            other => panic!("expected Invite, got {other:?}"),
+        };
+        match node.handle_directed_v2_request(sender_peer, corrupt) {
+            DirectedResponseV2::Error(msg) => {
+                assert!(
+                    msg.contains(crate::directed::v2::wire::codes::BAD_SIGNATURE),
+                    "a forged resend must be refused on the signature before the stored match, got {msg}"
+                );
+            }
+            other => panic!("expected Error(bad_signature) for a forged resend, got {other:?}"),
+        }
+
+        // The stored record is untouched: a genuine idempotent resend of the
+        // identical invite under the same id still succeeds, confirming the
+        // forged one was neither written nor echoed back. (Using the identical
+        // bytes is what keeps the transcript hash equal to the stored one; a
+        // different-content invite under the same id would be an id conflict, a
+        // case covered elsewhere.)
+        match node.handle_directed_v2_request(sender_peer, invite) {
+            DirectedResponseV2::InviteStored {
+                envelope_id: got, ..
+            } => {
+                assert_eq!(got, envelope_id, "the genuine resend echoes the stored id");
+            }
+            other => panic!("a genuine resend under the stored id must be accepted, got {other:?}"),
         }
     }
 }
