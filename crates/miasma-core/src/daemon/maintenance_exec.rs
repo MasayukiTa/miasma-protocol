@@ -80,6 +80,10 @@ pub trait RecordSource: Send + Sync {
     fn manifest(&self, _mid_digest: &[u8; 32]) -> Option<crate::transfer::TransferManifest> {
         None
     }
+
+    fn manifest_v4(&self, _mid_digest: &[u8; 32]) -> Option<crate::transfer::ManifestV4> {
+        None
+    }
 }
 
 /// The daemon's replication queue as a record source. Replacing a record keeps
@@ -125,6 +129,14 @@ impl RecordSource for QueueRecordSource {
             .ok()?
             .get(mid_digest)
             .and_then(|i| i.manifest.clone())
+    }
+
+    fn manifest_v4(&self, mid_digest: &[u8; 32]) -> Option<crate::transfer::ManifestV4> {
+        self.0
+            .lock()
+            .ok()?
+            .get(mid_digest)
+            .and_then(|i| i.manifest_v4.clone())
     }
 }
 
@@ -203,7 +215,14 @@ impl CoordinatorBackend {
     async fn own_record(
         &self,
         mid: [u8; 32],
-    ) -> Result<(DhtRecord, Option<crate::transfer::TransferManifest>), String> {
+    ) -> Result<
+        (
+            DhtRecord,
+            Option<crate::transfer::TransferManifest>,
+            Option<crate::transfer::ManifestV4>,
+        ),
+        String,
+    > {
         let dht = self.coord.dht_handle();
         let own_key = dht
             .publisher_key()
@@ -212,12 +231,21 @@ impl CoordinatorBackend {
             Some(envelope) => {
                 let found = crate::transfer::open_signed_record(&mid, &envelope, Some(&own_key))
                     .map_err(|e| format!("current record unusable: {e:?}"))?;
-                Ok((found.record, found.manifest))
+                // The signed local record is authoritative for which manifest
+                // (v3 or v4) this object was announced with; compat objects keep
+                // the exact earlier behavior.
+                Ok((found.record, found.manifest, found.manifest_v4))
             }
             None => self
                 .source
                 .find(&mid)
-                .map(|record| (record, self.source.manifest(&mid)))
+                .map(|record| {
+                    (
+                        record,
+                        self.source.manifest(&mid),
+                        self.source.manifest_v4(&mid),
+                    )
+                })
                 .ok_or_else(|| "own record not found; refusing to rewrite it".to_string()),
         }
     }
@@ -377,7 +405,7 @@ impl MaintenanceBackend for CoordinatorBackend {
     }
 
     async fn verify_record(&self, record: &DhtRecord) -> Result<(), String> {
-        let (current, _) = self.own_record(record.mid_digest).await?;
+        let (current, _, _) = self.own_record(record.mid_digest).await?;
         if current.data_shards != record.data_shards || current.total_shards != record.total_shards
         {
             return Err("k/n differ from the published record".into());
@@ -386,8 +414,8 @@ impl MaintenanceBackend for CoordinatorBackend {
     }
 
     async fn stage_record(&self, updated: &DhtRecord) -> Result<(), String> {
-        let (_, manifest) = self.own_record(updated.mid_digest).await?;
-        if manifest.is_some() {
+        let (_, manifest, manifest_v4) = self.own_record(updated.mid_digest).await?;
+        if manifest.is_some() || manifest_v4.is_some() {
             // A queued re-announce would carry no manifest: only keep the
             // record; the commit announces it with the manifest.
             self.source.replace(updated.clone());
@@ -402,18 +430,28 @@ impl MaintenanceBackend for CoordinatorBackend {
         // The manifest of the current record must travel with the new one:
         // re-announcing without it would turn a protected transfer into a
         // legacy one. If the record cannot be read, refuse instead of guessing.
-        let (current, manifest) = self.own_record(mid).await?;
+        let (current, manifest, manifest_v4) = self.own_record(mid).await?;
         if current.data_shards != updated.data_shards
             || current.total_shards != updated.total_shards
         {
             return Err("refusing to change k/n of a published record".into());
         }
 
-        self.coord
-            .dht_handle()
-            .put_with_manifest(updated.clone(), manifest.as_ref())
-            .await
-            .map_err(|e| e.to_string())?;
+        match manifest_v4.as_ref() {
+            Some(m) => {
+                self.coord
+                    .dht_handle()
+                    .put_with_manifest_v4(updated.clone(), m)
+                    .await
+            }
+            None => {
+                self.coord
+                    .dht_handle()
+                    .put_with_manifest(updated.clone(), manifest.as_ref())
+                    .await
+            }
+        }
+        .map_err(|e| e.to_string())?;
         self.source.replace(updated);
         Ok(())
     }

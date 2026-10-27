@@ -592,8 +592,15 @@ pub struct MiasmaCoordinator {
 /// Called once per completed streamed file publish with the announced record and
 /// its manifest, after the announce. An `Err` is logged by the publisher; the
 /// publish itself has already succeeded.
-pub type PublishObserver =
-    Arc<dyn Fn(&DhtRecord, &crate::transfer::TransferManifest) -> Result<(), String> + Send + Sync>;
+pub type PublishObserver = Arc<
+    dyn Fn(
+            &DhtRecord,
+            &crate::transfer::TransferManifest,
+            Option<&crate::transfer::ManifestV4>,
+        ) -> Result<(), String>
+        + Send
+        + Sync,
+>;
 
 impl MiasmaCoordinator {
     /// Spawn the node's event loop and return a coordinator wrapping its handles.

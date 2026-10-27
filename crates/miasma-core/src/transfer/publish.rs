@@ -471,7 +471,7 @@ impl MiasmaCoordinator {
                     .put_with_manifest(record, Some(&manifest))
                     .await?;
                 if let (Some(observer), Some(announced)) = (self.publish_observer(), for_observer) {
-                    if let Err(e) = observer(&announced, &manifest) {
+                    if let Err(e) = observer(&announced, &manifest, None) {
                         tracing::warn!("published content could not be registered for upkeep: {e}");
                     }
                 }
@@ -480,14 +480,18 @@ impl MiasmaCoordinator {
             // instead of a version-3 one. The manifest was built and validated as
             // a v3 structure above (same name sealing, same per-segment piece
             // commitments); promoting it to v4 only names the suite and adds the
-            // empty extension area. The upkeep observer takes a v3 manifest, so a
-            // v4 publish is not registered for replication here — see the
-            // follow-up list in the report.
+            // empty extension area.
             ObjectSuite::Suite2 => {
                 let manifest_v4 = promote_manifest_to_v4(&manifest, publish_suite)?;
+                let for_observer = self.publish_observer().map(|_| record.clone());
                 self.dht_handle()
                     .put_with_manifest_v4(record, &manifest_v4)
                     .await?;
+                if let (Some(observer), Some(announced)) = (self.publish_observer(), for_observer) {
+                    if let Err(e) = observer(&announced, &manifest, Some(&manifest_v4)) {
+                        tracing::warn!("published content could not be registered for upkeep: {e}");
+                    }
+                }
             }
         }
         if let Some(jp) = &journal_path {
