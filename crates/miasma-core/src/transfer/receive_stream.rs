@@ -54,7 +54,7 @@ use super::{
     },
     share_id::ShareId,
 };
-use crate::{crypto::hash::ContentId, network::types::DhtRecord, MiasmaError};
+use crate::{crypto::hash::ContentId, format::ObjectSuite, network::types::DhtRecord, MiasmaError};
 
 /// How often a waiting stream looks at its cancel flag.
 const CANCEL_POLL: Duration = Duration::from_millis(20);
@@ -300,6 +300,9 @@ async fn run_stream<S: PieceSource + ?Sized>(
                 key: key.as_ref(),
                 entry,
                 manifest: manifest.as_ref(),
+                // The RAM-only stream path is Suite1 only; its `prepare` call
+                // resolves Suite1 and it has no v4 reconstruction.
+                suite: ObjectSuite::Suite1,
             };
             decode_with_fallback(source, &ctx, progress, &mut suspects, &mut pool).await
         };
