@@ -436,6 +436,7 @@ async fn run_from_record<S: PieceSource>(
             mid,
             record: fetched.record,
             manifest: fetched.manifest,
+            manifest_v4: fetched.manifest_v4,
             password,
             output_path: output,
             journal_dir: journal_dir.to_path_buf(),

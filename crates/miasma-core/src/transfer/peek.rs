@@ -107,6 +107,7 @@ mod tests {
                 published_at: 1,
             },
             manifest,
+            manifest_v4: None,
             signer: [9; 32],
         }
     }
@@ -210,6 +211,7 @@ mod tests {
             FetchedRecord {
                 record: self.record.clone(),
                 manifest: self.manifest.clone(),
+                manifest_v4: self.manifest_v4.clone(),
                 signer: self.signer,
             }
         }

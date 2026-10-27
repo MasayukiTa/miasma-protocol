@@ -474,7 +474,11 @@ impl ManifestV4 {
     /// reuse the v3 structural validation. Its `version` is set to 3 so the
     /// shared [`TransferManifest::validate`] accepts it; the v4-only fields are
     /// not part of that structural check.
-    fn as_v3_view(&self) -> TransferManifest {
+    ///
+    /// The receive engine also uses this view to reuse every v3 param, key,
+    /// segment-count and candidate derivation for a v4 record, while dispatching
+    /// reconstruction by the manifest's own [`ObjectSuite`].
+    pub(crate) fn as_v3_view(&self) -> TransferManifest {
         TransferManifest {
             version: MANIFEST_VERSION,
             mid: self.mid,
@@ -859,8 +863,12 @@ pub fn decode_record_value(
 pub struct FetchedRecord {
     pub record: DhtRecord,
     pub manifest: Option<TransferManifest>,
-    /// The key that signed the envelope. If `manifest` is present it names this
-    /// key as its publisher.
+    /// The v4 (Suite2) manifest, present only for a v4 record. A v3 record
+    /// leaves this `None` and carries its manifest in `manifest`, byte for byte
+    /// as before; the receive engine reads this to drive a Suite2 receive.
+    pub manifest_v4: Option<ManifestV4>,
+    /// The key that signed the envelope. If `manifest` or `manifest_v4` is
+    /// present it names this key as its publisher.
     pub signer: [u8; 32],
 }
 
@@ -942,18 +950,19 @@ pub fn open_signed_record(
     {
         return Err(SignedRecordError::ManifestPublisher);
     }
-    // The receive engine downstream of `FetchedRecord` takes a v3
-    // `TransferManifest`. A v3 record keeps carrying its manifest, byte for byte
-    // as before; a v4 record is accepted here (not refused, no panic) but its
-    // manifest is not yet threaded through the engine, so it rides as `None` --
-    // see the follow-up note on the pull request.
-    let manifest = match decoded {
-        Some(DecodedManifest::V3(m)) => Some(m),
-        Some(DecodedManifest::V4(_)) | None => None,
+    // Split the decoded manifest by version. A v3 record keeps carrying its
+    // manifest in `manifest`, byte for byte as before, and `manifest_v4` stays
+    // `None`; a v4 record carries its manifest in `manifest_v4` (and `manifest`
+    // stays `None`) so the receive engine can drive a Suite2 receive from it.
+    let (manifest, manifest_v4) = match decoded {
+        Some(DecodedManifest::V3(m)) => (Some(m), None),
+        Some(DecodedManifest::V4(m)) => (None, Some(m)),
+        None => (None, None),
     };
     Ok(FetchedRecord {
         record,
         manifest,
+        manifest_v4,
         signer: signed.signer_pubkey,
     })
 }
