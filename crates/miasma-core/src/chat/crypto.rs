@@ -66,6 +66,18 @@ pub mod label {
     /// after a hybrid exchange completed in the session.
     pub const PQ_LAYER: &[u8] = b"miasma/chat/v1/pqlayer";
     pub const FILE_NAME: &str = "miasma chat v1 file name";
+    /// Call media root key (see `chat::call`). Dedicated call labels, kept
+    /// separate from the chat `CHAIN`/`MESSAGE` so that the same chain-key
+    /// input never yields the same output for a call and for a chat.
+    pub const CALL_MEDIA_ROOT: &[u8] = b"miasma/call/v1/mediaroot";
+    /// Call per-direction chain initialisation (MK_root -> epoch 0 chain key).
+    pub const CALL_CHAIN_INIT: &[u8] = b"miasma/call/v1/chaininit";
+    /// Call chain advance (next chain key); the call-only counterpart of
+    /// `CHAIN`, never reused for chat.
+    pub const CALL_CHAIN: &[u8] = b"miasma/call/v1/ck";
+    /// Call message-key material; the call-only counterpart of `MESSAGE`,
+    /// never reused for chat.
+    pub const CALL_MESSAGE: &[u8] = b"miasma/call/v1/msgkey";
 }
 
 pub const ENVELOPE_VERSION: u8 = 1;
