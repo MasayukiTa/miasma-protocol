@@ -218,6 +218,38 @@ pub struct SendChain {
 }
 
 impl SendChain {
+    // The packet sender owns a call-wide sequence; next_seq remains the
+    // per-epoch packet count used by the existing advance trigger.
+    pub(super) fn seal_packet(
+        &mut self,
+        call_id: &[u8; 16],
+        packet_seq: u64,
+        media_type: u8,
+        plaintext: &[u8],
+        now_ms: u64,
+    ) -> Result<(u32, Vec<u8>), MediaError> {
+        if self.ended {
+            return Err(MediaError::EpochExhausted);
+        }
+        if self.advance_due(now_ms) != AdvanceReason::None {
+            self.advance(now_ms)?;
+        }
+        let frame = seal_frame(
+            &self.msg_key,
+            call_id,
+            self.direction,
+            self.key_epoch,
+            packet_seq,
+            media_type,
+            plaintext,
+        )?;
+        self.next_seq = self
+            .next_seq
+            .checked_add(1)
+            .ok_or(MediaError::EpochExhausted)?;
+        Ok((self.key_epoch, frame))
+    }
+
     /// Start a send chain from `MK_root` at epoch 0, time `now_ms`.
     pub fn start(
         mk_root: &[u8; 32],
