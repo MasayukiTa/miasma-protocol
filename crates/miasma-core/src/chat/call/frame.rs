@@ -14,7 +14,7 @@ use chacha20poly1305::{
     aead::{AeadInPlace, KeyInit},
     Tag, XChaCha20Poly1305, XNonce,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::media::{
     chain_step, init_chain_key, media_aad, media_nonce, Direction, MediaError, EPOCH_MAX_PACKETS,
@@ -187,6 +187,14 @@ impl ReplayWindow {
         } else {
             self.set(seq);
         }
+    }
+}
+
+impl Drop for ReplayWindow {
+    fn drop(&mut self) {
+        self.max_seq.zeroize();
+        self.seen_any.zeroize();
+        self.bits.zeroize();
     }
 }
 
