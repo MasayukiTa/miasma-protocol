@@ -7,10 +7,7 @@
 //! buffers user-facing notices for a UI to drain, and a per-incoming-call
 //! approval token so a stale user interface cannot approve a replacement call.
 //!
-//! Scope: this change wires ports, the notice queue and the approval token only.
-//! It does NOT implement sending, encoding or message handling; those remain the
-//! caller's job and arrive in later work. The controller holds a [`CallMachine`]
-//! but this change does not yet feed it events.
+//! Inbound records and timeouts drive the machine; sending remains for later work.
 //!
 //! Privacy: anything that holds a call id or a peer id must not derive `Debug`
 //! (a call id is secret-adjacent, see [`state`]). [`CallNotice`], [`CallStatus`]
@@ -19,7 +16,11 @@
 
 use std::collections::VecDeque;
 
-use super::state::{CallMachine, Notice, State};
+use super::inbound::CallInbound;
+use super::signal::Record;
+use super::state::{
+    CallId, CallMachine, Effect, Event, Notice, Offer, PeerId, State, OFFER_TTL_MS,
+};
 
 /// Host services the controller needs but does not own: the clock and the
 /// contact check. Injected so the controller stays testable and performs no I/O
@@ -29,6 +30,208 @@ pub trait CallPorts {
     fn now_ms(&self) -> u64;
     /// Whether `peer` (a 32-byte identity) is a known, allowed contact.
     fn is_contact_allowed(&self, peer: &[u8; 32]) -> bool;
+}
+
+#[cfg(test)]
+mod inbound_tests {
+    use super::super::signal::{new_call_id, new_call_nonce, Kind};
+    use super::super::state::{Control, Reason};
+    use super::*;
+
+    struct Ports {
+        now: u64,
+        allowed: bool,
+    }
+    impl CallPorts for Ports {
+        fn now_ms(&self) -> u64 {
+            self.now
+        }
+        fn is_contact_allowed(&self, _: &[u8; 32]) -> bool {
+            self.allowed
+        }
+    }
+    fn controller() -> CallController<Ports> {
+        CallController::new(Ports {
+            now: 1000,
+            allowed: true,
+        })
+    }
+    fn offer(id: [u8; 16], expires: u64) -> Record {
+        Record::Offer {
+            call_id: id,
+            call_nonce: new_call_nonce(),
+            created_at_ms: 0,
+            expires_at_ms: expires,
+            capabilities: vec![],
+        }
+    }
+    fn inbound(peer: [u8; 32], signal: Record) -> CallInbound {
+        CallInbound {
+            peer,
+            signal,
+            received_at_ms: 0,
+        }
+    }
+    fn answer(id: [u8; 16]) -> Record {
+        Record::Answer {
+            call_id: id,
+            call_nonce: new_call_nonce(),
+            created_at_ms: 0,
+            capabilities: vec![],
+        }
+    }
+
+    #[test]
+    fn offer_contact_expiry_and_busy() {
+        let peer = [1; 32];
+        let id = new_call_id();
+        let mut c = controller();
+        c.ports.allowed = false;
+        c.on_inbound(inbound(peer, offer(id, 2000)));
+        assert_eq!(c.status().state, State::Idle);
+        c.ports.allowed = true;
+        c.on_inbound(inbound(peer, offer(id, 999)));
+        assert_eq!(c.status().state, State::Idle);
+        c.on_inbound(inbound(peer, offer(id, 2000)));
+        assert_eq!(c.status().state, State::Ringing);
+        assert!(c.status().pending_token.is_some());
+        assert_eq!(c.take_notices().0, vec![CallNotice::IncomingRinging]);
+        let second_id = new_call_id();
+        c.on_inbound(inbound([2; 32], offer(second_id, 2000)));
+        let effects = c.take_effects();
+        assert!(
+            matches!(effects.as_slice(), [Effect::Send { control: Control::Busy, call_id, reason: Some(Reason::Busy) }] if *call_id == CallId(second_id))
+        );
+        assert!(c.peer == Some(peer));
+    }
+
+    #[test]
+    fn answer_requires_active_peer() {
+        let peer = [1; 32];
+        let id = new_call_id();
+        let mut c = controller();
+        c.peer = Some(peer);
+        c.apply_event(
+            Event::UserDial {
+                call_id: CallId(id),
+                peer_id: PeerId(peer),
+            },
+            1000,
+        );
+        c.on_inbound(inbound([2; 32], answer(id)));
+        assert_eq!(c.status().state, State::Calling);
+        c.on_inbound(inbound(peer, answer(id)));
+        assert_eq!(c.status().state, State::Connected);
+    }
+
+    #[test]
+    fn timeout_clears_context_after_boundary() {
+        let mut c = controller();
+        c.on_inbound(inbound([1; 32], offer(new_call_id(), 100_000)));
+        c.ports.now = 46_000;
+        c.on_tick();
+        assert_eq!(c.status().state, State::Ringing);
+        c.ports.now += 1;
+        c.on_tick();
+        assert_eq!(c.status().state, State::Idle);
+        assert!(c.peer.is_none());
+        assert!(c.status().pending_token.is_none());
+    }
+
+    fn samples(id: [u8; 16]) -> Vec<Record> {
+        vec![
+            offer(id, 100_000),
+            answer(id),
+            Record::Reject {
+                call_id: id,
+                created_at_ms: 0,
+                reason: 0,
+            },
+            Record::Busy {
+                call_id: id,
+                created_at_ms: 0,
+                reason: 0,
+            },
+            Record::Cancel {
+                call_id: id,
+                created_at_ms: 0,
+                reason: 0,
+            },
+            Record::Bye {
+                call_id: id,
+                created_at_ms: 0,
+            },
+            Record::Ack {
+                call_id: id,
+                acked_kind: Kind::Offer.byte(),
+            },
+            Record::Collide {
+                call_id: id,
+                peer_call_id: new_call_id(),
+                created_at_ms: 0,
+            },
+        ]
+    }
+
+    #[test]
+    fn every_record_in_every_state() {
+        for target in [
+            State::Idle,
+            State::Calling,
+            State::Ringing,
+            State::Connected,
+        ] {
+            for index in 0..8 {
+                let peer = [1; 32];
+                let id = new_call_id();
+                let mut c = controller();
+                if target == State::Calling || target == State::Connected {
+                    c.peer = Some(peer);
+                    c.apply_event(
+                        Event::UserDial {
+                            call_id: CallId(id),
+                            peer_id: PeerId(peer),
+                        },
+                        1000,
+                    );
+                    if target == State::Connected {
+                        c.apply_event(
+                            Event::ReceivedAnswer {
+                                call_id: CallId(id),
+                            },
+                            1000,
+                        );
+                    }
+                } else if target == State::Ringing {
+                    c.on_inbound(inbound(peer, offer(id, 100_000)));
+                }
+                assert_eq!(c.status().state, target);
+                for (i, record) in samples(id).into_iter().enumerate() {
+                    if i == index {
+                        c.on_inbound(inbound(peer, record));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn effects_are_bounded_and_drop_oldest() {
+        let mut c = controller();
+        c.on_inbound(inbound([1; 32], offer(new_call_id(), 100_000)));
+        let first = new_call_id();
+        c.on_inbound(inbound([2; 32], offer(first, 100_000)));
+        for _ in 0..16 {
+            c.on_inbound(inbound([2; 32], offer(new_call_id(), 100_000)));
+        }
+        let effects = c.take_effects();
+        assert_eq!(effects.len(), 16);
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, Effect::Send { call_id, .. } if *call_id == CallId(first))));
+        assert!(c.take_effects().is_empty());
+    }
 }
 
 /// A user-facing notice, mirroring [`state::Notice`] plus a [`CallNotice::SendFailed`]
@@ -148,20 +351,17 @@ impl core::fmt::Debug for CallStatus {
 
 /// The host-facing controller around a [`CallMachine`]. Holds the injected
 /// ports, the machine, the active peer, a bounded notice queue and the
-/// incoming-call approval token state. This change does not yet drive the
-/// machine with events; it wires the token and queue only.
+/// incoming-call approval token state.
 pub struct CallController<P: CallPorts> {
-    // Held for later work (driving the machine and the contact check); not yet
-    // read in this ports-only change.
-    #[allow(dead_code)]
     ports: P,
     machine: CallMachine,
-    // The active peer identity, set when a call becomes active in later work.
-    #[allow(dead_code)]
+    // The active peer identity.
     peer: Option<[u8; 32]>,
     notices: NoticeQueue,
     pending_token: Option<u64>,
     next_token: u64,
+    pending_effects: VecDeque<Effect>,
+    entered_at_ms: Option<u64>,
 }
 
 impl<P: CallPorts> CallController<P> {
@@ -174,6 +374,96 @@ impl<P: CallPorts> CallController<P> {
             notices: NoticeQueue::new(),
             pending_token: None,
             next_token: 0,
+            pending_effects: VecDeque::with_capacity(16),
+            entered_at_ms: None,
+        }
+    }
+
+    /// Apply an authenticated inbound signalling record.
+    pub fn on_inbound(&mut self, inbound: CallInbound) {
+        let now = self.ports.now_ms();
+        let old_state = self.machine.state();
+        let peer = inbound.peer;
+        let event = match inbound.signal {
+            Record::Offer {
+                call_id,
+                expires_at_ms,
+                ..
+            } => Event::ReceivedOffer(Offer {
+                call_id: CallId(call_id),
+                peer_id: PeerId(peer),
+                from_contact: self.ports.is_contact_allowed(&peer),
+                expired: expires_at_ms < now,
+                other_call_active: old_state != State::Idle,
+            }),
+            Record::Answer { call_id, .. } if self.peer == Some(peer) => Event::ReceivedAnswer {
+                call_id: CallId(call_id),
+            },
+            Record::Reject { call_id, .. } if self.peer == Some(peer) => Event::ReceivedReject {
+                call_id: CallId(call_id),
+            },
+            Record::Busy { call_id, .. } if self.peer == Some(peer) => Event::ReceivedBusy {
+                call_id: CallId(call_id),
+            },
+            Record::Cancel { call_id, .. } if self.peer == Some(peer) => Event::ReceivedCancel {
+                call_id: CallId(call_id),
+            },
+            Record::Bye { call_id, .. } if self.peer == Some(peer) => Event::ReceivedHangUp {
+                call_id: CallId(call_id),
+            },
+            // The machine has no events for Ack or inbound Collide.
+            _ => return,
+        };
+        let is_offer = matches!(event, Event::ReceivedOffer(_));
+        self.apply_event(event, now);
+        if is_offer && old_state != State::Ringing && self.machine.state() == State::Ringing {
+            self.peer = Some(peer);
+            self.begin_incoming();
+        }
+    }
+
+    /// Inject the offer timeout after more than 45 seconds in Calling or Ringing.
+    pub fn on_tick(&mut self) {
+        let now = self.ports.now_ms();
+        if matches!(self.machine.state(), State::Calling | State::Ringing)
+            && self
+                .entered_at_ms
+                .map_or(false, |entered| now.saturating_sub(entered) > OFFER_TTL_MS)
+        {
+            self.apply_event(Event::Timeout, now);
+        }
+    }
+
+    /// Take buffered send effects in order.
+    pub fn take_effects(&mut self) -> Vec<Effect> {
+        self.pending_effects.drain(..).collect()
+    }
+
+    fn apply_event(&mut self, event: Event, now: u64) {
+        let old_state = self.machine.state();
+        let transition = self.machine.step(event, now);
+        if transition.next != old_state {
+            self.entered_at_ms = if matches!(transition.next, State::Calling | State::Ringing) {
+                Some(now)
+            } else {
+                None
+            };
+        }
+        for effect in transition.effects {
+            match effect {
+                Effect::Show(notice) => self.notices.push(CallNotice::from(notice)),
+                Effect::Send { .. } | Effect::Collide { .. } => {
+                    if self.pending_effects.len() >= 16 {
+                        self.pending_effects.pop_front();
+                    }
+                    self.pending_effects.push_back(effect);
+                }
+                Effect::ZeroizeKeys | Effect::ReplaceSasInput { .. } => {}
+            }
+        }
+        if transition.next == State::Idle {
+            self.peer = None;
+            self.pending_token = None;
         }
     }
 
