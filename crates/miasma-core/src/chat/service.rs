@@ -294,6 +294,8 @@ pub struct ChatService {
     /// push send loop so the latter can pace itself while chat is sending.
     activity: ChatActivity,
     groups: OnceLock<Arc<super::group::service::GroupService>>,
+    #[cfg(feature = "pqc")]
+    call_sink: Mutex<Option<tokio::sync::mpsc::Sender<super::call::CallInbound>>>,
 }
 
 impl ChatService {
@@ -366,6 +368,8 @@ impl ChatService {
             shutdown,
             activity: ChatActivity::new(),
             groups: OnceLock::new(),
+            #[cfg(feature = "pqc")]
+            call_sink: Mutex::new(None),
         });
         node.set_chat_handler(Arc::new(Handler(svc.clone())));
         if let Some(g) = super::group::service::GroupService::start(&svc, seed, keys) {
@@ -393,6 +397,14 @@ impl ChatService {
         }
         info!("chat is on");
         Some(svc)
+    }
+
+    /// Register or replace the inbound call signalling sink.
+    #[cfg(feature = "pqc")]
+    pub fn set_call_sink(&self, tx: tokio::sync::mpsc::Sender<super::call::CallInbound>) {
+        if let Ok(mut sink) = self.call_sink.lock() {
+            *sink = Some(tx);
+        }
     }
 
     pub fn shutdown(&self) {
@@ -923,7 +935,23 @@ impl ChatService {
                 let core = self.core.clone();
                 let w = wire;
                 // Cipher and disk work off the async threads.
-                match tokio::task::spawn_blocking(move || core.accept(&remote, &w, now_ms())).await
+                #[cfg(feature = "pqc")]
+                let sink = self.call_sink.lock().ok().and_then(|s| s.clone());
+                #[cfg(feature = "pqc")]
+                let contacts = self.contacts.clone();
+                match tokio::task::spawn_blocking(move || {
+                    #[cfg(feature = "pqc")]
+                    if let Some(sink) = sink {
+                        let now = now_ms();
+                        return core.accept_with_call(&remote, &w, now, &|body| {
+                            let allowed =
+                                matches!(contacts.by_endpoint(&remote), Some(c) if c.allow_receive);
+                            super::call::inbound::dispatch(&sink, remote, allowed, body, now_ms());
+                        });
+                    }
+                    core.accept(&remote, &w, now_ms())
+                })
+                .await
                 {
                     Ok(o) => o.status,
                     Err(_) => AckStatus::Failed,

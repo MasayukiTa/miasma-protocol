@@ -10,11 +10,13 @@
 //! sample ever reaches a log, an error message or a `Debug` output.
 
 pub mod frame;
+pub mod inbound;
 pub mod media;
 pub mod signal;
 pub mod state;
 
 pub use frame::{open_frame, seal_frame, AdvanceReason, ReplayWindow, SendChain};
+pub use inbound::CallInbound;
 pub use media::{
     chain_step, derive_mk_root, init_chain_key, media_aad, media_nonce, Direction, MediaError,
     AAD_LEN, EPOCH_MAX_PACKETS, EPOCH_RETAIN, FRAME_PLAINTEXT_LEN, FRAME_WIRE_LEN, KEY_EPOCH_MAX,

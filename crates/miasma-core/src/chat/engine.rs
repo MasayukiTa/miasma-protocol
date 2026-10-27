@@ -524,6 +524,27 @@ impl ChatCore {
     /// Apply an envelope that arrived from `peer` (already authenticated by the
     /// transport and allowed by the contact list).
     pub fn accept(&self, peer: &[u8; 32], wire: &[u8], now: u64) -> AcceptOutcome {
+        self.accept_inner(peer, wire, now, None)
+    }
+
+    #[cfg(feature = "pqc")]
+    pub(crate) fn accept_with_call(
+        &self,
+        peer: &[u8; 32],
+        wire: &[u8],
+        now: u64,
+        on_call: &dyn Fn(&[u8]),
+    ) -> AcceptOutcome {
+        self.accept_inner(peer, wire, now, Some(on_call))
+    }
+
+    fn accept_inner(
+        &self,
+        peer: &[u8; 32],
+        wire: &[u8],
+        now: u64,
+        on_call: Option<&dyn Fn(&[u8])>,
+    ) -> AcceptOutcome {
         let plain = |status| AcceptOutcome {
             status,
             session_replaced: false,
@@ -549,6 +570,7 @@ impl ChatCore {
                 /// The plaintext of a hybrid-upgrade record (always `None`
                 /// in builds without the `pqc` feature).
                 pq_plain: Option<Vec<u8>>,
+                call_plain: Option<Vec<u8>>,
             },
         }
         let me = &self.identity;
@@ -620,12 +642,25 @@ impl ChatCore {
                         };
                         #[cfg(not(feature = "pqc"))]
                         let pq_plain: Option<Vec<u8>> = None;
+                        #[cfg(feature = "pqc")]
+                        let call_plain = match &record {
+                            Record::Unknown(k)
+                                if on_call.is_some()
+                                    && super::call::signal::Kind::is_signal_kind(*k) =>
+                            {
+                                Some(pt.to_vec())
+                            }
+                            _ => None,
+                        };
+                        #[cfg(not(feature = "pqc"))]
+                        let call_plain: Option<Vec<u8>> = None;
                         Step::Open {
                             session,
                             record,
                             replaced,
                             new_ek,
                             pq_plain,
+                            call_plain,
                         }
                     }
                     Err(_) => Step::Done(AckStatus::BadRequest),
@@ -633,7 +668,7 @@ impl ChatCore {
                 _ => Step::Done(AckStatus::BadRequest),
             }
         });
-        let (session, record, replaced, new_ek, pq_plain) = match step {
+        let (session, record, replaced, new_ek, pq_plain, call_plain) = match step {
             Step::Done(s) => return plain(s),
             Step::Open {
                 session,
@@ -641,7 +676,8 @@ impl ChatCore {
                 replaced,
                 new_ek,
                 pq_plain,
-            } => (session, record, replaced, new_ek, pq_plain),
+                call_plain,
+            } => (session, record, replaced, new_ek, pq_plain, call_plain),
         };
         let message = match record {
             Record::Text(m) => m,
@@ -673,6 +709,9 @@ impl ChatCore {
                 }
                 if replaced {
                     self.void_sealed(peer);
+                }
+                if let (Some(handle), Some(body)) = (on_call, call_plain.as_deref()) {
+                    handle(body);
                 }
                 return AcceptOutcome {
                     status: AckStatus::Stored,

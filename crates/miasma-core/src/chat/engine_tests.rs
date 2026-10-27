@@ -101,6 +101,66 @@ pub(super) fn deliver_next(from: &Side, to: &Side) -> Option<AckStatus> {
     Some(st)
 }
 
+#[cfg(feature = "pqc")]
+#[test]
+fn call_dispatch_and_chat_receive() {
+    use super::call::{
+        inbound::dispatch,
+        signal::{new_call_id, new_call_nonce, Record},
+    };
+    use super::engine::now_ms;
+
+    let a = side();
+    let b = side();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let now = now_ms();
+    let offer = |expires_at_ms| {
+        Record::Offer {
+            call_id: new_call_id(),
+            call_nonce: new_call_nonce(),
+            created_at_ms: now,
+            expires_at_ms,
+            capabilities: vec![1],
+        }
+        .encode()
+        .unwrap()
+    };
+    let send = |body: &[u8], allowed: bool| {
+        let (wire, _) = a.core.seal_for(&b.id(), body).unwrap();
+        let result = b.core.accept_with_call(&a.id(), &wire, now, &|plain| {
+            dispatch(&tx, a.id(), allowed, plain, now);
+        });
+        assert_eq!(result.status, AckStatus::Stored);
+    };
+    send(&offer(now + 60_000), true);
+    let received = rx.try_recv().unwrap();
+    assert!(received.peer == a.id());
+    assert_eq!(received.received_at_ms, now);
+    assert!(matches!(received.signal, Record::Offer { .. }));
+    send(&offer(now + 60_000), false);
+    send(&offer(now.saturating_sub(1)), true);
+    send(&[0x30, 0xff], true);
+    assert!(rx.try_recv().is_err());
+    assert!(b.texts(&a.id()).is_empty());
+
+    let (wire, _) = a.core.seal_for(&b.id(), &offer(now + 60_000)).unwrap();
+    assert_eq!(b.core.accept(&a.id(), &wire, now).status, AckStatus::Stored);
+    assert!(b.texts(&a.id()).is_empty());
+    a.core.enqueue(&b.id(), "hello", now).unwrap();
+    let e = a.core.outbox.first_for(&b.id()).unwrap();
+    let (wire, _) = a.core.prepare_wire(&e.id).unwrap();
+    assert_eq!(
+        b.core
+            .accept_with_call(&a.id(), &wire, now, &|plain| {
+                dispatch(&tx, a.id(), true, plain, now);
+            })
+            .status,
+        AckStatus::Stored
+    );
+    assert!(rx.try_recv().is_err());
+    assert_eq!(b.texts(&a.id()), ["hello"]);
+}
+
 #[test]
 fn messages_flow_both_ways_in_order_and_are_applied_once() {
     let a = side();
