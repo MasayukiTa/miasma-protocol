@@ -149,6 +149,32 @@ pub fn derive_mk_root(
     Ok(out)
 }
 
+/// Derive a direction-specific media root from the two signalling shares.
+pub fn derive_mk_root_from_shares(
+    caller_share: &[u8; 32],
+    callee_share: &[u8; 32],
+    call_id: &[u8; 16],
+    caller_nonce: &[u8; 16],
+    callee_nonce: &[u8; 16],
+    offer_hash: &[u8; 32],
+    direction: Direction,
+) -> Result<Zeroizing<[u8; 32]>, MediaError> {
+    let mut ikm = fresh::<64>();
+    ikm[..32].copy_from_slice(caller_share);
+    ikm[32..].copy_from_slice(callee_share);
+    let mut info = Zeroizing::new(Vec::with_capacity(16 + 16 + 16 + 32 + 1));
+    info.extend_from_slice(call_id);
+    info.extend_from_slice(caller_nonce);
+    info.extend_from_slice(callee_nonce);
+    info.extend_from_slice(offer_hash);
+    info.push(direction.byte());
+    let hk = Hkdf::<Sha256>::new(Some(label::CALL_MEDIA_ROOT), ikm.as_ref());
+    let mut out = fresh::<32>();
+    hk.expand(&info, out.as_mut())
+        .map_err(|_| MediaError::KeySchedule)?;
+    Ok(out)
+}
+
 /// The epoch-0 chain key from `MK_root`, §2.3 / §4.3.1. One HKDF step so the
 /// distance between `MK_root` and the first chain key is not zero.
 /// `salt = CALL_CHAIN_INIT`, `info = key_epoch(3B) = 0`.
@@ -239,6 +265,123 @@ mod tests {
 
     // §2.2: both ends that share the same (chain key, hybrid key, call_id,
     // call_nonce, direction) derive the same MK_root, byte for byte.
+    #[test]
+    fn share_root_binds_all_inputs() {
+        let caller = Zeroizing::new(rand32());
+        let callee = Zeroizing::new(rand32());
+        let id = rand16();
+        let caller_nonce = rand16();
+        let callee_nonce = rand16();
+        let hash = rand32();
+        let derive =
+            |a: &[u8; 32],
+             b: &[u8; 32],
+             i: &[u8; 16],
+             n: &[u8; 16],
+             m: &[u8; 16],
+             h: &[u8; 32],
+             d| { derive_mk_root_from_shares(a, b, i, n, m, h, d).unwrap() };
+        let base = derive(
+            &caller,
+            &callee,
+            &id,
+            &caller_nonce,
+            &callee_nonce,
+            &hash,
+            Direction::Caller,
+        );
+        let same = derive(
+            &caller,
+            &callee,
+            &id,
+            &caller_nonce,
+            &callee_nonce,
+            &hash,
+            Direction::Caller,
+        );
+        assert!(*base == *same);
+        let mut ca = caller.clone();
+        ca[0] ^= 1;
+        let mut cb = callee.clone();
+        cb[0] ^= 1;
+        let mut ci = id;
+        ci[0] ^= 1;
+        let mut cn = caller_nonce;
+        cn[0] ^= 1;
+        let mut cm = callee_nonce;
+        cm[0] ^= 1;
+        let mut ch = hash;
+        ch[0] ^= 1;
+        let variants = [
+            derive(
+                &ca,
+                &callee,
+                &id,
+                &caller_nonce,
+                &callee_nonce,
+                &hash,
+                Direction::Caller,
+            ),
+            derive(
+                &caller,
+                &cb,
+                &id,
+                &caller_nonce,
+                &callee_nonce,
+                &hash,
+                Direction::Caller,
+            ),
+            derive(
+                &caller,
+                &callee,
+                &ci,
+                &caller_nonce,
+                &callee_nonce,
+                &hash,
+                Direction::Caller,
+            ),
+            derive(
+                &caller,
+                &callee,
+                &id,
+                &cn,
+                &callee_nonce,
+                &hash,
+                Direction::Caller,
+            ),
+            derive(
+                &caller,
+                &callee,
+                &id,
+                &caller_nonce,
+                &cm,
+                &hash,
+                Direction::Caller,
+            ),
+            derive(
+                &caller,
+                &callee,
+                &id,
+                &caller_nonce,
+                &callee_nonce,
+                &ch,
+                Direction::Caller,
+            ),
+            derive(
+                &caller,
+                &callee,
+                &id,
+                &caller_nonce,
+                &callee_nonce,
+                &hash,
+                Direction::Callee,
+            ),
+        ];
+        for variant in variants {
+            assert!(*base != *variant);
+        }
+    }
+
     #[test]
     fn mk_root_matches_both_ends() {
         let ck = rand32();

@@ -166,6 +166,7 @@ mod inbound_tests {
         Record::Offer {
             call_id: id,
             call_nonce: new_call_nonce(),
+            key_share: signal::new_key_share(),
             created_at_ms: 0,
             expires_at_ms: expires,
             capabilities: vec![],
@@ -182,6 +183,7 @@ mod inbound_tests {
         Record::Answer {
             call_id: id,
             call_nonce: new_call_nonce(),
+            key_share: signal::new_key_share(),
             created_at_ms: 0,
             capabilities: Capabilities::default_local().encode(),
         }
@@ -323,6 +325,7 @@ mod inbound_tests {
             Record::Answer {
                 call_id: id,
                 call_nonce: new_call_nonce(),
+                key_share: signal::new_key_share(),
                 created_at_ms: 0,
                 capabilities: vec![1, 0, 0, 0],
             },
@@ -882,6 +885,8 @@ impl<P: CallPorts> CallController<P> {
                             Record::Offer {
                                 call_id: id,
                                 call_nonce: nonce,
+                                // TODO(step B): retain the share for media key derivation.
+                                key_share: signal::new_key_share(),
                                 created_at_ms: now,
                                 expires_at_ms: now.saturating_add(OFFER_TTL_MS),
                                 capabilities,
@@ -890,6 +895,8 @@ impl<P: CallPorts> CallController<P> {
                             Record::Answer {
                                 call_id: id,
                                 call_nonce: nonce,
+                                // TODO(step B): retain the share for media key derivation.
+                                key_share: signal::new_key_share(),
                                 created_at_ms: now,
                                 capabilities,
                             }
@@ -927,7 +934,8 @@ impl<P: CallPorts> CallController<P> {
             },
             _ => return None,
         };
-        record.encode().ok()
+        // The one-shot send path copies the encoded buffer for the sender.
+        record.encode_zeroizing().ok().map(|bytes| bytes.to_vec())
     }
 
     pub fn drain_encoded(&mut self) -> Vec<([u8; 32], Vec<u8>, SendTicket)> {

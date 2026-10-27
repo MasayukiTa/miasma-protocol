@@ -118,6 +118,7 @@ mod tests {
         let record = Record::Offer {
             call_id: new_call_id(),
             call_nonce: new_call_nonce(),
+            key_share: crate::chat::call::signal::new_key_share(),
             created_at_ms: 1,
             expires_at_ms: 2,
             capabilities: Vec::new(),
