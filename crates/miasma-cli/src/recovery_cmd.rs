@@ -41,6 +41,7 @@ use miasma_core::root_key::{
     },
     CreatePolicy,
 };
+use zeroize::Zeroizing;
 
 use crate::i18n::{lang, Lang};
 
@@ -172,13 +173,15 @@ fn prompt_line(msg: &M) -> Result<String> {
 /// Read one secret line (a passphrase or a recovery code). The input is refused
 /// unless standard input is an interactive terminal, so a secret cannot be
 /// piped in and left on a shell history; a one-line note warns that the input
-/// is echoed, as this build has no no-echo terminal dependency.
-fn prompt_secret(msg: &M) -> Result<String> {
+/// is echoed, as this build has no no-echo terminal dependency. The line is
+/// returned in a `Zeroizing<String>` so the secret text is wiped from the heap
+/// when the caller drops it, on every return and error path.
+fn prompt_secret(msg: &M) -> Result<Zeroizing<String>> {
     if !std::io::stdin().is_terminal() {
         bail!("{}", M::NeedTerminal.t());
     }
     println!("{}", M::EchoNote.t());
-    prompt_line(msg)
+    Ok(Zeroizing::new(prompt_line(msg)?))
 }
 
 /// Write `bytes` to `out` without overwriting an existing file, and without
