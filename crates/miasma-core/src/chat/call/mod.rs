@@ -10,6 +10,7 @@
 //! sample ever reaches a log, an error message or a `Debug` output.
 
 pub mod caps;
+pub mod controller;
 pub mod frame;
 pub mod inbound;
 pub mod media;
