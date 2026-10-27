@@ -224,12 +224,15 @@ pub enum SignalError {
     /// The body ended before all required fields were read.
     #[error("the call record was truncated")]
     Truncated,
-    /// A capability field exceeds the fixed maximum.
+    /// A length prefix asked for more than the fixed maximum.
     #[error("a length prefix is too large")]
     Oversized,
     /// Bytes remained after the record was fully decoded.
     #[error("the call record had trailing bytes")]
     TrailingBytes,
+    /// A variable field is longer than the fixed maximum it may encode to.
+    #[error("a signalling field is too long to encode")]
+    TooLong,
 }
 
 impl core::fmt::Debug for SignalError {
@@ -240,6 +243,7 @@ impl core::fmt::Debug for SignalError {
             SignalError::Truncated => "Truncated",
             SignalError::Oversized => "Oversized",
             SignalError::TrailingBytes => "TrailingBytes",
+            SignalError::TooLong => "TooLong",
         })
     }
 }
@@ -277,6 +281,10 @@ impl Record {
     /// fixed-width fields in order, with a 2-byte length prefix for the variable
     /// capability block. This is the plaintext that the envelope AEAD seals; the
     /// envelope wire kind stays `KIND_PAIR`.
+    ///
+    /// Returns [`SignalError::TooLong`] if a capability block exceeds
+    /// [`MAX_CAPABILITIES_LEN`], the largest length the 2-byte prefix may carry
+    /// here; a valid record always encodes.
     pub fn encode(&self) -> Result<Vec<u8>, SignalError> {
         let mut v = Vec::with_capacity(64);
         v.push(self.kind().byte());
@@ -427,7 +435,11 @@ impl Record {
             Kind::Ack => {
                 let call_id = r.arr::<CALL_ID_LEN>().map_err(|_| SignalError::Truncated)?;
                 let acked_kind = r.u8().map_err(|_| SignalError::Truncated)?;
-                Kind::from_byte(acked_kind).ok_or(SignalError::UnknownKind)?;
+                // The acked kind must itself be a defined signalling kind;
+                // reject any other byte the way an unknown record kind is.
+                if Kind::from_byte(acked_kind).is_none() {
+                    return Err(SignalError::UnknownKind);
+                }
                 Record::Ack {
                     call_id,
                     acked_kind,
@@ -452,10 +464,13 @@ impl Record {
     }
 }
 
-/// Write a bounded 2-byte big-endian length prefix and then the bytes.
+/// Write a 2-byte big-endian length prefix and then the bytes. Rejects a block
+/// longer than [`MAX_CAPABILITIES_LEN`] with [`SignalError::TooLong`] so an
+/// over-long block can never truncate into the 2-byte prefix and corrupt the
+/// frame; the decoder enforces the same bound.
 fn put_lp(v: &mut Vec<u8>, bytes: &[u8]) -> Result<(), SignalError> {
     if bytes.len() > MAX_CAPABILITIES_LEN {
-        return Err(SignalError::Oversized);
+        return Err(SignalError::TooLong);
     }
     v.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
     v.extend_from_slice(bytes);
@@ -576,13 +591,13 @@ mod tests {
 
     /// Every kind round-trips: decode(encode(r)) equals r field by field.
     fn assert_round_trips(r: &Record) {
-        let bytes = r.encode().unwrap();
+        let bytes = r.encode().expect("encode of a valid record must succeed");
         let back = Record::decode(&bytes).expect("decode of our own encode must succeed");
         assert_eq!(r.kind(), back.kind());
         assert_eq!(r.call_id(), back.call_id());
         assert_eq!(
             bytes,
-            back.encode().unwrap(),
+            back.encode().expect("re-encode must succeed"),
             "re-encode must be byte-identical"
         );
     }
@@ -707,17 +722,20 @@ mod tests {
         }
     }
 
-    /// An unknown reason code is rejected (reject unknown fields).
+    /// An unknown reason code is rejected (reject unknown fields) for every kind
+    /// that carries a reason.
     #[test]
     fn unknown_reason_rejected() {
-        for record in [sample_reject(), sample_busy(), sample_cancel()] {
-            let mut bytes = record.encode().unwrap();
+        for r in [sample_reject(), sample_busy(), sample_cancel()] {
+            let mut bytes = r.encode().unwrap();
+            // The reason byte is the last byte of a reject/busy/cancel record.
             let last = bytes.len() - 1;
-            bytes[last] = 0x7f;
-            assert!(matches!(
-                Record::decode(&bytes),
-                Err(SignalError::UnknownReason)
-            ));
+            bytes[last] = 0x7f; // not a known reason code
+            assert!(
+                matches!(Record::decode(&bytes), Err(SignalError::UnknownReason)),
+                "unknown reason after a {:?} must be rejected",
+                r.kind()
+            );
         }
     }
 
@@ -739,44 +757,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn oversized_capabilities_rejected_on_encode() {
-        for len in [MAX_CAPABILITIES_LEN + 1, u16::MAX as usize + 1] {
-            let mut offer = sample_offer();
-            let mut answer = sample_answer();
-            if let Record::Offer { capabilities, .. } = &mut offer {
-                *capabilities = vec![0; len];
-            }
-            if let Record::Answer { capabilities, .. } = &mut answer {
-                *capabilities = vec![0; len];
-            }
-            assert!(matches!(offer.encode(), Err(SignalError::Oversized)));
-            assert!(matches!(answer.encode(), Err(SignalError::Oversized)));
-        }
-    }
-
-    #[test]
-    fn unknown_acked_kind_rejected() {
-        let mut bytes = sample_ack().encode().unwrap();
-        *bytes.last_mut().unwrap() = 0x38;
-        assert!(matches!(
-            Record::decode(&bytes),
-            Err(SignalError::UnknownKind)
-        ));
-    }
-
-    #[test]
-    fn oversized_length_suffix_rejected_for_fixed_records() {
-        for record in [sample_busy(), sample_cancel()] {
-            let mut bytes = record.encode().unwrap();
-            bytes.extend_from_slice(&((MAX_CAPABILITIES_LEN as u16) + 1).to_be_bytes());
-            assert!(matches!(
-                Record::decode(&bytes),
-                Err(SignalError::TrailingBytes)
-            ));
-        }
-    }
-
     /// A length prefix at the maximum is accepted.
     #[test]
     fn capability_length_boundary() {
@@ -788,6 +768,58 @@ mod tests {
             capabilities: vec![0xAB; MAX_CAPABILITIES_LEN],
         };
         assert!(Record::decode(&at_max.encode().unwrap()).is_ok());
+    }
+
+    /// A capability block longer than the maximum fails to encode rather than
+    /// truncating into the 2-byte length prefix and corrupting the frame.
+    #[test]
+    fn over_long_capabilities_encode_rejected() {
+        for r in [
+            Record::Offer {
+                call_id: new_call_id(),
+                call_nonce: new_call_nonce(),
+                created_at_ms: 1,
+                expires_at_ms: 2,
+                capabilities: vec![0xAB; MAX_CAPABILITIES_LEN + 1],
+            },
+            Record::Answer {
+                call_id: new_call_id(),
+                call_nonce: new_call_nonce(),
+                created_at_ms: 1,
+                capabilities: vec![0xCD; MAX_CAPABILITIES_LEN + 1],
+            },
+        ] {
+            assert!(matches!(r.encode(), Err(SignalError::TooLong)));
+        }
+    }
+
+    /// An Ack whose acked_kind is not a defined signalling kind is rejected.
+    #[test]
+    fn ack_with_undefined_acked_kind_rejected() {
+        for bad in [0x00u8, 0x01, 0x20, 0x2f, 0x38, 0xff] {
+            assert!(
+                Kind::from_byte(bad).is_none(),
+                "{bad:#x} is not a call kind"
+            );
+            let mut bytes = sample_ack().encode().unwrap();
+            // The acked_kind byte is the last byte of an ack record.
+            let last = bytes.len() - 1;
+            bytes[last] = bad;
+            assert!(
+                matches!(Record::decode(&bytes), Err(SignalError::UnknownKind)),
+                "ack with acked_kind {bad:#x} must be rejected"
+            );
+        }
+        // Every defined kind byte is an acceptable acked_kind.
+        for good in 0x30u8..=0x37 {
+            let mut bytes = sample_ack().encode().unwrap();
+            let last = bytes.len() - 1;
+            bytes[last] = good;
+            assert!(
+                Record::decode(&bytes).is_ok(),
+                "acked_kind {good:#x} must decode"
+            );
+        }
     }
 
     /// call_id and call_nonce differ across two generated offers (OsRng, not a
