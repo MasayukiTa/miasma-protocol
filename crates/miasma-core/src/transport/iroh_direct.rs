@@ -97,6 +97,37 @@ type ChatSlot = Arc<OnceLock<Arc<dyn ChatConnectionHandler>>>;
 /// never involved.
 pub const GROUP_ALPN: &[u8] = b"miasma/chat-group/1";
 
+/// Encrypted real-time call media, served on the same endpoint. A peer built
+/// before calls existed does not list this ALPN, so the QUIC handshake for it is
+/// refused there (see [`IrohClientError::is_alpn_refused`]) and no chat or other
+/// connection is involved: older and newer builds keep interoperating for chat.
+pub const CALL_ALPN: &[u8] = b"miasma/call/1";
+
+/// Serves connections that negotiated [`CALL_ALPN`]. Installed after start with
+/// [`IrohNode::set_call_handler`]; until then such connections are closed.
+///
+/// Implementations must bound the in-flight datagrams and memory they hold for
+/// one connection: the whole connection is handed over here and a handler that
+/// calls `read_datagram` in an unbounded loop is where an unbounded-memory bug
+/// on authenticated-but-hostile input would land (the media handler of a later
+/// PR inherits this contract).
+#[async_trait::async_trait]
+pub trait CallConnectionHandler: Send + Sync {
+    /// Own the connection until done. `conn.remote_id()` is the authenticated
+    /// peer; the handler decides whether it may call us.
+    async fn handle(&self, conn: Connection);
+}
+
+/// Call connections served at once, across all peers. A separate, smaller cap
+/// than the endpoint's `max_connections` so a flood of call dials cannot take
+/// over every server slot and starve chat/push; a call connection that arrives
+/// over this cap is closed cleanly (code 3 `unavailable`) rather than queued, so
+/// no task or buffer is held for it. The datagram handling itself is bounded by
+/// the handler contract above.
+pub const MAX_CALL_CONNECTIONS: usize = 16;
+
+type CallSlot = Arc<OnceLock<Arc<dyn CallConnectionHandler>>>;
+
 /// mDNS service name: keeps Miasma's announcements apart from other iroh apps'.
 const LAN_SERVICE_NAME: &str = "miasma";
 
@@ -323,6 +354,7 @@ pub fn endpoint_builder(
             PUSH_ALPN.to_vec(),
             CHAT_ALPN.to_vec(),
             GROUP_ALPN.to_vec(),
+            CALL_ALPN.to_vec(),
         ]);
     }
     Ok(b)
@@ -380,6 +412,7 @@ pub struct IrohNode {
     push: PushSlot,
     chat: ChatSlot,
     group: ChatSlot,
+    call: CallSlot,
     health: StdMutex<RelayHealth>,
     watchdog: StdMutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
     /// One refresh or rebuild at a time.
@@ -431,6 +464,7 @@ impl IrohNode {
         let push: PushSlot = Arc::new(OnceLock::new());
         let chat: ChatSlot = Arc::new(OnceLock::new());
         let group: ChatSlot = Arc::new(OnceLock::new());
+        let call: CallSlot = Arc::new(OnceLock::new());
         let ctx = Arc::new(ServeCtx {
             store,
             records,
@@ -438,6 +472,8 @@ impl IrohNode {
             push: push.clone(),
             chat: chat.clone(),
             group: group.clone(),
+            call: call.clone(),
+            call_slots: Arc::new(Semaphore::new(MAX_CALL_CONNECTIONS)),
         });
         let server = tokio::spawn(accept_loop(endpoint.clone(), ctx.clone()));
         Ok(Arc::new(Self {
@@ -456,6 +492,7 @@ impl IrohNode {
             watchdog: StdMutex::new(None),
             rebuild_lock: Mutex::new(()),
             group,
+            call,
         }))
     }
 
@@ -613,6 +650,12 @@ impl IrohNode {
         let _ = self.push.set(handler);
     }
 
+    /// Install the handler for [`CALL_ALPN`] connections (once; later calls are
+    /// ignored).
+    pub fn set_call_handler(&self, handler: Arc<dyn CallConnectionHandler>) {
+        let _ = self.call.set(handler);
+    }
+
     /// Dial `target` (an endpoint ID) speaking `alpn`, with this node's relay
     /// hints and connect timeout. The peer that answered is checked to hold
     /// exactly `target`'s key.
@@ -625,6 +668,16 @@ impl IrohNode {
             .client(target)
             .map_err(|e| IrohClientError::Protocol(e.to_string()))?;
         client.dial_alpn(alpn).await
+    }
+
+    /// Dial `target` on [`CALL_ALPN`] and return the open connection. A peer
+    /// that does not list this ALPN refuses the handshake; the resulting error
+    /// answers `true` to [`IrohClientError::is_alpn_refused`] so the caller can
+    /// tell "no call support" from a network failure. The connection carries
+    /// media as unreliable datagrams; the key schedule and framing are a later
+    /// PR's concern.
+    pub async fn connect_call(&self, target: &[u8; 32]) -> Result<Connection, IrohClientError> {
+        self.connect_alpn(target, CALL_ALPN).await
     }
 
     /// The endpoint ID: the Ed25519 public key, equal to the publisher key in a
@@ -821,6 +874,10 @@ struct ServeCtx {
     push: PushSlot,
     chat: ChatSlot,
     group: ChatSlot,
+    call: CallSlot,
+    /// Bounds concurrently-served call connections to [`MAX_CALL_CONNECTIONS`],
+    /// independent of the endpoint-wide connection cap.
+    call_slots: Arc<Semaphore>,
 }
 
 async fn accept_loop(endpoint: Endpoint, ctx: Arc<ServeCtx>) {
@@ -866,6 +923,24 @@ async fn accept_loop(endpoint: Endpoint, ctx: Arc<ServeCtx>) {
             }
             if conn.alpn() == GROUP_ALPN {
                 match ctx.group.get() {
+                    Some(h) => h.handle(conn).await,
+                    None => conn.close(3u32.into(), b"unavailable"),
+                }
+                return;
+            }
+            if conn.alpn() == CALL_ALPN {
+                // Cap the call connections served at once (separate from the
+                // endpoint-wide cap) so a flood of call dials cannot starve the
+                // other ALPNs. Over the cap: close cleanly, hold no slot.
+                let _call_permit = match ctx.call_slots.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        debug!("iroh call endpoint at capacity, refusing a call connection");
+                        conn.close(3u32.into(), b"unavailable");
+                        return;
+                    }
+                };
+                match ctx.call.get() {
                     Some(h) => h.handle(conn).await,
                     None => conn.close(3u32.into(), b"unavailable"),
                 }
