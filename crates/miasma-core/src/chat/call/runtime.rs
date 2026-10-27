@@ -1,5 +1,5 @@
 use super::{
-    controller::{CallController, CallError, CallNotice, CallPorts},
+    controller::{CallController, CallError, CallNotice, CallPorts, MediaGate},
     state::State,
 };
 use crate::chat::{
@@ -23,6 +23,9 @@ impl CallPorts for RuntimePorts {
     }
     fn is_contact_allowed(&self, peer: &[u8; 32]) -> bool {
         matches!(self.0.contacts().by_endpoint(peer), Some(c) if c.allow_send && c.allow_receive)
+    }
+    fn media_gate(&self, peer: &[u8; 32]) -> MediaGate {
+        self.0.media_gate(peer)
     }
 }
 
@@ -202,6 +205,8 @@ fn dial_result(result: Result<(), CallError>) -> CallResponse {
         Ok(()) => CallResponse::Ok,
         Err(CallError::NotAllowed) => CallResponse::Error("not_allowed".into()),
         Err(CallError::Busy) => CallResponse::Error("busy".into()),
+        Err(CallError::NotReady) => CallResponse::Error("not_ready".into()),
+        Err(CallError::Refused) => CallResponse::Error("refused".into()),
     }
 }
 fn state_word(state: State) -> &'static str {
@@ -291,6 +296,12 @@ mod tests {
             matches!(dial_result(Err(CallError::NotAllowed)), CallResponse::Error(s) if s == "not_allowed")
         );
         assert!(matches!(dial_result(Err(CallError::Busy)), CallResponse::Error(s) if s == "busy"));
+        assert!(
+            matches!(dial_result(Err(CallError::NotReady)), CallResponse::Error(s) if s == "not_ready")
+        );
+        assert!(
+            matches!(dial_result(Err(CallError::Refused)), CallResponse::Error(s) if s == "refused")
+        );
         assert_eq!(
             [
                 state_word(State::Idle),
