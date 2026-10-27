@@ -429,6 +429,7 @@ pub fn initialize_node(
             privacy: Default::default(),
             update: miasma_core::update::UpdateConfig::stealth_preset(),
             transfer: Default::default(),
+            call: Default::default(),
         }
     };
     let config = apply_mobile_limits(config, storage_mb, bandwidth_mb_day);
