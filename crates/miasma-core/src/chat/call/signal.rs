@@ -224,7 +224,7 @@ pub enum SignalError {
     /// The body ended before all required fields were read.
     #[error("the call record was truncated")]
     Truncated,
-    /// A length prefix asked for more than the fixed maximum.
+    /// A capability field exceeds the fixed maximum.
     #[error("a length prefix is too large")]
     Oversized,
     /// Bytes remained after the record was fully decoded.
@@ -277,7 +277,7 @@ impl Record {
     /// fixed-width fields in order, with a 2-byte length prefix for the variable
     /// capability block. This is the plaintext that the envelope AEAD seals; the
     /// envelope wire kind stays `KIND_PAIR`.
-    pub fn encode(&self) -> Vec<u8> {
+    pub fn encode(&self) -> Result<Vec<u8>, SignalError> {
         let mut v = Vec::with_capacity(64);
         v.push(self.kind().byte());
         match self {
@@ -292,7 +292,7 @@ impl Record {
                 v.extend_from_slice(call_nonce);
                 v.extend_from_slice(&created_at_ms.to_be_bytes());
                 v.extend_from_slice(&expires_at_ms.to_be_bytes());
-                put_lp(&mut v, capabilities);
+                put_lp(&mut v, capabilities)?;
             }
             Record::Answer {
                 call_id,
@@ -303,7 +303,7 @@ impl Record {
                 v.extend_from_slice(call_id);
                 v.extend_from_slice(call_nonce);
                 v.extend_from_slice(&created_at_ms.to_be_bytes());
-                put_lp(&mut v, capabilities);
+                put_lp(&mut v, capabilities)?;
             }
             Record::Reject {
                 call_id,
@@ -348,7 +348,7 @@ impl Record {
                 v.extend_from_slice(&created_at_ms.to_be_bytes());
             }
         }
-        v
+        Ok(v)
     }
 
     /// Strict decoder. Reads the kind byte, then the fixed-width fields in order,
@@ -427,6 +427,7 @@ impl Record {
             Kind::Ack => {
                 let call_id = r.arr::<CALL_ID_LEN>().map_err(|_| SignalError::Truncated)?;
                 let acked_kind = r.u8().map_err(|_| SignalError::Truncated)?;
+                Kind::from_byte(acked_kind).ok_or(SignalError::UnknownKind)?;
                 Record::Ack {
                     call_id,
                     acked_kind,
@@ -451,12 +452,14 @@ impl Record {
     }
 }
 
-/// Write a 2-byte big-endian length prefix and then the bytes.
-fn put_lp(v: &mut Vec<u8>, bytes: &[u8]) {
-    // Callers only pass small capability blocks; the cast is bounded by
-    // MAX_CAPABILITIES_LEN which fits in u16.
+/// Write a bounded 2-byte big-endian length prefix and then the bytes.
+fn put_lp(v: &mut Vec<u8>, bytes: &[u8]) -> Result<(), SignalError> {
+    if bytes.len() > MAX_CAPABILITIES_LEN {
+        return Err(SignalError::Oversized);
+    }
     v.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
     v.extend_from_slice(bytes);
+    Ok(())
 }
 
 /// Read a 2-byte length prefix and that many bytes, rejecting an oversized
@@ -573,11 +576,15 @@ mod tests {
 
     /// Every kind round-trips: decode(encode(r)) equals r field by field.
     fn assert_round_trips(r: &Record) {
-        let bytes = r.encode();
+        let bytes = r.encode().unwrap();
         let back = Record::decode(&bytes).expect("decode of our own encode must succeed");
         assert_eq!(r.kind(), back.kind());
         assert_eq!(r.call_id(), back.call_id());
-        assert_eq!(bytes, back.encode(), "re-encode must be byte-identical");
+        assert_eq!(
+            bytes,
+            back.encode().unwrap(),
+            "re-encode must be byte-identical"
+        );
     }
 
     #[test]
@@ -603,7 +610,7 @@ mod tests {
             expires_at_ms: 42 + CALL_TTL_SECONDS_DEFAULT * 1000,
             capabilities: vec![9, 8, 7, 6],
         };
-        let back = Record::decode(&rec.encode()).unwrap();
+        let back = Record::decode(&rec.encode().unwrap()).unwrap();
         match back {
             Record::Offer {
                 call_id: id,
@@ -635,7 +642,7 @@ mod tests {
             sample_ack(),
             sample_collide(),
         ] {
-            let full = r.encode();
+            let full = r.encode().unwrap();
             for cut in 0..full.len() {
                 // Any proper prefix must be an Err, not a panic, not an Ok.
                 let res = Record::decode(&full[..cut]);
@@ -663,11 +670,13 @@ mod tests {
             sample_offer(),
             sample_answer(),
             sample_reject(),
+            sample_busy(),
+            sample_cancel(),
             sample_bye(),
             sample_ack(),
             sample_collide(),
         ] {
-            let mut bytes = r.encode();
+            let mut bytes = r.encode().unwrap();
             bytes.push(0x00);
             assert!(
                 matches!(Record::decode(&bytes), Err(SignalError::TrailingBytes)),
@@ -701,14 +710,15 @@ mod tests {
     /// An unknown reason code is rejected (reject unknown fields).
     #[test]
     fn unknown_reason_rejected() {
-        let mut bytes = sample_reject().encode();
-        // The reason byte is the last byte of a reject record.
-        let last = bytes.len() - 1;
-        bytes[last] = 0x7f; // not a known reason code
-        assert!(matches!(
-            Record::decode(&bytes),
-            Err(SignalError::UnknownReason)
-        ));
+        for record in [sample_reject(), sample_busy(), sample_cancel()] {
+            let mut bytes = record.encode().unwrap();
+            let last = bytes.len() - 1;
+            bytes[last] = 0x7f;
+            assert!(matches!(
+                Record::decode(&bytes),
+                Err(SignalError::UnknownReason)
+            ));
+        }
     }
 
     /// An oversized length prefix is rejected before any buffer is sized.
@@ -729,6 +739,44 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn oversized_capabilities_rejected_on_encode() {
+        for len in [MAX_CAPABILITIES_LEN + 1, u16::MAX as usize + 1] {
+            let mut offer = sample_offer();
+            let mut answer = sample_answer();
+            if let Record::Offer { capabilities, .. } = &mut offer {
+                *capabilities = vec![0; len];
+            }
+            if let Record::Answer { capabilities, .. } = &mut answer {
+                *capabilities = vec![0; len];
+            }
+            assert!(matches!(offer.encode(), Err(SignalError::Oversized)));
+            assert!(matches!(answer.encode(), Err(SignalError::Oversized)));
+        }
+    }
+
+    #[test]
+    fn unknown_acked_kind_rejected() {
+        let mut bytes = sample_ack().encode().unwrap();
+        *bytes.last_mut().unwrap() = 0x38;
+        assert!(matches!(
+            Record::decode(&bytes),
+            Err(SignalError::UnknownKind)
+        ));
+    }
+
+    #[test]
+    fn oversized_length_suffix_rejected_for_fixed_records() {
+        for record in [sample_busy(), sample_cancel()] {
+            let mut bytes = record.encode().unwrap();
+            bytes.extend_from_slice(&((MAX_CAPABILITIES_LEN as u16) + 1).to_be_bytes());
+            assert!(matches!(
+                Record::decode(&bytes),
+                Err(SignalError::TrailingBytes)
+            ));
+        }
+    }
+
     /// A length prefix at the maximum is accepted.
     #[test]
     fn capability_length_boundary() {
@@ -739,7 +787,7 @@ mod tests {
             expires_at_ms: 2,
             capabilities: vec![0xAB; MAX_CAPABILITIES_LEN],
         };
-        assert!(Record::decode(&at_max.encode()).is_ok());
+        assert!(Record::decode(&at_max.encode().unwrap()).is_ok());
     }
 
     /// call_id and call_nonce differ across two generated offers (OsRng, not a
@@ -760,7 +808,7 @@ mod tests {
     #[test]
     fn offer_hash_covers_whole_body() {
         let o = sample_offer();
-        let mut body = o.encode();
+        let mut body = o.encode().unwrap();
         let h1 = offer_hash(&body);
         body[1] ^= 0x01; // flip a bit inside the call_id region
         let h2 = offer_hash(&body);
