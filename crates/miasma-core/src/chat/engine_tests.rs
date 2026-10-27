@@ -118,6 +118,7 @@ fn call_dispatch_and_chat_receive() {
         Record::Offer {
             call_id: new_call_id(),
             call_nonce: new_call_nonce(),
+            key_share: super::call::signal::new_key_share(),
             created_at_ms: now,
             expires_at_ms,
             capabilities: vec![1],

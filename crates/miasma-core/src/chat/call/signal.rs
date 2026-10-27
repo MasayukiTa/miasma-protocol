@@ -23,6 +23,7 @@
 
 use rand::RngCore;
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 use super::super::crypto::Rd;
 
@@ -30,6 +31,8 @@ use super::super::crypto::Rd;
 pub const CALL_ID_LEN: usize = 16;
 /// Length of a call nonce (bytes), §3.2.1.
 pub const CALL_NONCE_LEN: usize = 16;
+/// Length of a media key share (bytes).
+pub const KEY_SHARE_LEN: usize = 32;
 /// Length of an offer hash (bytes): SHA-256 of the whole offer body, §2.7.6.
 pub const OFFER_HASH_LEN: usize = 32;
 
@@ -165,6 +168,7 @@ pub enum Record {
     Offer {
         call_id: [u8; CALL_ID_LEN],
         call_nonce: [u8; CALL_NONCE_LEN],
+        key_share: Zeroizing<[u8; KEY_SHARE_LEN]>,
         created_at_ms: u64,
         expires_at_ms: u64,
         /// Media capability block (codec/CBR/DTX/direction). Its SHA-256 over
@@ -176,6 +180,7 @@ pub enum Record {
     Answer {
         call_id: [u8; CALL_ID_LEN],
         call_nonce: [u8; CALL_NONCE_LEN],
+        key_share: Zeroizing<[u8; KEY_SHARE_LEN]>,
         created_at_ms: u64,
         capabilities: Vec<u8>,
     },
@@ -286,18 +291,29 @@ impl Record {
     /// [`MAX_CAPABILITIES_LEN`], the largest length the 2-byte prefix may carry
     /// here; a valid record always encodes.
     pub fn encode(&self) -> Result<Vec<u8>, SignalError> {
-        let mut v = Vec::with_capacity(64);
+        let capacity = match self {
+            Record::Offer { capabilities, .. } | Record::Answer { capabilities, .. } => {
+                if capabilities.len() > MAX_CAPABILITIES_LEN {
+                    return Err(SignalError::TooLong);
+                }
+                1 + CALL_ID_LEN + CALL_NONCE_LEN + KEY_SHARE_LEN + 16 + 2 + capabilities.len()
+            }
+            _ => 64,
+        };
+        let mut v = Vec::with_capacity(capacity);
         v.push(self.kind().byte());
         match self {
             Record::Offer {
                 call_id,
                 call_nonce,
+                key_share,
                 created_at_ms,
                 expires_at_ms,
                 capabilities,
             } => {
                 v.extend_from_slice(call_id);
                 v.extend_from_slice(call_nonce);
+                v.extend_from_slice(key_share.as_ref());
                 v.extend_from_slice(&created_at_ms.to_be_bytes());
                 v.extend_from_slice(&expires_at_ms.to_be_bytes());
                 put_lp(&mut v, capabilities)?;
@@ -305,11 +321,13 @@ impl Record {
             Record::Answer {
                 call_id,
                 call_nonce,
+                key_share,
                 created_at_ms,
                 capabilities,
             } => {
                 v.extend_from_slice(call_id);
                 v.extend_from_slice(call_nonce);
+                v.extend_from_slice(key_share.as_ref());
                 v.extend_from_slice(&created_at_ms.to_be_bytes());
                 put_lp(&mut v, capabilities)?;
             }
@@ -359,6 +377,11 @@ impl Record {
         Ok(v)
     }
 
+    /// Encode into a buffer that is cleared when dropped.
+    pub fn encode_zeroizing(&self) -> Result<Zeroizing<Vec<u8>>, SignalError> {
+        self.encode().map(Zeroizing::new)
+    }
+
     /// Strict decoder. Reads the kind byte, then the fixed-width fields in order,
     /// then the length-prefixed variable part; rejects unknown kinds, unknown
     /// reason codes, oversized length prefixes and trailing bytes; and never
@@ -374,12 +397,17 @@ impl Record {
                 let call_nonce = r
                     .arr::<CALL_NONCE_LEN>()
                     .map_err(|_| SignalError::Truncated)?;
+                let key_share = Zeroizing::new(
+                    r.arr::<KEY_SHARE_LEN>()
+                        .map_err(|_| SignalError::Truncated)?,
+                );
                 let created_at_ms = r.u64().map_err(|_| SignalError::Truncated)?;
                 let expires_at_ms = r.u64().map_err(|_| SignalError::Truncated)?;
                 let capabilities = take_lp(&mut r)?;
                 Record::Offer {
                     call_id,
                     call_nonce,
+                    key_share,
                     created_at_ms,
                     expires_at_ms,
                     capabilities,
@@ -390,11 +418,16 @@ impl Record {
                 let call_nonce = r
                     .arr::<CALL_NONCE_LEN>()
                     .map_err(|_| SignalError::Truncated)?;
+                let key_share = Zeroizing::new(
+                    r.arr::<KEY_SHARE_LEN>()
+                        .map_err(|_| SignalError::Truncated)?,
+                );
                 let created_at_ms = r.u64().map_err(|_| SignalError::Truncated)?;
                 let capabilities = take_lp(&mut r)?;
                 Record::Answer {
                     call_id,
                     call_nonce,
+                    key_share,
                     created_at_ms,
                     capabilities,
                 }
@@ -509,6 +542,12 @@ pub fn new_call_nonce() -> [u8; CALL_NONCE_LEN] {
     core::array::from_fn(|_| (rng.next_u32() & 0xff) as u8)
 }
 
+/// A fresh media key share drawn from the OS random source.
+pub fn new_key_share() -> Zeroizing<[u8; KEY_SHARE_LEN]> {
+    let mut rng = rand::rngs::OsRng;
+    Zeroizing::new(core::array::from_fn(|_| (rng.next_u32() & 0xff) as u8))
+}
+
 /// The `offer_hash` of §2.7.6: SHA-256 over the whole encoded offer body. This
 /// is the value bound into the SAS; it is not stored in the body and not put on
 /// the wire header.
@@ -529,6 +568,7 @@ mod tests {
         Record::Offer {
             call_id: new_call_id(),
             call_nonce: new_call_nonce(),
+            key_share: new_key_share(),
             created_at_ms: 1_700_000_000_000,
             expires_at_ms: 1_700_000_045_000,
             capabilities: vec![0x01, 0x18, 0x00],
@@ -539,6 +579,7 @@ mod tests {
         Record::Answer {
             call_id: new_call_id(),
             call_nonce: new_call_nonce(),
+            key_share: new_key_share(),
             created_at_ms: 1_700_000_001_000,
             capabilities: vec![0x01, 0x18],
         }
@@ -595,12 +636,18 @@ mod tests {
         let bytes = r.encode().expect("encode of a valid record must succeed");
         let back = Record::decode(&bytes).expect("decode of our own encode must succeed");
         assert_eq!(r.kind(), back.kind());
-        assert_eq!(r.call_id(), back.call_id());
-        assert_eq!(
-            bytes,
-            back.encode().expect("re-encode must succeed"),
+        assert!(r.call_id() == back.call_id());
+        assert!(
+            bytes == back.encode().expect("re-encode must succeed"),
             "re-encode must be byte-identical"
         );
+        match (r, &back) {
+            (Record::Offer { key_share: a, .. }, Record::Offer { key_share: b, .. })
+            | (Record::Answer { key_share: a, .. }, Record::Answer { key_share: b, .. }) => {
+                assert!(**a == **b)
+            }
+            _ => {}
+        }
     }
 
     #[test]
@@ -622,6 +669,7 @@ mod tests {
         let rec = Record::Offer {
             call_id,
             call_nonce,
+            key_share: new_key_share(),
             created_at_ms: 42,
             expires_at_ms: 42 + CALL_TTL_SECONDS_DEFAULT * 1000,
             capabilities: vec![9, 8, 7, 6],
@@ -631,12 +679,20 @@ mod tests {
             Record::Offer {
                 call_id: id,
                 call_nonce: nonce,
+                key_share,
                 created_at_ms,
                 expires_at_ms,
                 capabilities,
             } => {
-                assert_eq!(id, call_id);
-                assert_eq!(nonce, call_nonce);
+                assert!(id == call_id);
+                assert!(nonce == call_nonce);
+                if let Record::Offer {
+                    key_share: original,
+                    ..
+                } = &rec
+                {
+                    assert!(*key_share == **original);
+                }
                 assert_eq!(created_at_ms, 42);
                 assert_eq!(expires_at_ms, 42 + 45_000);
                 assert_eq!(capabilities, vec![9, 8, 7, 6]);
@@ -662,6 +718,10 @@ mod tests {
             for cut in 0..full.len() {
                 // Any proper prefix must be an Err, not a panic, not an Ok.
                 let res = Record::decode(&full[..cut]);
+                if matches!(r.kind(), Kind::Offer | Kind::Answer) {
+                    assert!(matches!(res, Err(SignalError::Truncated)));
+                    continue;
+                }
                 assert!(
                     res.is_err(),
                     "prefix of length {cut} of a {:?} must not decode",
@@ -749,6 +809,7 @@ mod tests {
         bytes.push(Kind::Offer.byte());
         bytes.extend_from_slice(&new_call_id());
         bytes.extend_from_slice(&new_call_nonce());
+        bytes.extend_from_slice(new_key_share().as_ref());
         bytes.extend_from_slice(&1u64.to_be_bytes()); // created_at
         bytes.extend_from_slice(&2u64.to_be_bytes()); // expires_at
         bytes.extend_from_slice(&((MAX_CAPABILITIES_LEN as u16) + 1).to_be_bytes());
@@ -764,6 +825,7 @@ mod tests {
         let at_max = Record::Offer {
             call_id: new_call_id(),
             call_nonce: new_call_nonce(),
+            key_share: new_key_share(),
             created_at_ms: 1,
             expires_at_ms: 2,
             capabilities: vec![0xAB; MAX_CAPABILITIES_LEN],
@@ -779,6 +841,7 @@ mod tests {
             Record::Offer {
                 call_id: new_call_id(),
                 call_nonce: new_call_nonce(),
+                key_share: new_key_share(),
                 created_at_ms: 1,
                 expires_at_ms: 2,
                 capabilities: vec![0xAB; MAX_CAPABILITIES_LEN + 1],
@@ -786,6 +849,7 @@ mod tests {
             Record::Answer {
                 call_id: new_call_id(),
                 call_nonce: new_call_nonce(),
+                key_share: new_key_share(),
                 created_at_ms: 1,
                 capabilities: vec![0xCD; MAX_CAPABILITIES_LEN + 1],
             },
@@ -829,11 +893,24 @@ mod tests {
     fn call_id_and_nonce_unique_across_offers() {
         let (id1, nonce1) = (new_call_id(), new_call_nonce());
         let (id2, nonce2) = (new_call_id(), new_call_nonce());
-        assert_ne!(id1, id2, "two generated call ids must differ");
-        assert_ne!(nonce1, nonce2, "two generated call nonces must differ");
+        assert!(id1 != id2, "two generated call ids must differ");
+        assert!(nonce1 != nonce2, "two generated call nonces must differ");
         // call_id and call_nonce are independent draws, so they also differ.
-        assert_ne!(id1, nonce1);
-        assert_ne!(id2, nonce2);
+        assert!(id1 != nonce1);
+        assert!(id2 != nonce2);
+    }
+
+    #[test]
+    fn key_shares_are_nonzero_and_unique() {
+        let mut shares = Vec::new();
+        for _ in 0..100 {
+            let share = new_key_share();
+            assert!(share.iter().any(|byte| *byte != 0));
+            assert!(shares
+                .iter()
+                .all(|previous: &Zeroizing<[u8; KEY_SHARE_LEN]>| **previous != *share));
+            shares.push(share);
+        }
     }
 
     /// The offer_hash depends on the whole offer body: a one-bit change in the
