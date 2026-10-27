@@ -10,6 +10,8 @@
 
 pub mod activity;
 pub mod anchor;
+#[cfg(feature = "pqc")]
+pub mod call;
 pub mod crypto;
 pub mod engine;
 pub mod group;
