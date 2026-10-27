@@ -13,8 +13,10 @@ pub mod caps;
 pub mod controller;
 pub mod frame;
 pub mod inbound;
+pub mod jitter;
 pub mod media;
 pub mod packet;
+pub mod receiver;
 #[cfg(feature = "iroh")]
 pub mod runtime;
 pub mod sender;
