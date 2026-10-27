@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 
 use super::{
     journal::{journal_path, part_path_for, ReceiveJournal},
-    manifest::{SegmentEntry, TransferManifest},
+    manifest::{ManifestV4, SegmentEntry, TransferManifest},
     progress::{TransferProgress, TransferState},
     protection::{PasswordProtection, Protection},
     receive::{run_receive, PieceSource, ReceiveOutcome, ReceiveSpec, RetryConfig},
@@ -65,11 +65,35 @@ struct World {
     mid: ContentId,
     record: DhtRecord,
     manifest: Option<TransferManifest>,
+    manifest_v4: Option<ManifestV4>,
     shares: HashMap<(u32, u16), MiasmaShare>,
 }
 
 fn world(len: usize, k: usize, n: usize, password: Option<&str>) -> World {
     world_with(len, k, n, password, true, None)
+}
+
+/// A Suite2 (v4) transfer: segments are dissolved under the v2 key schedule and
+/// indexed by a [`ManifestV4`]. Used to prove the receive engine dispatches to
+/// the v2 reconstructor when the manifest names Suite2.
+fn world_v4(len: usize, k: usize, n: usize, password: Option<&str>) -> World {
+    world_v4_inner(len, k, n, password, None)
+}
+
+/// A Suite2 (v4) transfer whose segments are sealed under a *lying* MID while
+/// the record and manifest advertise the real one. The receive engine rebuilds
+/// the 49-byte segment AAD from the real MID, so every share is dropped by
+/// coarse verification and the segment cannot be opened: the wrong MID bound
+/// into the v2 AAD is rejected.
+fn world_v4_lying_mid(len: usize, k: usize, n: usize) -> World {
+    let data = content(len);
+    let real_params = DissolutionParams {
+        data_shards: k,
+        total_shards: n,
+    };
+    let real_mid = ContentId::compute(&data, &real_params.to_param_bytes());
+    let lying_mid = ContentId::compute(&data, b"k,n,v=2-a-different-mid");
+    world_v4_inner(len, k, n, None, Some((real_mid, lying_mid)))
 }
 
 /// `with_manifest = false` builds a legacy record. `mid_override` dissolves the
@@ -146,6 +170,109 @@ fn world_with(
         mid,
         record,
         manifest: with_manifest.then_some(manifest),
+        manifest_v4: None,
+        shares,
+    }
+}
+
+/// Build a real Suite2 transfer and index it with a [`ManifestV4`].
+///
+/// `mid_override` is `Some((advertised_mid, seal_mid))` to seal the segments
+/// under `seal_mid` while the record and manifest advertise `advertised_mid`;
+/// `None` seals and advertises the same, real MID.
+fn world_v4_inner(
+    len: usize,
+    k: usize,
+    n: usize,
+    password: Option<&str>,
+    mid_override: Option<(ContentId, ContentId)>,
+) -> World {
+    use super::manifest::{ManifestV4, MANIFEST_VERSION_V4};
+    use crate::dissolution::segment::dissolve_segment_v2_at;
+    use crate::format::ObjectSuite;
+
+    let data = content(len);
+    let params = DissolutionParams {
+        data_shards: k,
+        total_shards: n,
+    };
+    let real_mid = ContentId::compute(&data, &params.to_param_bytes());
+    // The MID the record and manifest advertise, and the MID the segments are
+    // actually sealed under. They differ only for the lying-MID fixture.
+    let (mid, seal_mid) = match mid_override {
+        None => (real_mid.clone(), real_mid),
+        Some((advertised, seal)) => (advertised, seal),
+    };
+
+    let (protection, key) = match password {
+        None => (Protection::None, None),
+        Some(pw) => {
+            let (p, key) = PasswordProtection::create_unchecked(pw, 64, 1, 1).unwrap();
+            (Protection::Password(p), Some(key))
+        }
+    };
+
+    let mut segments = Vec::new();
+    let mut shares = HashMap::new();
+    let mut locations = Vec::new();
+
+    let chunks: Vec<&[u8]> = if data.is_empty() {
+        vec![&data[..]]
+    } else {
+        data.chunks(SEG).collect()
+    };
+    for (i, chunk) in chunks.iter().enumerate() {
+        // Suite2 dissolve. A fixed timestamp keeps the fixture deterministic.
+        // Segments are sealed under `seal_mid` (== `mid` unless the lying-MID
+        // fixture asked otherwise); the manifest and record below advertise
+        // `mid`, so a mismatch is exactly a wrong MID bound into the AAD.
+        let (_, seg_shares) =
+            dissolve_segment_v2_at(chunk, &seal_mid, i as u32, 0, params, key.as_ref(), 1).unwrap();
+        segments
+            .push(SegmentEntry::from_dissolved(i as u32, &seal_mid, chunk, &seg_shares).unwrap());
+        for s in seg_shares {
+            locations.push(ShardLocation {
+                peer_id_bytes: vec![s.slot_index as u8],
+                shard_index: s.slot_index,
+                segment_index: i as u32,
+                addrs: vec![],
+            });
+            shares.insert((i as u32, s.slot_index), s);
+        }
+    }
+
+    let manifest_v4 = ManifestV4 {
+        version: MANIFEST_VERSION_V4,
+        mid: *mid.as_bytes(),
+        publisher: TEST_PUBLISHER,
+        name: None,
+        data_shards: k as u8,
+        total_shards: n as u8,
+        segment_size: SEG as u32,
+        total_bytes: len as u64,
+        protection,
+        segments,
+        suite: ObjectSuite::Suite2.id(),
+        ext: Vec::new(),
+    };
+    manifest_v4
+        .validate()
+        .expect("fixture v4 manifest is valid");
+
+    let record = DhtRecord {
+        mid_digest: *mid.as_bytes(),
+        data_shards: k as u8,
+        total_shards: n as u8,
+        version: 1,
+        locations,
+        published_at: 1,
+    };
+    World {
+        data,
+        mid,
+        record,
+        manifest: None,
+        manifest_v4: Some(manifest_v4),
         shares,
     }
 }
@@ -250,6 +377,7 @@ impl Run {
             mid: w.mid.clone(),
             record: w.record.clone(),
             manifest: w.manifest.clone(),
+            manifest_v4: w.manifest_v4.clone(),
             password: password.map(|p| Zeroizing::new(p.to_owned())),
             output_path: self.out(),
             journal_dir: self.journals(),
@@ -690,6 +818,113 @@ async fn a_record_without_a_manifest_still_transfers_and_resumes() {
         .await
         .unwrap_err();
     assert!(matches!(err, MiasmaError::InvalidManifest(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn a_v4_suite2_multi_segment_transfer_completes_byte_for_byte() {
+    // A real Suite2 transfer indexed by a ManifestV4. The engine must dispatch
+    // reconstruction to retrieve_segment_v2 (not the Suite1 path) purely from
+    // the manifest's suite, and rebuild the plaintext byte-for-byte.
+    let w = world_v4(10_000, 4, 6, None);
+    let src = MockSource::new(&w);
+    let run = Run::new();
+    let p = progress(&w);
+
+    let outcome = run_receive(&src, run.spec(&w, None, false), p.clone())
+        .await
+        .unwrap();
+    assert_eq!(outcome, ReceiveOutcome::Complete { bytes: 10_000 });
+    assert_eq!(std::fs::read(run.out()).unwrap(), w.data);
+    assert!(!part_path_for(&run.out()).exists());
+    assert!(run.journal(&w).is_none());
+}
+
+#[tokio::test]
+async fn a_v4_password_protected_transfer_completes() {
+    // Suite2 with a password: the v2 key schedule seals and the engine unlocks
+    // and reconstructs it end to end.
+    let w = world_v4(6 * SEG + 123, 4, 6, Some("pw"));
+    let src = MockSource::new(&w);
+    let run = Run::new();
+    let p = progress(&w);
+
+    let outcome = run_receive(&src, run.spec(&w, Some("pw"), false), p.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        ReceiveOutcome::Complete {
+            bytes: (6 * SEG + 123) as u64
+        }
+    );
+    assert_eq!(std::fs::read(run.out()).unwrap(), w.data);
+}
+
+#[tokio::test]
+async fn a_v4_tampered_v2_share_is_rejected_by_the_v4_manifest() {
+    // k=4, n=6. Poison every one of segment 1's six shares consistently: each
+    // tampered share re-hashes to its own bytes so coarse verification passes,
+    // but the v4 manifest's per-piece commitment (over the shard, key share,
+    // nonce and length) no longer matches, so every piece is refused and no
+    // spare is left. The segment cannot be rebuilt and the transfer pauses
+    // there rather than opening wrong bytes. This proves a tampered Suite2
+    // share is rejected on the real receive path.
+    let w = world_v4(6_000, 4, 6, None); // 6 segments of SEG bytes
+    let src = MockSource::new(&w);
+    for slot in 0..6u16 {
+        src.junk_consistent.lock().unwrap().insert((1, slot));
+    }
+    let run = Run::new();
+    let p = progress(&w);
+
+    let outcome = run_receive(&src, run.spec(&w, None, false), p.clone())
+        .await
+        .unwrap();
+    match outcome {
+        ReceiveOutcome::Paused { next_segment, .. } => assert_eq!(next_segment, 1),
+        other => panic!("expected Paused at segment 1, got {other:?}"),
+    }
+    assert!(
+        !run.out().exists(),
+        "no output name until the file is whole"
+    );
+    let s = p.snapshot();
+    assert_eq!(s.state, TransferState::Paused);
+    assert!(s.pieces_rejected >= 6, "every tampered share was refused");
+}
+
+#[tokio::test]
+async fn a_v4_wrong_mid_in_the_aad_is_rejected() {
+    // The record and manifest advertise the real MID, but every segment was
+    // sealed under a different MID, so each share's mid prefix and its v4
+    // piece commitment are bound to that other MID. The engine checks each
+    // piece against the advertised MID: coarse verification and the manifest's
+    // per-piece commitment both reject it, no piece is accepted, and the first
+    // segment cannot be filled. The transfer pauses at segment 0 rather than
+    // opening data sealed under a MID it was never meant for -- the wrong MID
+    // bound into the v2 AAD is rejected.
+    let w = world_v4_lying_mid(6_000, 4, 6);
+    let src = MockSource::new(&w);
+    let run = Run::new();
+    let p = progress(&w);
+
+    let outcome = run_receive(&src, run.spec(&w, None, false), p.clone())
+        .await
+        .unwrap();
+    match outcome {
+        ReceiveOutcome::Paused { next_segment, .. } => assert_eq!(next_segment, 0),
+        other => panic!("expected Paused at segment 0, got {other:?}"),
+    }
+    assert!(
+        !run.out().exists(),
+        "no output is written for a rejected transfer"
+    );
+    let s = p.snapshot();
+    assert_eq!(s.state, TransferState::Paused);
+    assert!(
+        s.pieces_rejected >= 1,
+        "shares under the wrong MID are refused"
+    );
 }
 
 #[tokio::test]
