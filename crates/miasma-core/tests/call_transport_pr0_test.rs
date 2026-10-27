@@ -1,17 +1,28 @@
 //! PR0 of the call feature: the transport path only.
 //!
-//! Proves the three things the PR0 gate asks for, and nothing about the media
+//! Proves the things the PR0 gate asks for, and nothing about the media
 //! key schedule (that is PR1):
 //!
 //! * a peer reaches another on the new ALPN `miasma/call/1` and a single
-//!   encrypted dummy travels there and back as an unreliable datagram, both
-//!   when the two endpoints talk directly and when they are pushed onto the
-//!   relay;
+//!   encrypted dummy travels there and back as an unreliable datagram;
 //! * the datagram budget (`max_datagram_size`) holds the 90-byte voice total;
 //! * tampering with the dummy is caught (the AEAD tag fails to open);
 //! * a peer that does not list the call ALPN refuses the handshake cleanly, so
 //!   the caller sees `is_alpn_refused()` and not a generic network failure, and
-//!   that refusal does not disturb the peer's chat ALPN.
+//!   that refusal does not disturb the peer's chat ALPN;
+//! * a flood of call connections over the per-ALPN cap is refused cleanly.
+//!
+//! Path coverage (design §8.2 PR0 row asks for "直結・relay 経由の両方"):
+//! the relay path is exercised by every test here. A *direct* (hole-punched,
+//! non-relayed) path is NOT asserted: the in-process harness builds both nodes
+//! on one local iroh relay with n0 discovery and LAN/mDNS discovery turned off
+//! (`settings()` sets `discovery:false, lan_discovery:false`), so the only
+//! address the two ends learn about each other is the relay URL and there is no
+//! LAN or discovery channel through which a direct socket address could be
+//! exchanged and hole-punched inside one test process. Forcing a genuine direct
+//! path would need two real network endpoints (or a discovery service), which
+//! this harness does not provide. The direct path is therefore recorded as an
+//! OPEN gate item for PR0, not claimed as covered.
 //!
 //! Everything runs against iroh's own local relay test server, so nothing here
 //! contacts n0 or any public service. No fixed secret: every key, nonce and
@@ -28,7 +39,7 @@ use miasma_core::{
     crypto::{decrypt, encrypt},
     transport::iroh_direct::{
         endpoint_builder, CallConnectionHandler, IrohNode, IrohServerLimits, IrohSettings,
-        CALL_ALPN, CHAT_ALPN,
+        CALL_ALPN, CHAT_ALPN, MAX_CALL_CONNECTIONS,
     },
 };
 use tokio::time::timeout;
@@ -126,6 +137,19 @@ async fn roundtrip_dummy(caller: &IrohNode, callee: &IrohNode) -> Vec<u8> {
 
     // A fresh dummy, encrypted under a fresh key: the key is zeroized on drop,
     // the nonce never repeats. Sized so the sealed frame still fits the budget.
+    //
+    // TEST-ONLY DUMMY CRYPTO. `encrypt` here is the AES-256-GCM helper
+    // (`crypto::encrypt`, random key + random internal nonce). The design
+    // forbids the AES-256-GCM path for real media (§4.1.1, ban at
+    // design-call-security-v7f.md:1457): production call media uses the PR1
+    // frame protection, XChaCha20-Poly1305 with the deterministic §4.1.2 nonce
+    // (design-call-security-v7f.md:1449). This is acceptable here only because
+    // (a) PR0 ships no media send path at all — `connect_call` only opens the
+    // connection, nothing in production code can send call data, encrypted or
+    // not; and (b) this uses `encrypt` (fresh internal nonce), never the
+    // nonce-reusable `encrypt_with_key`. Do NOT copy this helper into the
+    // media path: PR1 must seal frames with the XChaCha20-Poly1305 protection,
+    // not this AES-GCM dummy.
     let plaintext: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
     let (sealed, key, nonce) = encrypt(&plaintext).unwrap();
     assert!(
@@ -209,4 +233,82 @@ async fn call_alpn_refused_by_peer_without_it() {
     );
 
     drop(dir);
+}
+
+/// A handler that holds the connection open until told to let go, so a test can
+/// pin the per-ALPN call slots and prove the cap. It reads nothing and buffers
+/// nothing: it only occupies a slot.
+struct HoldConnection {
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl CallConnectionHandler for HoldConnection {
+    async fn handle(&self, conn: Connection) {
+        // Hold the slot until the test releases it, then let the connection drop.
+        self.release.notified().await;
+        conn.close(0u32.into(), b"done");
+    }
+}
+
+/// The server bounds the call connections it serves at once to
+/// `MAX_CALL_CONNECTIONS` (a small constant cap, separate from the endpoint-wide
+/// cap, so a flood of call dials cannot starve the other ALPNs). Once the cap is
+/// full, a further call connection is refused cleanly (closed with code 3
+/// `unavailable`) rather than queued, so the caller's datagram round trip fails
+/// instead of hanging.
+#[tokio::test]
+async fn call_connections_are_capped_and_the_cap_refuses_cleanly() {
+    let relay = relay().await;
+    let (caller, _c) = start_node(&relay.url).await;
+    let (callee, _d) = start_node(&relay.url).await;
+    let release = Arc::new(tokio::sync::Notify::new());
+    callee.set_call_handler(Arc::new(HoldConnection {
+        release: release.clone(),
+    }));
+
+    // Fill every call slot: open `MAX_CALL_CONNECTIONS` connections and keep
+    // them open (the handler holds each until `release`). Each dial connects and
+    // reports a datagram budget, which proves the slot is genuinely occupied by
+    // a served connection rather than refused.
+    let mut held = Vec::new();
+    for _ in 0..MAX_CALL_CONNECTIONS {
+        let conn = caller
+            .connect_call(&callee.endpoint_id())
+            .await
+            .expect("a call connection under the cap is served");
+        assert!(
+            conn.max_datagram_size().is_some(),
+            "a served call connection reports a datagram budget"
+        );
+        held.push(conn);
+    }
+
+    // The server takes a call slot in its accept task, which runs after the dial
+    // returns; give those tasks a moment to occupy all the slots before probing
+    // the cap, so the probe is not racing slot acquisition.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // One more, over the cap: the server closes it cleanly before the handler
+    // runs, so a datagram round trip on it does not complete. The dial's QUIC
+    // handshake may still succeed (the close races the open), so the cap shows
+    // up as the round trip failing, not necessarily as a dial error.
+    let over = caller
+        .connect_call(&callee.endpoint_id())
+        .await
+        .expect("the QUIC handshake itself still completes");
+    let plaintext: Vec<u8> = (0..32).map(|_| rand::random::<u8>()).collect();
+    let (sealed, _key, _nonce) = encrypt(&plaintext).unwrap();
+    let _ = over.send_datagram(bytes_of(&sealed));
+    let echoed = timeout(Duration::from_secs(5), over.read_datagram()).await;
+    assert!(
+        matches!(echoed, Ok(Err(_)) | Err(_)),
+        "a call connection over the cap must not complete a datagram round trip"
+    );
+
+    // Release the held connections so the node can shut down cleanly.
+    release.notify_waiters();
+    for conn in held {
+        conn.close(0u32.into(), b"done");
+    }
 }

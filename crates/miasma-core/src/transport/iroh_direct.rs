@@ -105,12 +105,26 @@ pub const CALL_ALPN: &[u8] = b"miasma/call/1";
 
 /// Serves connections that negotiated [`CALL_ALPN`]. Installed after start with
 /// [`IrohNode::set_call_handler`]; until then such connections are closed.
+///
+/// Implementations must bound the in-flight datagrams and memory they hold for
+/// one connection: the whole connection is handed over here and a handler that
+/// calls `read_datagram` in an unbounded loop is where an unbounded-memory bug
+/// on authenticated-but-hostile input would land (the media handler of a later
+/// PR inherits this contract).
 #[async_trait::async_trait]
 pub trait CallConnectionHandler: Send + Sync {
     /// Own the connection until done. `conn.remote_id()` is the authenticated
     /// peer; the handler decides whether it may call us.
     async fn handle(&self, conn: Connection);
 }
+
+/// Call connections served at once, across all peers. A separate, smaller cap
+/// than the endpoint's `max_connections` so a flood of call dials cannot take
+/// over every server slot and starve chat/push; a call connection that arrives
+/// over this cap is closed cleanly (code 3 `unavailable`) rather than queued, so
+/// no task or buffer is held for it. The datagram handling itself is bounded by
+/// the handler contract above.
+pub const MAX_CALL_CONNECTIONS: usize = 16;
 
 type CallSlot = Arc<OnceLock<Arc<dyn CallConnectionHandler>>>;
 
@@ -459,6 +473,7 @@ impl IrohNode {
             chat: chat.clone(),
             group: group.clone(),
             call: call.clone(),
+            call_slots: Arc::new(Semaphore::new(MAX_CALL_CONNECTIONS)),
         });
         let server = tokio::spawn(accept_loop(endpoint.clone(), ctx.clone()));
         Ok(Arc::new(Self {
@@ -860,6 +875,9 @@ struct ServeCtx {
     chat: ChatSlot,
     group: ChatSlot,
     call: CallSlot,
+    /// Bounds concurrently-served call connections to [`MAX_CALL_CONNECTIONS`],
+    /// independent of the endpoint-wide connection cap.
+    call_slots: Arc<Semaphore>,
 }
 
 async fn accept_loop(endpoint: Endpoint, ctx: Arc<ServeCtx>) {
@@ -911,6 +929,17 @@ async fn accept_loop(endpoint: Endpoint, ctx: Arc<ServeCtx>) {
                 return;
             }
             if conn.alpn() == CALL_ALPN {
+                // Cap the call connections served at once (separate from the
+                // endpoint-wide cap) so a flood of call dials cannot starve the
+                // other ALPNs. Over the cap: close cleanly, hold no slot.
+                let _call_permit = match ctx.call_slots.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        debug!("iroh call endpoint at capacity, refusing a call connection");
+                        conn.close(3u32.into(), b"unavailable");
+                        return;
+                    }
+                };
                 match ctx.call.get() {
                     Some(h) => h.handle(conn).await,
                     None => conn.close(3u32.into(), b"unavailable"),
