@@ -32,6 +32,8 @@ pub trait CallSender {
 pub enum CallError {
     NotAllowed,
     Busy,
+    NotReady,
+    Refused,
 }
 impl core::fmt::Debug for CallError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -66,11 +68,69 @@ fn wire_reason(reason: Option<Reason>) -> u8 {
 /// Host services the controller needs but does not own: the clock and the
 /// contact check. Injected so the controller stays testable and performs no I/O
 /// itself.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MediaGate {
+    Ready,
+    Pending,
+    Refused,
+}
+
 pub trait CallPorts {
     /// Current time in milliseconds on the host clock.
     fn now_ms(&self) -> u64;
     /// Whether `peer` (a 32-byte identity) is a known, allowed contact.
     fn is_contact_allowed(&self, peer: &[u8; 32]) -> bool;
+    fn media_gate(&self, peer: &[u8; 32]) -> MediaGate;
+}
+
+struct OfferPeer {
+    peer: [u8; 32],
+    times: VecDeque<u64>,
+}
+
+struct OfferLimiter {
+    peers: VecDeque<OfferPeer>,
+    total: VecDeque<u64>,
+}
+
+impl OfferLimiter {
+    fn new() -> Self {
+        Self {
+            peers: VecDeque::new(),
+            total: VecDeque::new(),
+        }
+    }
+
+    fn allow(&mut self, peer: [u8; 32], now: u64) -> bool {
+        // A backwards clock retains timestamps, failing closed until time catches up.
+        self.total.retain(|t| now < *t || now - *t < 60_000);
+        for entry in &mut self.peers {
+            entry.times.retain(|t| now < *t || now - *t < 60_000);
+        }
+        let index = self.peers.iter().position(|entry| entry.peer == peer);
+        if self.total.len() >= 10 || index.map_or(false, |i| self.peers[i].times.len() >= 3) {
+            return false;
+        }
+        let mut entry = match index {
+            Some(i) => match self.peers.remove(i) {
+                Some(entry) => entry,
+                None => return false,
+            },
+            None => {
+                if self.peers.len() == 32 {
+                    self.peers.pop_front();
+                }
+                OfferPeer {
+                    peer,
+                    times: VecDeque::new(),
+                }
+            }
+        };
+        entry.times.push_back(now);
+        self.peers.push_back(entry);
+        self.total.push_back(now);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -82,6 +142,7 @@ mod inbound_tests {
     struct Ports {
         now: u64,
         allowed: bool,
+        gate: MediaGate,
     }
     impl CallPorts for Ports {
         fn now_ms(&self) -> u64 {
@@ -90,11 +151,15 @@ mod inbound_tests {
         fn is_contact_allowed(&self, _: &[u8; 32]) -> bool {
             self.allowed
         }
+        fn media_gate(&self, _: &[u8; 32]) -> MediaGate {
+            self.gate
+        }
     }
     fn controller() -> CallController<Ports> {
         CallController::new(Ports {
             now: 1000,
             allowed: true,
+            gate: MediaGate::Ready,
         })
     }
     fn offer(id: [u8; 16], expires: u64) -> Record {
@@ -120,6 +185,51 @@ mod inbound_tests {
             created_at_ms: 0,
             capabilities: Capabilities::default_local().encode(),
         }
+    }
+
+    #[test]
+    fn media_gate_controls_offers() {
+        for (gate, error) in [
+            (MediaGate::Pending, CallError::NotReady),
+            (MediaGate::Refused, CallError::Refused),
+        ] {
+            let mut c = controller();
+            c.ports.gate = gate;
+            assert_eq!(c.dial([1; 32]), Err(error));
+            assert!(c.take_sends().is_empty());
+            c.on_inbound(inbound([1; 32], offer([1; 16], 2000)));
+            assert_eq!(c.status().state, State::Idle);
+            assert!(c.take_notices().0.is_empty());
+            assert_eq!(c.dropped_offers(), 0);
+        }
+        let mut c = controller();
+        assert_eq!(c.dial([1; 32]), Ok(()));
+        assert!(matches!(
+            Record::decode(&c.drain_encoded()[0].1),
+            Ok(Record::Offer { .. })
+        ));
+    }
+
+    #[test]
+    fn offer_limits_are_bounded() {
+        let mut c = controller();
+        for _ in 0..4 {
+            c.on_inbound(inbound([1; 32], offer([1; 16], 100_000)));
+        }
+        assert_eq!(c.dropped_offers(), 1);
+        c.ports.now += 60_000;
+        c.on_inbound(inbound([1; 32], offer([1; 16], 100_000)));
+        assert_eq!(c.dropped_offers(), 1);
+
+        let mut limiter = OfferLimiter::new();
+        for peer in 0..10 {
+            assert!(limiter.allow([peer; 32], 0));
+        }
+        assert!(!limiter.allow([10; 32], 0));
+        for peer in 10..50 {
+            assert!(limiter.allow([peer; 32], u64::from(peer) * 60_000));
+        }
+        assert_eq!(limiter.peers.len(), 32);
     }
 
     struct Sender {
@@ -421,11 +531,13 @@ mod inbound_tests {
     #[test]
     fn effects_are_bounded_and_drop_oldest() {
         let mut c = controller();
-        c.on_inbound(inbound([1; 32], offer(new_call_id(), 100_000)));
+        c.on_inbound(inbound([1; 32], offer(new_call_id(), u64::MAX)));
         let first = new_call_id();
-        c.on_inbound(inbound([2; 32], offer(first, 100_000)));
+        c.on_inbound(inbound([2; 32], offer(first, u64::MAX)));
         for _ in 0..16 {
-            c.on_inbound(inbound([2; 32], offer(new_call_id(), 100_000)));
+            // Step past the offer-rate window so the limiter lets each one in.
+            c.ports.now += 61_000;
+            c.on_inbound(inbound([2; 32], offer(new_call_id(), u64::MAX)));
         }
         let effects = c.take_effects();
         assert_eq!(effects.len(), 16);
@@ -565,6 +677,8 @@ pub struct CallController<P: CallPorts> {
     pending_sends: VecDeque<PendingSend>,
     offer_contexts: VecDeque<OfferContext>,
     entered_at_ms: Option<u64>,
+    offer_limiter: OfferLimiter,
+    dropped_offers: u64,
 }
 
 impl<P: CallPorts> CallController<P> {
@@ -580,6 +694,8 @@ impl<P: CallPorts> CallController<P> {
             pending_sends: VecDeque::with_capacity(16),
             offer_contexts: VecDeque::with_capacity(32),
             entered_at_ms: None,
+            offer_limiter: OfferLimiter::new(),
+            dropped_offers: 0,
         }
     }
 
@@ -596,11 +712,17 @@ impl<P: CallPorts> CallController<P> {
                 expires_at_ms,
                 ..
             } => {
+                let from_contact = self.ports.is_contact_allowed(&peer)
+                    && self.ports.media_gate(&peer) == MediaGate::Ready;
+                if from_contact && !self.offer_limiter.allow(peer, now) {
+                    self.dropped_offers = self.dropped_offers.saturating_add(1);
+                    return;
+                }
                 incoming_context = Some((CallId(call_id), call_nonce));
                 Event::ReceivedOffer(Offer {
                     call_id: CallId(call_id),
                     peer_id: PeerId(peer),
-                    from_contact: self.ports.is_contact_allowed(&peer),
+                    from_contact,
                     expired: expires_at_ms < now,
                     other_call_active: old_state != State::Idle,
                 })
@@ -686,6 +808,11 @@ impl<P: CallPorts> CallController<P> {
         }
         if self.machine.state() != State::Idle {
             return Err(CallError::Busy);
+        }
+        match self.ports.media_gate(&peer) {
+            MediaGate::Ready => {}
+            MediaGate::Pending => return Err(CallError::NotReady),
+            MediaGate::Refused => return Err(CallError::Refused),
         }
         let now = self.ports.now_ms();
         let call_id = CallId(signal::new_call_id());
@@ -899,6 +1026,10 @@ impl<P: CallPorts> CallController<P> {
         }
     }
 
+    pub fn dropped_offers(&self) -> u64 {
+        self.dropped_offers
+    }
+
     /// Take all buffered notices and whether a gap occurred since the last call.
     pub fn take_notices(&mut self) -> (Vec<CallNotice>, bool) {
         self.notices.drain()
@@ -948,6 +1079,9 @@ mod tests {
         }
         fn is_contact_allowed(&self, _peer: &[u8; 32]) -> bool {
             true
+        }
+        fn media_gate(&self, _: &[u8; 32]) -> MediaGate {
+            MediaGate::Ready
         }
     }
 

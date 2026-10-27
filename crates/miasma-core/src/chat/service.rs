@@ -440,6 +440,11 @@ impl ChatService {
         &self.contacts
     }
 
+    #[cfg(feature = "pqc")]
+    pub(crate) fn media_gate(&self, peer: &[u8; 32]) -> super::call::controller::MediaGate {
+        self.core.media_gate(peer)
+    }
+
     pub fn settings(&self) -> &ChatSettings {
         &self.settings
     }

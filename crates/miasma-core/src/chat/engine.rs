@@ -901,6 +901,11 @@ impl ChatCore {
         self.pq.pass(peer, self.session_id(peer), have_text, now)
     }
 
+    pub(crate) fn media_gate(&self, peer: &[u8; 32]) -> super::call::controller::MediaGate {
+        let _g = self.gate();
+        self.pq.media_gate(peer, self.session_id(peer))
+    }
+
     /// Report how the delivery of a hybrid-upgrade record ended.
     pub fn pq_sent(
         &self,

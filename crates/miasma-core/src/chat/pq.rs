@@ -885,6 +885,36 @@ impl PqState {
     // ── Message keys ─────────────────────────────────────────────────────────
 
     /// The hybrid key to seal a message with: only when both sides finished.
+    pub(crate) fn media_gate(
+        &self,
+        peer: &[u8; 32],
+        sid: Option<[u8; 32]>,
+    ) -> super::call::controller::MediaGate {
+        use super::call::controller::MediaGate;
+        let Some(sid) = sid else {
+            return MediaGate::Pending;
+        };
+        let g = self.lock();
+        let stored = if g.peers.contains_key(peer) {
+            None
+        } else {
+            doc::read_document(&self.keys, Label::ChatSessions, &self.path(peer))
+                .ok()
+                .and_then(|bytes| Peer::from_bytes(&bytes))
+        };
+        let Some(p) = g.peers.get(peer).or(stored.as_ref()) else {
+            return MediaGate::Pending;
+        };
+        if p.sid != sid {
+            return MediaGate::Pending;
+        }
+        match p.phase {
+            Phase::Active if p.key.is_some() => MediaGate::Ready,
+            Phase::Classical | Phase::Failed => MediaGate::Refused,
+            _ => MediaGate::Pending,
+        }
+    }
+
     pub fn seal_key(&self, peer: &[u8; 32], sid: &[u8; 32]) -> Option<Zeroizing<[u8; 32]>> {
         self.key_of(peer, sid, |p| p.phase == Phase::Active)
     }
