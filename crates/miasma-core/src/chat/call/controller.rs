@@ -206,6 +206,11 @@ pub struct CallController {
     /// Monotonic token for the current incoming offer.
     pending_token: Option<u64>,
     next_token: u64,
+    /// The sender and call id of the inbound offer currently being handled.
+    /// Set for the duration of one [`on_inbound`] of a `Record::Offer` so a
+    /// `Busy` reply reaches that offer's sender rather than the active peer;
+    /// cleared as soon as the inbound record is fully handled.
+    inbound_offer: Option<([u8; 32], [u8; CALL_ID_LEN])>,
 }
 
 impl Default for CallController {
@@ -227,6 +232,7 @@ impl CallController {
             notice_gap: false,
             pending_token: None,
             next_token: 1,
+            inbound_offer: None,
         }
     }
 
@@ -360,6 +366,11 @@ impl CallController {
             }),
             _ => None,
         };
+        // Record the offer's sender and call id so a Busy reply (built while
+        // applying effects) reaches THIS offer's sender, not the active peer.
+        if let Record::Offer { call_id, .. } = &signal {
+            self.inbound_offer = Some((peer, *call_id));
+        }
         let now = ports.now_ms();
         let t = self.machine.step(event, now);
         let rings = t
@@ -374,6 +385,8 @@ impl CallController {
             }
         }
         self.apply(ports, t.next, t.effects);
+        // The inbound offer has been fully handled; clear the transient context.
+        self.inbound_offer = None;
     }
 
     /// A periodic tick: if an offer has been pending past its TTL while still in
@@ -636,13 +649,14 @@ impl CallController {
         self.active_peer
     }
 
-    /// The sender of the incoming offer a Busy answers. The machine's Busy
-    /// carries the offer's call id; if it matches the stored incoming context
-    /// use that sender, otherwise the active peer (a busy raised while calling).
+    /// The sender of the incoming offer a Busy answers. A Busy is always emitted
+    /// in direct response to an inbound offer, so the sender is the one recorded
+    /// in `inbound_offer` for the offer carrying this call id. Falls back to the
+    /// active peer only if that transient record is somehow absent.
     fn busy_peer(&self, offer_id: &[u8; CALL_ID_LEN]) -> Option<[u8; 32]> {
-        if let Some(c) = &self.incoming {
-            if &c.call_id == offer_id {
-                return Some(c.peer);
+        if let Some((sender, id)) = &self.inbound_offer {
+            if id == offer_id {
+                return Some(*sender);
             }
         }
         self.active_peer
