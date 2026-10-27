@@ -150,6 +150,7 @@ fn receiving_a_long_object_to_a_file_keeps_the_heap_near_one_segment() {
         mid: mid.clone(),
         record,
         manifest: Some(manifest),
+        manifest_v4: None,
         password: None,
         output_path: out.clone(),
         journal_dir: dir.path().join("transfers"),

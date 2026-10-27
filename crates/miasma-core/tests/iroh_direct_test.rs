@@ -668,6 +668,7 @@ async fn a_tampered_piece_is_rejected_reported_and_replaced_by_a_spare() {
                 mid: mid.clone(),
                 record: fetched.record,
                 manifest: fetched.manifest,
+                manifest_v4: None,
                 password: None,
                 output_path: output,
                 journal_dir: work.path().join("transfers"),

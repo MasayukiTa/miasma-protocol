@@ -583,6 +583,7 @@ async fn when_every_piece_is_tampered_nothing_is_written_and_the_transfer_pauses
                 mid: mid.clone(),
                 record,
                 manifest,
+                manifest_v4: None,
                 password: None,
                 output_path: out.clone(),
                 journal_dir: work.path().join("transfers"),
