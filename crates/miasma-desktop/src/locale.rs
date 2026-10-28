@@ -3418,9 +3418,9 @@ call_strings! {
     // The in-call panel itself.
     panel_title, duration_label, mute, unmute, a11y_mute, hang_up, a11y_hang_up,
     // The safety-code area (the code itself is not ready yet, so a neutral line stands in).
-    safety_heading, safety_pending,
+    safety_heading, safety_pending, safety_explain,
     // The always-on line shown while the microphone is in use during a call.
-    mic_in_use,
+    mic_in_use, camera_in_use, screen_sharing,
     // Short notices.
     ended, unavailable,
 }
@@ -3456,7 +3456,11 @@ static CALL_EN: CallStrings = CallStrings {
     a11y_hang_up: "Hang up the call",
     safety_heading: "Safety code",
     safety_pending: "The safety code is not ready yet.",
+    safety_explain:
+        "Read this code to the other person; if you read different codes, end the call.",
     mic_in_use: "Microphone in use",
+    camera_in_use: "Camera in use",
+    screen_sharing: "Screen sharing",
     ended: "Call ended",
     unavailable: "Calls are not available right now.",
 };
@@ -3484,7 +3488,11 @@ static CALL_JA: CallStrings = CallStrings {
     a11y_hang_up: "通話を終了する",
     safety_heading: "安全確認コード",
     safety_pending: "安全確認コードはまだ準備できていません。",
+    safety_explain:
+        "このコードを相手に読み上げ、お互いのコードが違う場合は通話を終了してください。",
     mic_in_use: "マイク使用中",
+    camera_in_use: "カメラ使用中",
+    screen_sharing: "画面共有中",
     ended: "通話を終了しました",
     unavailable: "通話はいま使えない状態です。",
 };
@@ -3513,7 +3521,10 @@ static CALL_ZH_CN: CallStrings = CallStrings {
     a11y_hang_up: "挂断通话",
     safety_heading: "安全码",
     safety_pending: "安全码尚未就绪。",
+    safety_explain: "请向对方读出此安全码；如果双方的安全码不同，请结束通话。",
     mic_in_use: "麦克风使用中",
+    camera_in_use: "摄像头使用中",
+    screen_sharing: "正在共享屏幕",
     ended: "通话已结束",
     unavailable: "通话目前不可用。",
 };

@@ -4216,6 +4216,8 @@ impl MiasmaApp {
                         }
                     });
                 }
+                #[cfg(feature = "pqc")]
+                self.chat.call_screens(ui);
                 // Hairline under the whole bar, edge to edge.
                 let y = ui.min_rect().bottom();
                 ui.painter().hline(

@@ -608,7 +608,7 @@ impl ChatUi {
         #[cfg(feature = "pqc")]
         {
             let call_now = self.clock().now_ms;
-            if self.call.should_poll(call_now) {
+            if self.call.should_poll(call_now) || self.call.discovery_due(call_now) {
                 use miasma_core::chat::ipc::CallRequest;
                 self.call.mark_polled(call_now);
                 self.out.push_back(ChatRequest::Call(CallRequest::Status));
@@ -936,7 +936,16 @@ impl ChatUi {
             ChatResponse::Group(_) => {}
             // Call answers update the call screen state. `now_ms` starts the duration clock.
             #[cfg(feature = "pqc")]
-            ChatResponse::Call(resp) => self.on_call_answer(resp),
+            ChatResponse::Call(resp) => {
+                if let (
+                    ChatRequest::Call(miasma_core::chat::ipc::CallRequest::SetMuted { muted }),
+                    miasma_core::chat::ipc::CallResponse::Ok,
+                ) = (req, &resp)
+                {
+                    self.call.set_muted(*muted);
+                }
+                self.on_call_answer(resp)
+            }
             // Other responses are not handled by the chat screen.
             #[allow(unreachable_patterns)]
             _ => {}
@@ -1272,7 +1281,7 @@ impl ChatUi {
     /// it. Each press is turned into the matching `CallRequest` on the worker queue and the call
     /// state is updated; the token in Accept / Reject is carried in the action, never drawn.
     #[cfg(feature = "pqc")]
-    fn call_screens(&mut self, ui: &mut egui::Ui) {
+    pub fn call_screens(&mut self, ui: &mut egui::Ui) {
         use miasma_core::chat::ipc::CallRequest;
         let cc = crate::locale::call_strings(self.locale);
         let now = self.clock().now_ms;
@@ -1283,7 +1292,9 @@ impl ChatUi {
             }
         }
         if self.call.exists() && self.call.pending_token().is_none() {
-            if let Some(a) = crate::call_ui::in_call_panel(ui, cc, &self.call, None, now) {
+            if let Some(a) =
+                crate::call_ui::in_call_panel(ui, cc, &self.call, self.call.status(), now)
+            {
                 pressed = Some(a);
             }
         }
@@ -1305,8 +1316,9 @@ impl ChatUi {
                 self.call.end();
             }
             Some(CallAction::ToggleMute) => {
-                let muted = self.call.is_muted();
-                self.call.set_muted(!muted);
+                let muted = !self.call.is_muted();
+                self.out
+                    .push_back(ChatRequest::Call(CallRequest::SetMuted { muted }));
             }
             None => {}
         }

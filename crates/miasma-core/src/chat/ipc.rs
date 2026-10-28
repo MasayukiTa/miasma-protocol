@@ -63,6 +63,7 @@ pub enum CallRequest {
     Accept { token: u64 },
     Reject { token: u64 },
     HangUp,
+    SetMuted { muted: bool },
     Status,
     Events { since: u64 },
 }
@@ -90,6 +91,12 @@ pub struct CallStatusDto {
     pub signalling_connected: bool,
     #[serde(default)]
     pub safety_code: Option<String>,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub camera_in_use: bool,
+    #[serde(default)]
+    pub screen_sharing: bool,
     #[serde(default)]
     pub media_frames_sent: u64,
     #[serde(default)]
@@ -632,6 +639,7 @@ mod tests {
             CallRequest::Accept { token: 1 },
             CallRequest::Reject { token: 2 },
             CallRequest::HangUp,
+            CallRequest::SetMuted { muted: true },
             CallRequest::Status,
             CallRequest::Events { since: 3 },
         ];
@@ -648,6 +656,9 @@ mod tests {
                 pending_token: Some(1),
                 signalling_connected: true,
                 safety_code: None,
+                muted: false,
+                camera_in_use: false,
+                screen_sharing: false,
                 media_frames_sent: 0,
                 media_frames_played: 0,
             }),
@@ -670,6 +681,7 @@ mod tests {
         )
         .unwrap();
         assert!(old_status.safety_code.is_none());
+        assert!(!old_status.muted && !old_status.camera_in_use && !old_status.screen_sharing);
         assert_eq!(old_status.media_frames_sent, 0);
         assert_eq!(old_status.media_frames_played, 0);
         let old: ChatRequest = serde_json::from_str(r#"{"Conversations":{}}"#).unwrap();

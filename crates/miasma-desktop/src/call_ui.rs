@@ -91,10 +91,6 @@ pub fn incoming_banner(
 
 /// The in-call panel: the state line, the duration, a mute toggle, hang up, and the safety-code
 /// area. `now_ms` is the current time for the duration. Returns the pressed action, or `None`.
-///
-/// The mute toggle is a UI state flag for now (see [`CallUi::set_muted`]); pressing it returns
-/// [`CallAction::ToggleMute`] and the app flips the flag. The safety code is not ready yet, so
-/// [`call::safety_code_text`] returns `None` and a neutral pending line is shown in its place.
 pub fn in_call_panel(
     ui: &mut egui::Ui,
     c: &CallStrings,
@@ -135,18 +131,26 @@ pub fn in_call_panel(
             }
         });
         ui.add_space(kit::SP_2);
-        // The safety-code area. The real short authentication string is not derived yet, so the
-        // function returns None and a neutral pending line stands in for it.
         ui.add_space(kit::SP_1);
         ui.add(egui::Label::new(
             kit::meta_text(c.safety_heading, pal().muted).strong(),
         ));
-        let line = status
-            .and_then(call::safety_code_text)
-            .unwrap_or_else(|| c.safety_pending.to_owned());
-        kit::paragraph_muted(ui, &line);
+        if let Some(code) = status.and_then(call::safety_code_text) {
+            kit::paragraph_muted(ui, c.safety_explain);
+            ui.add(egui::Label::new(code).selectable(true));
+        } else {
+            kit::paragraph_muted(ui, c.safety_pending);
+        }
         // While connected, the microphone is in use: show the always-on indicator here too, so a
         // person in the panel always sees it.
+        if let Some(status) = status {
+            if status.camera_in_use {
+                kit::notice(ui, Level::Warn, c.camera_in_use);
+            }
+            if status.screen_sharing {
+                kit::notice(ui, Level::Warn, c.screen_sharing);
+            }
+        }
         if state.mic_in_use() {
             ui.add_space(kit::SP_2);
             mic_indicator(ui, c);

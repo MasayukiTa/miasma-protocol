@@ -1,7 +1,7 @@
 //! The call screen, pure part: everything that can be decided without a window.
 //!
 //! The state word to show, the duration text, whether the microphone counts as in use, the
-//! safety-code line (not ready yet), and the small amount of screen state a call needs. The
+//! safety-code line, and the small amount of screen state a call needs. The
 //! window in `call_ui.rs` holds an instance of [`CallUi`] and draws it; this file is unit-tested
 //! headless, the way `chat.rs` is.
 //!
@@ -47,12 +47,8 @@ pub fn duration_text(secs: u64) -> String {
 
 /// The safety code to show for a call, or `None` when there is none to show.
 ///
-/// It is `None` for now: the short authentication string is not derived yet. The panel calls
-/// this and, while it is `None`, shows a neutral "pending" line instead. Kept as a function so
-/// the panel does not change when a real code lands here.
 pub fn safety_code_text(status: &CallStatusDto) -> Option<String> {
-    let _ = status;
-    None
+    status.safety_code.clone()
 }
 
 /// Whether the microphone must be shown as in use: true for a connected call. The indicator this
@@ -71,10 +67,9 @@ pub struct CallUi {
     active: bool,
     /// The daemon's last state word (`calling`, `ringing`, `connected`, ...), or empty.
     state: String,
-    /// The microphone mute flag. Until the audio work lands this is only a UI state flag; it is
-    /// read by [`CallUi::is_muted`] and changed by [`CallUi::set_muted`], the named hook the
-    /// audio layer will drive later.
+    /// Last confirmed mute state.
     muted: bool,
+    status: Option<CallStatusDto>,
     /// When the call connected (ms since the epoch), for the duration. `None` until connected.
     connected_ms: Option<u64>,
     /// The next `since` for call `Events` polling.
@@ -90,6 +85,7 @@ impl Default for CallUi {
             active: false,
             state: String::new(),
             muted: false,
+            status: None,
             connected_ms: None,
             events_since: 0,
             last_poll_ms: 0,
@@ -113,13 +109,12 @@ impl CallUi {
         &self.state
     }
 
-    /// Whether the microphone is muted (UI flag only for now).
+    /// Whether the microphone is muted.
     pub fn is_muted(&self) -> bool {
         self.muted
     }
 
-    /// Set the mute flag. This is the named hook the audio layer will drive once it lands; today
-    /// it only records the UI state so the button and the indicator reflect it.
+    /// Set the confirmed mute flag.
     pub fn set_muted(&mut self, muted: bool) {
         self.muted = muted;
     }
@@ -147,6 +142,8 @@ impl CallUi {
             self.connected_ms = Some(now_ms);
         }
         self.state = status.state.clone();
+        self.muted = status.muted;
+        self.status = Some(status.clone());
     }
 
     /// End the call and forget its state. Called when the daemon reports `idle`, or after we hang
@@ -157,6 +154,11 @@ impl CallUi {
         self.state = String::new();
         self.connected_ms = None;
         self.muted = false;
+        self.status = None;
+    }
+
+    pub fn status(&self) -> Option<&CallStatusDto> {
+        self.status.as_ref()
     }
 
     /// The elapsed seconds of a connected call at `now_ms`, or `None` when not connected yet.
@@ -167,7 +169,7 @@ impl CallUi {
 
     /// Whether the microphone must be shown as in use right now.
     pub fn mic_in_use(&self) -> bool {
-        self.active && mic_in_use(&self.state)
+        self.active && !self.muted && mic_in_use(&self.state)
     }
 
     /// The next `since` to pass to call `Events`.
@@ -184,6 +186,11 @@ impl CallUi {
     /// more often than `POLL_INTERVAL_MS`. Returns false (no busy loop) when nothing waits.
     pub fn should_poll(&self, now_ms: u64) -> bool {
         self.exists() && now_ms.saturating_sub(self.last_poll_ms) >= POLL_INTERVAL_MS
+    }
+
+    /// Whether an idle discovery poll is due.
+    pub fn discovery_due(&self, now_ms: u64) -> bool {
+        !self.exists() && now_ms.saturating_sub(self.last_poll_ms) >= 5_000
     }
 
     /// Record that a poll went out at `now_ms`, so the next one waits a full interval.
@@ -219,6 +226,10 @@ mod tests {
             state: state.to_owned(),
             pending_token: pending,
             signalling_connected: state == "connected",
+            safety_code: None,
+            muted: false,
+            camera_in_use: false,
+            screen_sharing: false,
             media_frames_sent: 0,
             media_frames_played: 0,
         }
@@ -251,11 +262,15 @@ mod tests {
     }
 
     #[test]
-    fn the_safety_code_is_not_ready_yet() {
-        // The real short authentication string is not derived yet, so the function returns None
-        // for every status and the panel shows its neutral pending line.
+    fn safety_code_is_returned_unchanged_or_pending() {
         assert!(safety_code_text(&status("connected", None)).is_none());
         assert!(safety_code_text(&status("ringing", Some(7))).is_none());
+        let mut dto = status("connected", None);
+        dto.safety_code = Some("12345 67890 12345 67890".into());
+        assert_eq!(
+            safety_code_text(&dto).as_deref(),
+            Some("12345 67890 12345 67890")
+        );
     }
 
     #[test]
@@ -292,6 +307,10 @@ mod tests {
         assert_eq!(ui.duration_secs(5_000), Some(0));
         assert_eq!(ui.duration_secs(12_000), Some(7));
         assert!(ui.mic_in_use());
+        assert!(ui.status().is_some());
+        ui.set_muted(true);
+        assert!(!ui.mic_in_use());
+        ui.set_muted(false);
         // A later connected status does not restart the clock.
         ui.on_status(&status("connected", None), 20_000);
         assert_eq!(ui.duration_secs(20_000), Some(15));
@@ -309,11 +328,12 @@ mod tests {
         assert_eq!(ui.state(), "");
         assert!(ui.duration_secs(3_000).is_none());
         assert!(!ui.is_muted());
+        assert!(ui.status().is_none());
         assert!(!ui.mic_in_use());
     }
 
     #[test]
-    fn the_mute_hook_only_records_the_flag_for_now() {
+    fn the_mute_flag_tracks_confirmed_state() {
         let mut ui = CallUi::default();
         ui.on_dial();
         assert!(!ui.is_muted());
@@ -328,6 +348,8 @@ mod tests {
         let mut ui = CallUi::default();
         // No call: never poll, whatever the time.
         assert!(!ui.should_poll(1_000_000));
+        assert!(!ui.discovery_due(4_999));
+        assert!(ui.discovery_due(5_000));
         ui.on_dial();
         // First poll is due immediately (last_poll is 0).
         assert!(ui.should_poll(POLL_INTERVAL_MS));
