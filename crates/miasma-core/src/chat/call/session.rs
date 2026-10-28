@@ -9,6 +9,9 @@ use super::receiver::{MediaReceiver, RecvOutcome};
 use super::sender::MediaSender;
 use zeroize::Zeroizing;
 
+// Bound receive work per tick across all media types, including malformed packets.
+const MAX_RECEIVE_PACKETS_PER_TICK: usize = 64;
+
 pub trait DatagramLink: Send {
     fn max_len(&self) -> usize;
     fn send(&mut self, packet: &[u8]) -> bool;
@@ -153,7 +156,7 @@ impl<S: AudioSource, K: AudioSink, L: DatagramLink> MediaSession<S, K, L> {
                 self.stats.send_failed = self.stats.send_failed.saturating_add(1);
             }
         }
-        for _ in 0..128 {
+        for _ in 0..MAX_RECEIVE_PACKETS_PER_TICK {
             let packet = match self.link.try_recv() {
                 Some(packet) => packet,
                 None => break,
@@ -477,6 +480,27 @@ mod tests {
         assert_eq!(session.tick(0), TickStatus::Running);
         assert_eq!(session.stats().dropped, 64);
         assert_eq!(session.link.flood, 99_936);
+    }
+    #[test]
+    fn mixed_media_flood_shares_receive_budget() {
+        let root = root();
+        let id = id();
+        let (link, _) = LoopLink::pair();
+        let incoming = link.incoming.clone();
+        let mut sender = MediaSender::new(&root, id, Direction::Callee, 0).unwrap();
+        for i in 0..80 {
+            let packet = sender.next_packet_type(0, None, (i % 2) as u8).unwrap();
+            incoming.lock().unwrap().push_back(packet);
+        }
+        let mut session = make(&root, id, Direction::Caller, link);
+        let mut videos = 0;
+        assert_eq!(
+            session.tick_with_video(0, &[], |_, _| videos += 1),
+            TickStatus::Running
+        );
+        assert_eq!(session.stats().received_ok, 32);
+        assert_eq!(videos, 32);
+        assert_eq!(incoming.lock().unwrap().len(), 16);
     }
     #[test]
     fn authentication_failure_stops_and_drops_chains() {
