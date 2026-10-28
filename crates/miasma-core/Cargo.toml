@@ -87,11 +87,15 @@ windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_Foun
 objc2 = "0.6"
 objc2-foundation = "0.3"
 
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+nokhwa = { version = "0.10", default-features = false, features = ["input-msmf"], optional = true }
+
 [features]
-default = ["iroh"]
+default = ["iroh", "call-camera"]
 # `miasma daemon --no-iroh` / `transport.iroh_mode = "off"` switch it off at run
 # time; building without the feature removes the code and the dependency tree.
 iroh = ["dep:iroh", "dep:iroh-mdns-address-lookup"]
+call-camera = ["dep:nokhwa"]
 # Hybrid X25519 + ML-KEM-768 key exchange primitives. Library only; not
 # enabled by default and not used by any live handshake.
 pqc = ["dep:ml-kem", "dep:rand_core_pqc"]
@@ -118,3 +122,4 @@ harness = false
 # `fuzzing` is set by cargo-fuzz (see the fuzz/ directory).
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
