@@ -92,6 +92,10 @@ pub struct CallStatusDto {
     pub media_frames_sent: u64,
     #[serde(default)]
     pub media_frames_played: u64,
+    #[serde(default)]
+    pub media_video_frames_sent: u64,
+    #[serde(default)]
+    pub media_video_frames_played: u64,
 }
 
 #[cfg(feature = "pqc")]
@@ -647,6 +651,8 @@ mod tests {
                 signalling_connected: true,
                 media_frames_sent: 0,
                 media_frames_played: 0,
+                media_video_frames_sent: 0,
+                media_video_frames_played: 0,
             }),
             CallResponse::Events {
                 next: 4,
@@ -668,6 +674,9 @@ mod tests {
         .unwrap();
         assert_eq!(old_status.media_frames_sent, 0);
         assert_eq!(old_status.media_frames_played, 0);
+        // New video counters also default when an old client omits them.
+        assert_eq!(old_status.media_video_frames_sent, 0);
+        assert_eq!(old_status.media_video_frames_played, 0);
         let old: ChatRequest = serde_json::from_str(r#"{"Conversations":{}}"#).unwrap();
         assert!(matches!(old, ChatRequest::Conversations {}));
     }
