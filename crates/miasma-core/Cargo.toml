@@ -78,6 +78,7 @@ rand_core_pqc = { package = "rand_core", version = "0.10", default-features = fa
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"], optional = true }
 zune-jpeg = { version = "0.5.15", default-features = false, optional = true }
+nokhwa = { version = "0.10", default-features = false, features = ["input-msmf", "decoding"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -90,9 +91,6 @@ windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_Foun
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
-
-[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
-nokhwa = { version = "0.10", default-features = false, features = ["input-msmf", "decoding"], optional = true }
 
 [features]
 default = ["iroh", "call-video", "call-camera"]
