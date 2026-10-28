@@ -28,6 +28,8 @@ pub mod session;
 pub mod signal;
 pub mod state;
 pub mod video;
+#[cfg(all(feature = "call-video", any(windows, target_os = "macos")))]
+pub mod video_codec;
 pub mod video_frame;
 
 pub use caps::{negotiate, Capabilities, CapsError, Negotiated};
