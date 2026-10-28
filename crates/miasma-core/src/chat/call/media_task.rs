@@ -578,10 +578,10 @@ mod mute_tests {
             source: ToneSource::new(),
             muted: muted.clone(),
         };
-        assert_eq!(source.next_frame(), Some([0; FRAME_PLAINTEXT_LEN]));
+        assert!(source.next_frame() == Some([0; FRAME_PLAINTEXT_LEN]));
         muted.store(true, Ordering::SeqCst);
-        assert_eq!(source.next_frame(), Some([0; FRAME_PLAINTEXT_LEN]));
+        assert!(source.next_frame() == Some([0; FRAME_PLAINTEXT_LEN]));
         muted.store(false, Ordering::SeqCst);
-        assert_eq!(source.next_frame(), Some([1; FRAME_PLAINTEXT_LEN]));
+        assert!(source.next_frame() == Some([1; FRAME_PLAINTEXT_LEN]));
     }
 }

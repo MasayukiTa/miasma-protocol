@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(frame.len(), FRAME_PLAINTEXT_LEN + TAG_LEN);
         assert_eq!(frame.len(), FRAME_WIRE_LEN - 14);
         let opened = open_frame(&key, &call_id, Direction::Caller, 0, 0, 0x00, &frame).unwrap();
-        assert_eq!(opened.as_slice(), &pt[..]);
+        assert!(opened.as_slice() == &pt[..]);
     }
 
     // §7.1 tamper: flipping any bit of the ciphertext or the tag makes open
@@ -407,7 +407,7 @@ mod tests {
             let mut bad = frame.clone();
             bad[i] ^= 0x01;
             let r = open_frame(&key, &call_id, Direction::Caller, 0, 0, 0x00, &bad);
-            assert_eq!(r.unwrap_err(), MediaError::Authentication);
+            assert!(matches!(r, Err(MediaError::Authentication)));
         }
     }
 
@@ -422,30 +422,30 @@ mod tests {
         // wrong call_id
         let mut other_id = call_id;
         other_id[0] ^= 0x01;
-        assert_eq!(
-            open_frame(&key, &other_id, Direction::Caller, 5, 9, 0x00, &frame).unwrap_err(),
-            MediaError::Authentication
-        );
+        assert!(matches!(
+            open_frame(&key, &other_id, Direction::Caller, 5, 9, 0x00, &frame),
+            Err(MediaError::Authentication)
+        ));
         // wrong direction
-        assert_eq!(
-            open_frame(&key, &call_id, Direction::Callee, 5, 9, 0x00, &frame).unwrap_err(),
-            MediaError::Authentication
-        );
+        assert!(matches!(
+            open_frame(&key, &call_id, Direction::Callee, 5, 9, 0x00, &frame),
+            Err(MediaError::Authentication)
+        ));
         // wrong key_epoch
-        assert_eq!(
-            open_frame(&key, &call_id, Direction::Caller, 6, 9, 0x00, &frame).unwrap_err(),
-            MediaError::Authentication
-        );
+        assert!(matches!(
+            open_frame(&key, &call_id, Direction::Caller, 6, 9, 0x00, &frame),
+            Err(MediaError::Authentication)
+        ));
         // wrong packet_seq
-        assert_eq!(
-            open_frame(&key, &call_id, Direction::Caller, 5, 10, 0x00, &frame).unwrap_err(),
-            MediaError::Authentication
-        );
+        assert!(matches!(
+            open_frame(&key, &call_id, Direction::Caller, 5, 10, 0x00, &frame),
+            Err(MediaError::Authentication)
+        ));
         // wrong media_type
-        assert_eq!(
-            open_frame(&key, &call_id, Direction::Caller, 5, 9, 0x01, &frame).unwrap_err(),
-            MediaError::Authentication
-        );
+        assert!(matches!(
+            open_frame(&key, &call_id, Direction::Caller, 5, 9, 0x01, &frame),
+            Err(MediaError::Authentication)
+        ));
     }
 
     // §7.1: a too-short frame (shorter than the tag) is rejected, not a panic.
@@ -454,7 +454,7 @@ mod tests {
         let key = fresh_msg_key();
         let call_id = rand16();
         let r = open_frame(&key, &call_id, Direction::Caller, 0, 0, 0x00, &[0u8; 4]);
-        assert_eq!(r.unwrap_err(), MediaError::Authentication);
+        assert!(matches!(r, Err(MediaError::Authentication)));
     }
 
     // §7.1: the plaintext must be exactly FRAME_PLAINTEXT_LEN; other lengths
@@ -463,14 +463,14 @@ mod tests {
     fn wrong_plaintext_length_rejected() {
         let key = fresh_msg_key();
         let call_id = rand16();
-        assert_eq!(
-            seal_frame(&key, &call_id, Direction::Caller, 0, 0, 0x00, &[0u8; 59]).unwrap_err(),
-            MediaError::Malformed
-        );
-        assert_eq!(
-            seal_frame(&key, &call_id, Direction::Caller, 0, 0, 0x00, &[0u8; 61]).unwrap_err(),
-            MediaError::Malformed
-        );
+        assert!(matches!(
+            seal_frame(&key, &call_id, Direction::Caller, 0, 0, 0x00, &[0u8; 59]),
+            Err(MediaError::Malformed)
+        ));
+        assert!(matches!(
+            seal_frame(&key, &call_id, Direction::Caller, 0, 0, 0x00, &[0u8; 61]),
+            Err(MediaError::Malformed)
+        ));
     }
 
     // §7.2 replay: a sequence number that was already accepted is rejected as a
@@ -535,7 +535,7 @@ mod tests {
             let opened = w
                 .open_frame_and_accept(&key, &call_id, Direction::Caller, 0, seq, 0x00, f)
                 .unwrap();
-            assert_eq!(opened.as_slice(), &pt[..]);
+            assert!(opened.as_slice() == &pt[..]);
         }
         assert_eq!(w.check(0).unwrap_err(), MediaError::Replay);
     }
@@ -611,10 +611,10 @@ mod tests {
         let ck0 = init_chain_key(&mk).unwrap();
         let (_m0, ck1) = chain_step(&ck0).unwrap();
         let (m1, _ck2) = chain_step(&ck1).unwrap();
-        assert_eq!(
-            open_frame(&m1, &call_id, Direction::Caller, 0, s0, 0x00, &f0).unwrap_err(),
-            MediaError::Authentication
-        );
+        assert!(matches!(
+            open_frame(&m1, &call_id, Direction::Caller, 0, s0, 0x00, &f0),
+            Err(MediaError::Authentication)
+        ));
     }
 
     // §7.4 / §4.3.3: a normal advance bumps the epoch and does not end the

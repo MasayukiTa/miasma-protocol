@@ -1439,7 +1439,7 @@ mod tests {
         let answer = b.drain_encoded().remove(0).1;
         deliver(&mut a, [2; 32], &answer);
         let code = a.safety_code().unwrap();
-        assert_eq!(Some(code.clone()), b.safety_code());
+        assert!(Some(code.clone()) == b.safety_code());
         assert_eq!(code.len(), 23);
         assert_eq!(
             code.as_bytes()
@@ -1451,7 +1451,7 @@ mod tests {
         );
         assert!(code.bytes().all(|b| b == b' ' || b.is_ascii_digit()));
         assert!(a.take_media_roots().is_some());
-        assert_eq!(Some(code), a.safety_code());
+        assert!(Some(code) == a.safety_code());
         a.hang_up();
         assert!(a.safety_code().is_none());
     }
@@ -1470,7 +1470,7 @@ mod tests {
         deliver(&mut a, [2; 32], &answer);
         assert!(a.safety_code().is_some());
         assert!(b.safety_code().is_some());
-        assert_ne!(a.safety_code(), b.safety_code());
+        assert!(a.safety_code() != b.safety_code());
     }
 
     #[test]
@@ -1510,7 +1510,7 @@ mod tests {
         assert_eq!(caller.status().state, State::Connected);
         assert_eq!(callee.status().state, State::Connected);
         assert!(caller.safety_code().is_some());
-        assert_eq!(caller.safety_code(), callee.safety_code());
+        assert!(caller.safety_code() == callee.safety_code());
         let caller_roots = caller.take_media_roots().unwrap();
         let callee_roots = callee.take_media_roots().unwrap();
         assert!(*caller_roots.send == *callee_roots.recv);
@@ -1533,7 +1533,7 @@ mod tests {
         assert_eq!(a.status().state, State::Calling);
         let sends = a.drain_encoded();
         assert_eq!(sends.len(), 1);
-        assert_eq!(sends[0].0, [3; 32]);
+        assert!(sends[0].0 == [3; 32]);
         assert!(
             matches!(Record::decode(&sends[0].1), Ok(Record::Busy { call_id, .. }) if call_id == offered_id)
         );

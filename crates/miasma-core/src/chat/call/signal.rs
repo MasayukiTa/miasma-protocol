@@ -922,7 +922,7 @@ mod tests {
         let h1 = offer_hash(&body);
         body[1] ^= 0x01; // flip a bit inside the call_id region
         let h2 = offer_hash(&body);
-        assert_ne!(h1, h2);
+        assert!(h1 != h2);
         assert_eq!(h1.len(), OFFER_HASH_LEN);
     }
 

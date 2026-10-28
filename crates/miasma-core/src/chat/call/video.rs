@@ -828,7 +828,7 @@ mod tests {
             // The reassembled bitstream is the fragments concatenated, with the
             // final fragment zero-padded; the original is its prefix.
             assert_eq!(got.data.len(), frame.data.len());
-            assert_eq!(&got.data[..frame.data.len()], &frame.data[..]);
+            assert!(&got.data[..frame.data.len()] == &frame.data[..]);
             assert!(got.keyframe);
             assert_eq!(buf.held_bytes(), 0);
         }
