@@ -1,5 +1,5 @@
-//! Transport and task for call media. The audio devices are placeholders.
-#[cfg(all(feature = "call-audio", not(test)))]
+//! Transport and task for call media.
+#[cfg(all(feature = "call-audio", any(windows, target_os = "macos"), not(test)))]
 use super::audio_bridge::{build_real_audio, DeviceSelection};
 use super::{
     controller::{CallController, CallPorts},
@@ -181,8 +181,8 @@ pub(super) fn maybe_start_media<P: CallPorts>(
 }
 
 /// Drive one call's media to completion. Uses the real audio devices when the
-/// `call-audio` feature is on and a device can be opened; otherwise, and in
-/// tests, the pseudo devices. A missing or refused device is absorbed by the
+/// call-audio feature is on, the target is Windows or macOS, and a device
+/// can be opened; otherwise, and in tests, it uses the pseudo devices. A missing or refused device is absorbed by the
 /// real source/sink into receive-only operation, so this returns `false` only
 /// on a fatal session error.
 async fn run_media(
@@ -191,7 +191,7 @@ async fn run_media(
     link: Box<dyn DatagramLink>,
     stats: MediaStats,
 ) -> bool {
-    #[cfg(all(feature = "call-audio", not(test)))]
+    #[cfg(all(feature = "call-audio", any(windows, target_os = "macos"), not(test)))]
     {
         match build_real_audio(&DeviceSelection::default()) {
             Ok((source, sink)) => {
@@ -207,6 +207,7 @@ async fn run_media(
     // `frames_played` is driven from `session.stats().played` in the tick loop
     // below, so both the real sink and the pseudo sink report the same way;
     // the pseudo sink needs no counter of its own.
+    // On other platforms calls carry the pseudo tone pattern rather than voice.
     let source = ToneSource::new();
     let sink = RecordingSink::new();
     drive_session(roots, call_id, source, sink, link, stats).await
@@ -267,7 +268,7 @@ pub trait MuteControl {
 impl MuteControl for ToneSource {
     fn set_muted(&self, _muted: bool) {}
 }
-#[cfg(all(feature = "call-audio", not(test)))]
+#[cfg(all(feature = "call-audio", any(windows, target_os = "macos"), not(test)))]
 impl MuteControl for super::audio_bridge::EncodingSource {
     fn set_muted(&self, muted: bool) {
         super::audio_bridge::EncodingSource::set_muted(self, muted);

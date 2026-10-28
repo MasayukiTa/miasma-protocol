@@ -104,7 +104,7 @@ fn fit_frame(encoded: &[u8]) -> Result<[u8; FRAME_PLAINTEXT_LEN], CodecError> {
     Ok(out)
 }
 
-#[cfg(feature = "call-audio")]
+#[cfg(all(feature = "call-audio", any(windows, target_os = "macos")))]
 mod opus_codec {
     use super::*;
 
@@ -189,7 +189,7 @@ mod opus_codec {
     }
 }
 
-#[cfg(feature = "call-audio")]
+#[cfg(all(feature = "call-audio", any(windows, target_os = "macos")))]
 pub use opus_codec::{OpusDecoder, OpusEncoder};
 
 #[cfg(test)]
@@ -285,9 +285,9 @@ mod tests {
         assert_eq!(concealed.len(), SAMPLES_PER_FRAME);
     }
 
-    // A hardware-free Opus round trip of a sine. Guarded on the feature so it
+    // A hardware-free Opus round trip of a sine. Guarded by platform and feature so it
     // only runs where libopus is linked; it needs no audio device.
-    #[cfg(feature = "call-audio")]
+    #[cfg(all(feature = "call-audio", any(windows, target_os = "macos")))]
     #[test]
     fn opus_round_trip_of_a_sine() {
         let pcm = sine_frame();
