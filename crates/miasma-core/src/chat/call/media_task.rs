@@ -262,148 +262,20 @@ pub(super) fn maybe_start_media<P: CallPorts>(
     let roots = controller.take_media_roots()?;
     Some(tokio::spawn(async move {
         let _camera_guard = CameraGuard(stats.camera_in_use.clone());
-        // Audio-only calls (no camera and no screen) go through `run_media`,
-        // which opens the real capture/playback devices on desktop and falls
-        // back to the pseudo devices elsewhere and in tests. The camera stream
-        // (media_type 0x01) and the screen stream (media_type 0x02) are both
-        // video-like streams gated on negotiated video; when either is present
-        // audio and video are driven together in one tick loop over the pseudo
-        // audio devices. Mute applies on every path through `stats.muted`.
-        if video.is_none() && screen_source.is_none() {
-            let Some(link) = provider.open(peer, roots.direction).await else {
-                return false;
-            };
-            return run_media(roots, *call_id, link, stats, devices).await;
-        }
-        let mut video = video.map(|p| VideoDriver::new(p.source, p.sink, p.encoder, p.decoder, 20));
-        // The screen stream is a second video-like stream (media_type 0x02).
-        // It captures from its own source, discards any decoded frames (no
-        // local screen playback is wired here) and shares the camera codec
-        // size. It is paced far below the camera at the source: a new screen
-        // frame begins only every SCREEN_FRAME_INTERVAL_MS, i.e. 1000 / 5 =
-        // 200 ms for 5 frames per second (the session's packet budget still
-        // caps how many fragments ride per tick). Kept wholly separate from
-        // the camera driver above so the two never mix.
-        const SCREEN_FRAMES_PER_SECOND: u64 = 5;
-        const SCREEN_FRAME_INTERVAL_MS: u64 = 1000 / SCREEN_FRAMES_PER_SECOND;
-        let mut screen = screen_source.map(|src| {
-            VideoDriver::new(
-                src,
-                DiscardVideoSink,
-                PassthroughCodec::new(),
-                PassthroughCodec::new(),
-                SCREEN_FRAME_INTERVAL_MS,
-            )
-        });
         let Some(link) = provider.open(peer, roots.direction).await else {
             return false;
         };
-        // The pseudo tone source is wrapped in `MutedSource` sharing the
-        // runtime's `stats.muted` flag, so a mid-call mute reaches the tick
-        // loop on the video/screen path too; no real audio device is opened
-        // here.
-        let Ok(mut session) = MediaSession::with_roots(
-            &roots.send,
-            &roots.recv,
+        run_media(
+            roots,
             *call_id,
-            roots.direction,
-            crate::chat::engine::now_ms(),
-            MutedSource {
-                source: ToneSource::new(),
-                muted: stats.muted.clone(),
-            },
-            RecordingSink::new(),
             link,
-        ) else {
-            return false;
-        };
-        drop(roots);
-        let mut interval = tokio::time::interval(Duration::from_millis(20));
-        let empty: [[u8; super::media::FRAME_PLAINTEXT_LEN]; 0] = [];
-        loop {
-            interval.tick().await;
-            session
-                .source_mut()
-                .set_muted(stats.muted.load(Ordering::Relaxed));
-            let now = crate::chat::engine::now_ms();
-            // Camera fragments for this tick (empty when the camera is off).
-            let camera_packets = match video.as_mut() {
-                Some(driver) => {
-                    stats
-                        .camera_in_use
-                        .store(driver.source_is_open(), Ordering::Relaxed);
-                    driver.tick(now)
-                }
-                None => {
-                    stats.camera_in_use.store(false, Ordering::Relaxed);
-                    Vec::new()
-                }
-            };
-            // Screen fragments for this tick (empty when not sharing).
-            let screen_packets = match screen.as_mut() {
-                Some(driver) => driver.tick(now),
-                None => Vec::new(),
-            };
-            let camera_slice: &[[u8; super::media::FRAME_PLAINTEXT_LEN]] = if video.is_some() {
-                &camera_packets
-            } else {
-                &empty
-            };
-            let screen_slice: &[[u8; super::media::FRAME_PLAINTEXT_LEN]] = if screen.is_some() {
-                &screen_packets
-            } else {
-                &empty
-            };
-            let status = {
-                let video_ref = &mut video;
-                let screen_ref = &mut screen;
-                session.tick_with_media(
-                    now,
-                    camera_slice,
-                    screen_slice,
-                    |body, time| {
-                        if let Some(driver) = video_ref.as_mut() {
-                            driver.receive(body, time);
-                        }
-                    },
-                    |body, time| {
-                        if let Some(driver) = screen_ref.as_mut() {
-                            driver.receive(body, time);
-                        }
-                    },
-                )
-            };
-            if let Some(driver) = video.as_mut() {
-                // Publish the newest decoded remote picture for the UI. The
-                // camera driver hands back at most one picture per tick; the
-                // store gives it the next counter so a reader sees only new
-                // frames. Only the camera stream feeds the remote view; the
-                // screen stream's decoded frames are discarded.
-                if let Some(picture) = driver.take_decoded_picture() {
-                    let RawPicture {
-                        width,
-                        height,
-                        pixels,
-                    } = picture;
-                    store_remote_frame(&remote_frames, width, height, pixels);
-                }
-                stats
-                    .video_frames_sent
-                    .store(driver.frames_sent, Ordering::Relaxed);
-                stats
-                    .video_frames_played
-                    .store(driver.frames_played, Ordering::Relaxed);
-            }
-            stats
-                .frames_sent
-                .store(session.stats().sent, Ordering::Relaxed);
-            stats
-                .frames_played
-                .store(session.stats().played, Ordering::Relaxed);
-            if status == TickStatus::Fatal {
-                return false;
-            }
-        }
+            stats,
+            devices,
+            video,
+            screen_source,
+            remote_frames,
+        )
+        .await
     }))
 }
 
@@ -418,6 +290,9 @@ async fn run_media(
     link: Box<dyn DatagramLink>,
     stats: MediaStats,
     devices: AudioChoice,
+    video: Option<VideoParts>,
+    screen_source: Option<Box<dyn VideoSource + Send>>,
+    remote_frames: RemoteFrameStore,
 ) -> bool {
     #[cfg(all(feature = "call-audio", any(windows, target_os = "macos"), not(test)))]
     {
@@ -429,7 +304,18 @@ async fn run_media(
         };
         match build_real_audio(&selection) {
             Ok((source, sink)) => {
-                return drive_session(roots, call_id, source, sink, link, stats).await;
+                return drive_session(
+                    roots,
+                    call_id,
+                    source,
+                    sink,
+                    link,
+                    stats,
+                    video,
+                    screen_source,
+                    remote_frames,
+                )
+                .await;
             }
             Err(_) => {
                 // A fatal audio-stack error (for example the codec could not be
@@ -453,7 +339,18 @@ async fn run_media(
         muted: stats.muted.clone(),
     };
     let sink = RecordingSink::new();
-    drive_session(roots, call_id, source, sink, link, stats).await
+    drive_session(
+        roots,
+        call_id,
+        source,
+        sink,
+        link,
+        stats,
+        video,
+        screen_source,
+        remote_frames,
+    )
+    .await
 }
 
 /// The shared 20 ms tick loop, generic over the source and sink so the real
@@ -466,6 +363,9 @@ async fn drive_session<S, K>(
     sink: K,
     link: Box<dyn DatagramLink>,
     stats: MediaStats,
+    video: Option<VideoParts>,
+    screen_source: Option<Box<dyn VideoSource + Send>>,
+    remote_frames: RemoteFrameStore,
 ) -> bool
 where
     S: AudioSource + MuteControl,
@@ -484,13 +384,102 @@ where
         return false;
     };
     drop(roots);
+    let mut video = video.map(|p| VideoDriver::new(p.source, p.sink, p.encoder, p.decoder, 20));
+    // The screen stream is a second video-like stream (media_type 0x02).
+    // It captures from its own source, discards any decoded frames (no
+    // local screen playback is wired here) and shares the camera codec
+    // size. It is paced far below the camera at the source: a new screen
+    // frame begins only every SCREEN_FRAME_INTERVAL_MS, i.e. 1000 / 5 =
+    // 200 ms for 5 frames per second (the session's packet budget still
+    // caps how many fragments ride per tick). Kept wholly separate from
+    // the camera driver above so the two never mix.
+    const SCREEN_FRAMES_PER_SECOND: u64 = 5;
+    const SCREEN_FRAME_INTERVAL_MS: u64 = 1000 / SCREEN_FRAMES_PER_SECOND;
+    let mut screen = screen_source.map(|src| {
+        VideoDriver::new(
+            src,
+            DiscardVideoSink,
+            PassthroughCodec::new(),
+            PassthroughCodec::new(),
+            SCREEN_FRAME_INTERVAL_MS,
+        )
+    });
     let mut interval = tokio::time::interval(Duration::from_millis(20));
+    let empty: [[u8; super::media::FRAME_PLAINTEXT_LEN]; 0] = [];
     loop {
         interval.tick().await;
         session
             .source_mut()
             .set_muted(stats.muted.load(Ordering::Relaxed));
-        let status = session.tick(crate::chat::engine::now_ms());
+        let now = crate::chat::engine::now_ms();
+        // Camera fragments for this tick (empty when the camera is off).
+        let camera_packets = match video.as_mut() {
+            Some(driver) => {
+                stats
+                    .camera_in_use
+                    .store(driver.source_is_open(), Ordering::Relaxed);
+                driver.tick(now)
+            }
+            None => {
+                stats.camera_in_use.store(false, Ordering::Relaxed);
+                Vec::new()
+            }
+        };
+        // Screen fragments for this tick (empty when not sharing).
+        let screen_packets = match screen.as_mut() {
+            Some(driver) => driver.tick(now),
+            None => Vec::new(),
+        };
+        let camera_slice: &[[u8; super::media::FRAME_PLAINTEXT_LEN]] = if video.is_some() {
+            &camera_packets
+        } else {
+            &empty
+        };
+        let screen_slice: &[[u8; super::media::FRAME_PLAINTEXT_LEN]] = if screen.is_some() {
+            &screen_packets
+        } else {
+            &empty
+        };
+        let status = {
+            let video_ref = &mut video;
+            let screen_ref = &mut screen;
+            session.tick_with_media(
+                now,
+                camera_slice,
+                screen_slice,
+                |body, time| {
+                    if let Some(driver) = video_ref.as_mut() {
+                        driver.receive(body, time);
+                    }
+                },
+                |body, time| {
+                    if let Some(driver) = screen_ref.as_mut() {
+                        driver.receive(body, time);
+                    }
+                },
+            )
+        };
+        if let Some(driver) = video.as_mut() {
+            // Publish the newest decoded remote picture for the UI. The
+            // camera driver hands back at most one picture per tick; the
+            // store gives it the next counter so a reader sees only new
+            // frames. Only the camera stream feeds the remote view; the
+            // screen stream's decoded frames are discarded.
+            if let Some(picture) = driver.take_decoded_picture() {
+                let RawPicture {
+                    width,
+                    height,
+                    pixels,
+                } = picture;
+                store_remote_frame(&remote_frames, width, height, pixels);
+            }
+            stats
+                .video_frames_sent
+                .store(driver.frames_sent, Ordering::Relaxed);
+            stats
+                .video_frames_played
+                .store(driver.frames_played, Ordering::Relaxed);
+        }
         stats
             .frames_sent
             .store(session.stats().sent, Ordering::Relaxed);
