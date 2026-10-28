@@ -4,7 +4,9 @@ This beta adds calls between contacts.
 
 ## What's new
 
-- Contacts can make voice calls, with video and screen sharing when available. Calls ring only for contacts. Calls are on by default; to turn them off, set `enabled = false` under `[call]` in `config.toml`.
+- Contacts can make voice calls. The camera works on Windows only, while screen sharing works on Windows and macOS. Calls ring only for contacts. Calls are on by default; to turn them off, set `enabled = false` under `[call]` in `config.toml`.
+- During a call you can turn your camera on or off and start or stop sharing your screen with buttons in the call view. The camera works on Windows only; on macOS the camera button reports that no camera can be used and the call continues without video. Screen sharing works on Windows and macOS. On other platforms a call stays voice-only with test devices.
+- You can choose which microphone and speaker the call uses from the audio-device menu in the call view.
 - Calls are end-to-end protected, with keys exchanged inside the chat channel. During a call, both people can read the 20-digit safety code shown on their screens to each other. If the codes differ, an attacker may be interfering; end the call and check with your contact.
 - An indicator stays visible while the microphone, camera or screen is in use.
 
