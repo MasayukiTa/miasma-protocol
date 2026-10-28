@@ -692,6 +692,9 @@ pub struct CallStatus {
     /// True only in [`State::Connected`]. Means signalling is connected, not
     /// that media flows.
     pub signalling_connected: bool,
+    /// True only when connected and both sides negotiated a common video
+    /// media type. Audio-only calls leave this false.
+    pub negotiated_video: bool,
 }
 
 impl core::fmt::Debug for CallStatus {
@@ -720,6 +723,11 @@ pub struct CallController<P: CallPorts> {
     entered_at_ms: Option<u64>,
     offer_limiter: OfferLimiter,
     dropped_offers: u64,
+    // Whether this endpoint offers video in its own capabilities. Production
+    // always offers the full local set; a test hook may turn it off to drive
+    // an audio-only negotiation from one side. Defaults to true, so the
+    // production dial/accept paths are unchanged.
+    local_offers_video: bool,
 }
 
 impl<P: CallPorts> Drop for CallController<P> {
@@ -747,7 +755,28 @@ impl<P: CallPorts> CallController<P> {
             entered_at_ms: None,
             offer_limiter: OfferLimiter::new(),
             dropped_offers: 0,
+            local_offers_video: true,
         }
+    }
+
+    /// The capability block this endpoint advertises in its offer and answer,
+    /// and uses locally when negotiating. Full local set by default; audio
+    /// only when video has been turned off for this endpoint.
+    fn local_capabilities(&self) -> Capabilities {
+        if self.local_offers_video {
+            Capabilities::default_local()
+        } else {
+            Capabilities::audio_only()
+        }
+    }
+
+    /// Test hook: set whether this endpoint offers video in its capabilities.
+    /// Production never calls this (it leaves video on). Turning it off makes
+    /// this side negotiate audio only, so video is not negotiated even if the
+    /// peer offers it.
+    #[doc(hidden)]
+    pub fn set_local_offers_video(&mut self, offers_video: bool) {
+        self.local_offers_video = offers_video;
     }
 
     /// Apply an authenticated inbound signalling record.
@@ -782,7 +811,7 @@ impl<P: CallPorts> CallController<P> {
                 incoming_context = Some(CallKeys {
                     role: Role::Callee,
                     negotiated: Capabilities::decode(&capabilities).ok().and_then(|remote| {
-                        caps::negotiate(&remote, &Capabilities::default_local()).ok()
+                        caps::negotiate(&remote, &self.local_capabilities()).ok()
                     }),
                     call_id: Zeroizing::new(call_id),
                     caller_share: Some(key_share),
@@ -812,9 +841,8 @@ impl<P: CallPorts> CallController<P> {
             } if self.peer == Some(peer) => {
                 let id = CallId(call_id);
                 if old_state == State::Calling && self.machine.matches_active(&id) {
-                    let negotiated = Capabilities::decode(&capabilities).and_then(|remote| {
-                        caps::negotiate(&Capabilities::default_local(), &remote)
-                    });
+                    let negotiated = Capabilities::decode(&capabilities)
+                        .and_then(|remote| caps::negotiate(&self.local_capabilities(), &remote));
                     if let Err(error) = negotiated {
                         // UserHangUp cancels the pending call and clears the machine.
                         self.apply_event(Event::UserHangUp, now);
@@ -904,7 +932,7 @@ impl<P: CallPorts> CallController<P> {
             key_share: share.clone(),
             created_at_ms: now,
             expires_at_ms: now.saturating_add(OFFER_TTL_MS),
-            capabilities: Capabilities::default_local().encode(),
+            capabilities: self.local_capabilities().encode(),
         };
         let encoded = record.encode_zeroizing().map_err(|_| CallError::NotReady)?;
         self.call_keys = Some(CallKeys {
@@ -937,6 +965,8 @@ impl<P: CallPorts> CallController<P> {
             return false;
         }
         let now = self.ports.now_ms();
+        // Evaluate the local capabilities before borrowing the keys mutably.
+        let local_capabilities = self.local_capabilities().encode();
         let keys = match self.call_keys.as_mut() {
             Some(keys) if keys.role == Role::Callee => keys,
             _ => return false,
@@ -948,7 +978,7 @@ impl<P: CallPorts> CallController<P> {
             call_nonce: nonce,
             key_share: share.clone(),
             created_at_ms: now,
-            capabilities: Capabilities::default_local().encode(),
+            capabilities: local_capabilities,
         };
         let encoded = match record.encode_zeroizing() {
             Ok(bytes) => bytes,
@@ -1300,6 +1330,7 @@ impl<P: CallPorts> CallController<P> {
             state,
             pending_token: self.pending_token,
             signalling_connected: state == State::Connected,
+            negotiated_video: self.negotiated_video(),
         }
     }
 
