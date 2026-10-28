@@ -92,7 +92,7 @@ objc2 = "0.6"
 objc2-foundation = "0.3"
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
-nokhwa = { version = "0.10", default-features = false, features = ["input-msmf"], optional = true }
+nokhwa = { version = "0.10", default-features = false, features = ["input-msmf", "decoding"], optional = true }
 
 [features]
 default = ["iroh", "call-video", "call-camera"]
