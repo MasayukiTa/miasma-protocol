@@ -213,6 +213,10 @@ pub fn device_picker(ui: &mut egui::Ui, c: &CallStrings, state: &CallUi) -> Opti
                         changed = true;
                     }
                 }
+            })
+            .response
+            .widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, c.device_input_label)
             });
     });
 
@@ -241,6 +245,10 @@ pub fn device_picker(ui: &mut egui::Ui, c: &CallStrings, state: &CallUi) -> Opti
                         changed = true;
                     }
                 }
+            })
+            .response
+            .widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, c.device_output_label)
             });
     });
 
