@@ -48,6 +48,7 @@ pub struct SendTicket {
 }
 
 struct PendingSend {
+    id: u64,
     peer: [u8; 32],
     effect: Effect,
     encoded: Option<Zeroizing<Vec<u8>>>,
@@ -693,6 +694,7 @@ pub struct CallController<P: CallPorts> {
     pending_token: Option<u64>,
     next_token: u64,
     pending_sends: VecDeque<PendingSend>,
+    next_send_id: u64,
     call_keys: Option<CallKeys>,
     entered_at_ms: Option<u64>,
     offer_limiter: OfferLimiter,
@@ -716,6 +718,7 @@ impl<P: CallPorts> CallController<P> {
             pending_token: None,
             next_token: 0,
             pending_sends: VecDeque::with_capacity(16),
+            next_send_id: 0,
             call_keys: None,
             entered_at_ms: None,
             offer_limiter: OfferLimiter::new(),
@@ -823,7 +826,7 @@ impl<P: CallPorts> CallController<P> {
             _ => return,
         };
         let is_offer = matches!(event, Event::ReceivedOffer(_));
-        self.apply_event_to(event, now, if is_offer { Some(peer) } else { None });
+        self.apply_event_to(event, now, if is_offer { Some(peer) } else { None }, None);
         if is_offer && old_state != State::Ringing && self.machine.state() == State::Ringing {
             self.peer = Some(peer);
             self.call_keys = incoming_context;
@@ -878,15 +881,16 @@ impl<P: CallPorts> CallController<P> {
             offer_hash: Some(Zeroizing::new(signal::offer_hash(&encoded))),
         });
         self.peer = Some(peer);
-        self.apply_event(
+        let send_id = self.apply_event_with_send(
             Event::UserDial {
                 call_id,
                 peer_id: PeerId(peer),
             },
             now,
+            Control::Offer,
         );
-        if let Some(send) = self.pending_sends.back_mut() {
-            send.encoded = Some(encoded);
+        if let Some(id) = send_id {
+            self.store_encoded(id, encoded);
         }
         Ok(())
     }
@@ -915,9 +919,9 @@ impl<P: CallPorts> CallController<P> {
         };
         keys.callee_share = Some(share);
         keys.callee_nonce = Some(Zeroizing::new(nonce));
-        self.apply_event(Event::UserAccept, now);
-        if let Some(send) = self.pending_sends.back_mut() {
-            send.encoded = Some(encoded);
+        let send_id = self.apply_event_with_send(Event::UserAccept, now, Control::Answer);
+        if let Some(id) = send_id {
+            self.store_encoded(id, encoded);
         }
         true
     }
@@ -932,6 +936,34 @@ impl<P: CallPorts> CallController<P> {
 
     pub fn hang_up(&mut self) {
         self.apply_event(Event::UserHangUp, self.ports.now_ms());
+    }
+
+    fn queue_send(&mut self, peer: [u8; 32], effect: Effect) -> u64 {
+        if self.pending_sends.len() >= 16 {
+            self.pending_sends.pop_front();
+        }
+        while self
+            .pending_sends
+            .iter()
+            .any(|send| send.id == self.next_send_id)
+        {
+            self.next_send_id = self.next_send_id.wrapping_add(1);
+        }
+        let id = self.next_send_id;
+        self.next_send_id = self.next_send_id.wrapping_add(1);
+        self.pending_sends.push_back(PendingSend {
+            id,
+            peer,
+            effect,
+            encoded: None,
+        });
+        id
+    }
+
+    fn store_encoded(&mut self, id: u64, encoded: Zeroizing<Vec<u8>>) {
+        if let Some(send) = self.pending_sends.iter_mut().find(|send| send.id == id) {
+            send.encoded = Some(encoded);
+        }
     }
 
     fn take_sends(&mut self) -> Vec<PendingSend> {
@@ -1037,10 +1069,20 @@ impl<P: CallPorts> CallController<P> {
     }
 
     fn apply_event(&mut self, event: Event, now: u64) {
-        self.apply_event_to(event, now, None);
+        self.apply_event_to(event, now, None, None);
     }
 
-    fn apply_event_to(&mut self, event: Event, now: u64, offer_sender: Option<[u8; 32]>) {
+    fn apply_event_with_send(&mut self, event: Event, now: u64, control: Control) -> Option<u64> {
+        self.apply_event_to(event, now, None, Some(control))
+    }
+
+    fn apply_event_to(
+        &mut self,
+        event: Event,
+        now: u64,
+        offer_sender: Option<[u8; 32]>,
+        expected: Option<Control>,
+    ) -> Option<u64> {
         let old_state = self.machine.state();
         let transition = self.machine.step(event, now);
         if transition.next != old_state {
@@ -1050,7 +1092,24 @@ impl<P: CallPorts> CallController<P> {
                 None
             };
         }
-        for effect in transition.effects {
+        let send_id = self.apply_effects(transition.effects, offer_sender, expected);
+        if transition.next == State::Idle {
+            self.call_keys = None;
+            self.pending_sends.retain(|send| send.encoded.is_none());
+            self.peer = None;
+            self.pending_token = None;
+        }
+        send_id
+    }
+
+    fn apply_effects(
+        &mut self,
+        effects: Vec<Effect>,
+        offer_sender: Option<[u8; 32]>,
+        expected: Option<Control>,
+    ) -> Option<u64> {
+        let mut send_id = None;
+        for effect in effects {
             match effect {
                 Effect::Show(notice) => self.notices.push(CallNotice::from(notice)),
                 Effect::Send { .. } | Effect::Collide { .. } => {
@@ -1066,14 +1125,11 @@ impl<P: CallPorts> CallController<P> {
                         self.peer
                     };
                     if let Some(peer) = recipient {
-                        if self.pending_sends.len() >= 16 {
-                            self.pending_sends.pop_front();
+                        let matches_expected = matches!(effect, Effect::Send { control, .. } if Some(control) == expected);
+                        let id = self.queue_send(peer, effect);
+                        if matches_expected {
+                            send_id = Some(id);
                         }
-                        self.pending_sends.push_back(PendingSend {
-                            peer,
-                            effect,
-                            encoded: None,
-                        });
                     } else {
                         self.notices.push(CallNotice::SendFailed);
                     }
@@ -1085,12 +1141,7 @@ impl<P: CallPorts> CallController<P> {
                 Effect::ReplaceSasInput { .. } => {}
             }
         }
-        if transition.next == State::Idle {
-            self.call_keys = None;
-            self.pending_sends.retain(|send| send.encoded.is_none());
-            self.peer = None;
-            self.pending_token = None;
-        }
+        send_id
     }
 
     pub fn active_peer(&self) -> Option<[u8; 32]> {
@@ -1228,6 +1279,93 @@ mod tests {
             signal: Record::decode(bytes).unwrap(),
             received_at_ms: 1_000,
         });
+    }
+
+    #[test]
+    fn multiple_sends_keep_their_encoded_records() {
+        let mut c = controller();
+        c.peer = Some([1; 32]);
+        let id = CallId(signal::new_call_id());
+        let offer = Record::Offer {
+            call_id: id.0,
+            call_nonce: signal::new_call_nonce(),
+            key_share: signal::new_key_share(),
+            created_at_ms: 1_000,
+            expires_at_ms: 2_000,
+            capabilities: Capabilities::default_local().encode(),
+        }
+        .encode_zeroizing()
+        .unwrap();
+        let answer = Record::Answer {
+            call_id: id.0,
+            call_nonce: signal::new_call_nonce(),
+            key_share: signal::new_key_share(),
+            created_at_ms: 1_000,
+            capabilities: Capabilities::default_local().encode(),
+        }
+        .encode_zeroizing()
+        .unwrap();
+        let offer_id = c
+            .apply_effects(
+                vec![
+                    Effect::Send {
+                        control: Control::Offer,
+                        call_id: id,
+                        reason: None,
+                    },
+                    Effect::Send {
+                        control: Control::Answer,
+                        call_id: id,
+                        reason: None,
+                    },
+                ],
+                None,
+                Some(Control::Offer),
+            )
+            .unwrap();
+        let answer_id = c
+            .pending_sends
+            .iter()
+            .find(|send| {
+                matches!(
+                    send.effect,
+                    Effect::Send {
+                        control: Control::Answer,
+                        ..
+                    }
+                )
+            })
+            .unwrap()
+            .id;
+        c.store_encoded(offer_id, offer);
+        c.store_encoded(answer_id, answer);
+        let sends = c.drain_encoded();
+        assert_eq!(sends.len(), 2);
+        assert!(sends[0].1 != sends[1].1);
+        assert!(matches!(
+            Record::decode(&sends[0].1),
+            Ok(Record::Offer { .. })
+        ));
+        assert!(matches!(
+            Record::decode(&sends[1].1),
+            Ok(Record::Answer { .. })
+        ));
+    }
+
+    #[test]
+    fn unknown_send_id_leaves_queue_unchanged() {
+        let mut c = controller();
+        let id = c.queue_send(
+            [1; 32],
+            Effect::Send {
+                control: Control::Bye,
+                call_id: CallId(signal::new_call_id()),
+                reason: None,
+            },
+        );
+        c.store_encoded(id.wrapping_add(1), Zeroizing::new(vec![1]));
+        assert_eq!(c.pending_sends.len(), 1);
+        assert!(c.pending_sends[0].encoded.is_none());
     }
 
     #[test]
