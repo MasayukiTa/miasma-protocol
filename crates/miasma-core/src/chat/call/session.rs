@@ -53,6 +53,10 @@ pub struct SessionStats {
     pub dropped: u64,
     pub played: u64,
     pub late_dropped: u64,
+    /// Whole video frames fully fragmented and handed to the sender.
+    pub video_frames_sent: u64,
+    /// Whole video frames reassembled and handed to the sink.
+    pub video_frames_played: u64,
 }
 
 pub struct MediaSession<S: AudioSource, K: AudioSink, L: DatagramLink> {
@@ -167,6 +171,19 @@ impl<S: AudioSource, K: AudioSink, L: DatagramLink> MediaSession<S, K, L> {
     pub fn sink(&self) -> &K {
         &self.sink
     }
+    /// Record that one whole video frame was fragmented and handed to the
+    /// sender. The video fragments ride in the same fixed-size packets as
+    /// audio (media_type 0x01); a video driver built on
+    /// [`super::video::SendScheduler`] calls this once per source frame.
+    pub fn note_video_frame_sent(&mut self) {
+        self.stats.video_frames_sent = self.stats.video_frames_sent.saturating_add(1);
+    }
+    /// Record that one whole video frame was reassembled and handed to the
+    /// sink. A video driver built on [`super::video::ReassemblyBuffer`] calls
+    /// this once per completed frame.
+    pub fn note_video_frame_played(&mut self) {
+        self.stats.video_frames_played = self.stats.video_frames_played.saturating_add(1);
+    }
 }
 
 #[cfg(test)]
@@ -175,6 +192,26 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
+
+    // The video counters start at zero and advance only when a video driver
+    // reports a whole frame sent or played; audio ticks never touch them.
+    #[test]
+    fn video_counters_advance_independently() {
+        let root = root();
+        let id = id();
+        let (link, _) = LoopLink::pair();
+        let mut session = make(&root, id, Direction::Caller, link);
+        assert_eq!(session.stats().video_frames_sent, 0);
+        assert_eq!(session.stats().video_frames_played, 0);
+        session.tick(0);
+        assert_eq!(session.stats().video_frames_sent, 0);
+        assert_eq!(session.stats().video_frames_played, 0);
+        session.note_video_frame_sent();
+        session.note_video_frame_sent();
+        session.note_video_frame_played();
+        assert_eq!(session.stats().video_frames_sent, 2);
+        assert_eq!(session.stats().video_frames_played, 1);
+    }
 
     struct LoopLink {
         incoming: Arc<Mutex<VecDeque<Vec<u8>>>>,
