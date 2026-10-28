@@ -53,9 +53,10 @@ pub use signal::{
     OFFER_HASH_LEN,
 };
 pub use video::{
-    EncodedVideoFrame, PassthroughCodec, RawPicture, Reassembled, ReassemblyBuffer,
-    RecordingVideoSink, SendScheduler, TestPatternSource, TickFill, VideoDecoder, VideoEncoder,
-    VideoSink, VideoSource, DEFAULT_REASSEMBLY_BUDGET_BYTES, MAX_VIDEO_FRAGMENTS_PER_TICK,
+    DiscardVideoSink, EncodedVideoFrame, PassthroughCodec, RawPicture, Reassembled,
+    ReassemblyBuffer, RecordingVideoSink, ScreenSourceFactory, SendScheduler, TestPatternSource,
+    TickFill, VideoDecoder, VideoEncoder, VideoSink, VideoSource, DEFAULT_REASSEMBLY_BUDGET_BYTES,
+    MAX_VIDEO_FRAGMENTS_PER_TICK,
 };
 pub use video_frame::{
     fragment_frame, parse_fragment, FragmentHeader, VideoFrameError, FLAG_KEYFRAME,
@@ -64,3 +65,6 @@ pub use video_frame::{
 
 #[cfg(all(feature = "call-camera", any(windows, target_os = "macos")))]
 pub mod video_camera;
+
+#[cfg(all(feature = "call-screen", any(windows, target_os = "macos")))]
+pub mod screen_capture;

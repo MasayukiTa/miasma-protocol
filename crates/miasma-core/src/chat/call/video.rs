@@ -58,6 +58,18 @@ pub trait VideoSource {
     fn next_picture(&mut self) -> Option<RawPicture>;
 }
 
+/// Builds the screen-share [`VideoSource`] on demand. The call runtime holds
+/// one of these and asks it for a source only when the user starts sharing the
+/// screen inside a connected, video-negotiated call; tests inject a fake
+/// factory to drive the screen stream without touching a real display.
+///
+/// Returns `None` when no source can be opened (no display, denied, or the
+/// capture backend is unavailable); the runtime then simply does not start the
+/// screen stream.
+pub trait ScreenSourceFactory: Send + Sync {
+    fn create(&self) -> Option<Box<dyn VideoSource + Send>>;
+}
+
 /// Receives decoded raw pictures for display. A real implementation draws to a
 /// surface; the test implementation records what it received.
 pub trait VideoSink {
@@ -474,6 +486,16 @@ impl VideoSink for RecordingVideoSink {
     fn put_picture(&mut self, picture: &RawPicture) {
         self.pictures.push(picture.clone());
     }
+}
+
+/// A [`VideoSink`] that drops every received picture. Used as the receive end
+/// of the local screen-share driver: outgoing screen frames are what matter,
+/// and nothing locally renders the loopback of our own screen stream.
+#[derive(Default)]
+pub struct DiscardVideoSink;
+
+impl VideoSink for DiscardVideoSink {
+    fn put_picture(&mut self, _picture: &RawPicture) {}
 }
 
 /// A pseudo encoder/decoder pair that carries the raw pixels through as the

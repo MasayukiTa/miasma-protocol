@@ -89,6 +89,11 @@ cpal = { version = "0.15", optional = true }
 # codec sits behind small traits so this one dependency can be swapped for a
 # crate that statically bundles libopus without changing the call code.
 opus = { version = "0.3", optional = true }
+# Primary-display capture for the screen-share stream (src/chat/call/screen_capture.rs).
+# Apache-2.0. `capture_image()` returns `image::RgbaImage` without the optional
+# `image` feature (that feature only adds image/png convenience codecs), so keep
+# default-features off to pull the smallest tree.
+xcap = { version = "0.9", default-features = false, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -103,7 +108,7 @@ objc2 = "0.6"
 objc2-foundation = "0.3"
 
 [features]
-default = ["iroh", "call-audio", "call-video", "call-camera"]
+default = ["iroh", "call-audio", "call-video", "call-camera", "call-screen"]
 # `miasma daemon --no-iroh` / `transport.iroh_mode = "off"` switch it off at run
 # time; building without the feature removes the code and the dependency tree.
 iroh = ["dep:iroh", "dep:iroh-mdns-address-lookup"]
@@ -112,6 +117,7 @@ iroh = ["dep:iroh", "dep:iroh-mdns-address-lookup"]
 call-audio = ["dep:cpal", "dep:opus"]
 call-video = ["dep:jpeg-encoder", "dep:zune-jpeg"]
 call-camera = ["dep:nokhwa"]
+call-screen = ["dep:xcap"]
 # Hybrid X25519 + ML-KEM-768 key exchange primitives. Library only; not
 # enabled by default and not used by any live handshake.
 pqc = ["dep:ml-kem", "dep:rand_core_pqc"]

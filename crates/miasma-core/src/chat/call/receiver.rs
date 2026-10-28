@@ -23,7 +23,12 @@ pub enum DropReason {
 }
 pub enum RecvOutcome {
     Audio(Zeroizing<[u8; FRAME_PLAINTEXT_LEN]>),
+    /// Camera video stream, media_type 0x01.
     Video(Zeroizing<[u8; FRAME_PLAINTEXT_LEN]>),
+    /// Screen share stream, media_type 0x02. Routed to a separate video
+    /// driver by the caller so camera and screen frames never mix, even when
+    /// their frame numbers coincide.
+    Screen(Zeroizing<[u8; FRAME_PLAINTEXT_LEN]>),
     Dropped(DropReason),
     Fatal,
 }
@@ -79,7 +84,10 @@ impl MediaReceiver {
         if header.direction != self.direction {
             return RecvOutcome::Dropped(DropReason::WrongDirection);
         }
-        if header.media_type > 1 {
+        // Accept audio (0x00), camera video (0x01) and screen share (0x02);
+        // screen rides the same media AEAD and key labels as camera and is
+        // separated after authentication by its media_type.
+        if header.media_type > 2 {
             return RecvOutcome::Dropped(DropReason::Malformed);
         }
         if header.key_epoch > self.current.number.saturating_add(MAX_EPOCH_JUMP) {
@@ -174,13 +182,15 @@ impl MediaReceiver {
                     self.fatal = true;
                     return RecvOutcome::Fatal;
                 }
-                let mut audio = Zeroizing::new([0u8; FRAME_PLAINTEXT_LEN]);
-                audio.copy_from_slice(&plain);
+                let mut out = Zeroizing::new([0u8; FRAME_PLAINTEXT_LEN]);
+                out.copy_from_slice(&plain);
                 self.failures = 0;
-                if header.media_type == 1 {
-                    RecvOutcome::Video(audio)
-                } else {
-                    RecvOutcome::Audio(audio)
+                // Route by stream kind so camera and screen frames never mix,
+                // even with equal frame numbers.
+                match header.media_type {
+                    1 => RecvOutcome::Video(out),
+                    2 => RecvOutcome::Screen(out),
+                    _ => RecvOutcome::Audio(out),
                 }
             }
             Err(MediaError::Authentication) => {
@@ -221,6 +231,54 @@ mod tests {
     }
     fn dropped(out: RecvOutcome, reason: DropReason) -> bool {
         matches!(out, RecvOutcome::Dropped(r) if r == reason)
+    }
+
+    #[test]
+    fn screen_stream_round_trips_and_separates_from_camera() {
+        let (mut sender, mut receiver) = setup();
+        // A camera frame (0x01) and a screen frame (0x02) on consecutive
+        // sequence numbers: both authenticate and surface as distinct kinds,
+        // so the caller can route them to separate video drivers.
+        let camera = sender.next_packet_type(0, Some(&[0xAA]), 1).unwrap();
+        let screen = sender.next_packet_type(0, Some(&[0xBB]), 2).unwrap();
+        match receiver.receive(&camera, 0) {
+            RecvOutcome::Video(frame) => assert_eq!(frame[0], 0xAA),
+            _ => panic!("expected camera video"),
+        }
+        match receiver.receive(&screen, 0) {
+            RecvOutcome::Screen(frame) => assert_eq!(frame[0], 0xBB),
+            _ => panic!("expected screen"),
+        }
+        // A screen packet is distinct bytes from a camera packet even if the
+        // stream kind byte is the only visible difference pre-auth: flipping
+        // media_type breaks authentication (it is bound in the AAD). Forge a
+        // fresh, not-yet-received screen packet (its own sequence number) so
+        // the replay window lets it through to authentication; the AAD-bound
+        // media_type then fails the tag check and the frame is AuthFailed.
+        let fresh_screen = sender.next_packet_type(0, Some(&[0xCC]), 2).unwrap();
+        let mut forged = fresh_screen.clone();
+        forged[13] = 1;
+        assert!(dropped(
+            receiver.receive(&forged, 0),
+            DropReason::AuthFailed
+        ));
+    }
+
+    #[test]
+    fn screen_and_camera_interleave_without_replay_confusion() {
+        // Camera and screen share one sequence space (one nonce per seq), so a
+        // long interleaved run never trips the replay window: each seq is used
+        // once, by exactly one stream kind.
+        let (mut sender, mut receiver) = setup();
+        for i in 0..200u16 {
+            let kind = if i % 2 == 0 { 1 } else { 2 };
+            let packet = sender.next_packet_type(0, Some(&[i as u8]), kind).unwrap();
+            match (kind, receiver.receive(&packet, 0)) {
+                (1, RecvOutcome::Video(frame)) => assert_eq!(frame[0], i as u8),
+                (2, RecvOutcome::Screen(frame)) => assert_eq!(frame[0], i as u8),
+                _ => panic!("stream kind mismatch at {i}"),
+            }
+        }
     }
 
     #[test]
