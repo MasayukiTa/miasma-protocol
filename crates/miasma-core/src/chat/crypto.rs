@@ -78,6 +78,8 @@ pub mod label {
     /// Call message-key material; the call-only counterpart of `MESSAGE`,
     /// never reused for chat.
     pub const CALL_MESSAGE: &[u8] = b"miasma/call/v1/msgkey";
+    /// Call short authentication string domain.
+    pub const CALL_SAS: &[u8] = b"miasma/call/v1/sas";
 }
 
 pub const ENVELOPE_VERSION: u8 = 1;

@@ -22,6 +22,7 @@ pub mod packet;
 pub mod receiver;
 #[cfg(feature = "iroh")]
 pub mod runtime;
+pub mod sas;
 pub mod sender;
 pub mod session;
 pub mod signal;
