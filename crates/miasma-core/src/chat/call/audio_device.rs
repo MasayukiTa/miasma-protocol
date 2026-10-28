@@ -21,7 +21,8 @@
 use super::codec::{CODEC_SAMPLE_RATE, SAMPLES_PER_FRAME};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread::{self, JoinHandle};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
@@ -236,53 +237,97 @@ fn resample_mono(input: &[i16], from: u32, to: u32) -> Vec<i16> {
     out
 }
 
+// The setup closure and stream stay on the same thread until shutdown.
+struct AudioThread {
+    stop: mpsc::Sender<()>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for AudioThread {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn start_audio_thread<T: Send + 'static>(
+    setup: impl FnOnce() -> Result<(cpal::Stream, T), AudioDeviceError> + Send + 'static,
+) -> Result<(AudioThread, T), AudioDeviceError> {
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let handle = thread::Builder::new()
+        .spawn(move || match setup() {
+            Ok((stream, data)) => {
+                if ready_tx.send(Ok(data)).is_ok() {
+                    let _ = stop_rx.recv();
+                }
+                drop(stream);
+            }
+            Err(error) => {
+                let _ = ready_tx.send(Err(error));
+            }
+        })
+        .map_err(|_| AudioDeviceError::Backend)?;
+    let worker = AudioThread {
+        stop: stop_tx,
+        handle: Some(handle),
+    };
+    let data = ready_rx.recv().map_err(|_| AudioDeviceError::Backend)??;
+    Ok((worker, data))
+}
 /// Captures the default (or named) input device, down-mixes to mono and
 /// resamples to the codec rate, and hands the tick whole 20 ms frames.
 pub struct CpalAudioInput {
     ring: Arc<SampleRing>,
     muted: Arc<AtomicBool>,
-    _stream: cpal::Stream,
+    _worker: AudioThread,
 }
 
 impl CpalAudioInput {
     pub fn new(choice: &DeviceChoice) -> Result<Self, AudioDeviceError> {
-        let host = cpal::default_host();
-        let device = pick_input(&host, choice)?;
-        let supported = device.default_input_config().map_err(map_config_error)?;
-        let device_rate = supported.sample_rate().0;
-        let channels = supported.channels() as usize;
-        let ring = Arc::new(SampleRing::new(RING_CAPACITY_SAMPLES));
-        let muted = Arc::new(AtomicBool::new(false));
-        let ring_cb = ring.clone();
-        let muted_cb = muted.clone();
-        // Mono scratch reused across callbacks lives inside the closure.
-        let config: cpal::StreamConfig = supported.config();
-        let err_fn = |_err: cpal::StreamError| {};
-        let stream = device
-            .build_input_stream(
-                &config,
-                move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                    // Never block: a short critical section pushing samples.
-                    let mut mono = Vec::with_capacity(data.len() / channels.max(1) + 1);
-                    down_mix(data, channels, &mut mono);
-                    let at_codec = resample_mono(&mono, device_rate, CODEC_SAMPLE_RATE);
-                    if muted_cb.load(Ordering::Relaxed) {
-                        // Push silence of the same length so timing holds.
-                        let silence = vec![0i16; at_codec.len()];
-                        let _ = ring_cb.push(&silence);
-                    } else {
-                        let _ = ring_cb.push(&at_codec);
-                    }
-                },
-                err_fn,
-                None,
-            )
-            .map_err(map_build_error)?;
-        stream.play().map_err(|_| AudioDeviceError::Backend)?;
+        let choice = choice.clone();
+        let (worker, (ring, muted)) = start_audio_thread(move || {
+            let host = cpal::default_host();
+            let device = pick_input(&host, &choice)?;
+            let supported = device.default_input_config().map_err(map_config_error)?;
+            let device_rate = supported.sample_rate().0;
+            let channels = supported.channels() as usize;
+            let ring = Arc::new(SampleRing::new(RING_CAPACITY_SAMPLES));
+            let muted = Arc::new(AtomicBool::new(false));
+            let ring_cb = ring.clone();
+            let muted_cb = muted.clone();
+            // Mono scratch reused across callbacks lives inside the closure.
+            let config: cpal::StreamConfig = supported.config();
+            let err_fn = |_err: cpal::StreamError| {};
+            let stream = device
+                .build_input_stream(
+                    &config,
+                    move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                        // Never block: a short critical section pushing samples.
+                        let mut mono = Vec::with_capacity(data.len() / channels.max(1) + 1);
+                        down_mix(data, channels, &mut mono);
+                        let at_codec = resample_mono(&mono, device_rate, CODEC_SAMPLE_RATE);
+                        if muted_cb.load(Ordering::Relaxed) {
+                            // Push silence of the same length so timing holds.
+                            let silence = vec![0i16; at_codec.len()];
+                            let _ = ring_cb.push(&silence);
+                        } else {
+                            let _ = ring_cb.push(&at_codec);
+                        }
+                    },
+                    err_fn,
+                    None,
+                )
+                .map_err(map_build_error)?;
+            stream.play().map_err(|_| AudioDeviceError::Backend)?;
+            Ok((stream, (ring, muted)))
+        })?;
         Ok(Self {
             ring,
             muted,
-            _stream: stream,
+            _worker: worker,
         })
     }
 
@@ -313,51 +358,55 @@ impl CpalAudioInput {
 pub struct CpalAudioOutput {
     ring: Arc<SampleRing>,
     device_rate: u32,
-    _stream: cpal::Stream,
+    _worker: AudioThread,
 }
 
 impl CpalAudioOutput {
     pub fn new(choice: &DeviceChoice) -> Result<Self, AudioDeviceError> {
-        let host = cpal::default_host();
-        let device = pick_output(&host, choice)?;
-        let supported = device.default_output_config().map_err(map_config_error)?;
-        let device_rate = supported.sample_rate().0;
-        let channels = supported.channels() as usize;
-        // Hold enough device-rate mono audio that the callback rarely
-        // underruns; sized in device-rate terms by the resample ratio. The
-        // ring always stores device-rate mono samples, so the callback only
-        // pops and fans out and never resamples.
-        let capacity = resample_len(RING_CAPACITY_SAMPLES, CODEC_SAMPLE_RATE, device_rate)
-            .max(RING_CAPACITY_SAMPLES);
-        let ring = Arc::new(SampleRing::new(capacity));
-        let ring_cb = ring.clone();
-        let config: cpal::StreamConfig = supported.config();
-        let err_fn = |_err: cpal::StreamError| {};
-        let stream = device
-            .build_output_stream(
-                &config,
-                move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                    // Never block: pull what is available, play silence for the
-                    // rest (underrun), then fan mono out to all channels.
-                    let needed = data.len() / channels.max(1);
-                    let mut mono = vec![0i16; needed];
-                    let _ = ring_cb.pop_into(&mut mono);
-                    for (frame, &sample) in data.chunks_mut(channels.max(1)).zip(mono.iter()) {
-                        let value = to_f32(sample);
-                        for slot in frame.iter_mut() {
-                            *slot = value;
+        let choice = choice.clone();
+        let (worker, (ring, device_rate)) = start_audio_thread(move || {
+            let host = cpal::default_host();
+            let device = pick_output(&host, &choice)?;
+            let supported = device.default_output_config().map_err(map_config_error)?;
+            let device_rate = supported.sample_rate().0;
+            let channels = supported.channels() as usize;
+            // Hold enough device-rate mono audio that the callback rarely
+            // underruns; sized in device-rate terms by the resample ratio. The
+            // ring always stores device-rate mono samples, so the callback only
+            // pops and fans out and never resamples.
+            let capacity = resample_len(RING_CAPACITY_SAMPLES, CODEC_SAMPLE_RATE, device_rate)
+                .max(RING_CAPACITY_SAMPLES);
+            let ring = Arc::new(SampleRing::new(capacity));
+            let ring_cb = ring.clone();
+            let config: cpal::StreamConfig = supported.config();
+            let err_fn = |_err: cpal::StreamError| {};
+            let stream = device
+                .build_output_stream(
+                    &config,
+                    move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                        // Never block: pull what is available, play silence for the
+                        // rest (underrun), then fan mono out to all channels.
+                        let needed = data.len() / channels.max(1);
+                        let mut mono = vec![0i16; needed];
+                        let _ = ring_cb.pop_into(&mut mono);
+                        for (frame, &sample) in data.chunks_mut(channels.max(1)).zip(mono.iter()) {
+                            let value = to_f32(sample);
+                            for slot in frame.iter_mut() {
+                                *slot = value;
+                            }
                         }
-                    }
-                },
-                err_fn,
-                None,
-            )
-            .map_err(map_build_error)?;
-        stream.play().map_err(|_| AudioDeviceError::Backend)?;
+                    },
+                    err_fn,
+                    None,
+                )
+                .map_err(map_build_error)?;
+            stream.play().map_err(|_| AudioDeviceError::Backend)?;
+            Ok((stream, (ring, device_rate)))
+        })?;
         Ok(Self {
             ring,
             device_rate,
-            _stream: stream,
+            _worker: worker,
         })
     }
 

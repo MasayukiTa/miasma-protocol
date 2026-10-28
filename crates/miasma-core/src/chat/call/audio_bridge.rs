@@ -131,3 +131,29 @@ pub fn build_real_audio(
     let sink = DecodingSink::new(&selection.output)?;
     Ok((source, sink))
 }
+
+#[cfg(test)]
+mod send_tests {
+    use super::*;
+
+    #[test]
+    fn media_audio_types_are_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<CpalAudioInput>();
+        assert_send::<CpalAudioOutput>();
+        assert_send::<OpusEncoder>();
+        assert_send::<OpusDecoder>();
+        assert_send::<EncodingSource>();
+        assert_send::<DecodingSink>();
+        assert_send::<Result<(EncodingSource, DecodingSink), AudioDeviceError>>();
+        assert_send::<super::super::controller::MediaRoots>();
+        assert_send::<super::super::media_task::MediaStats>();
+        assert_send::<
+            super::super::session::MediaSession<
+                EncodingSource,
+                DecodingSink,
+                Box<dyn super::super::session::DatagramLink>,
+            >,
+        >();
+    }
+}
