@@ -1385,6 +1385,14 @@ mod tests {
         });
     }
 
+    fn inbound(peer: [u8; 32], signal: Record) -> CallInbound {
+        CallInbound {
+            peer,
+            signal,
+            received_at_ms: 1_000,
+        }
+    }
+
     #[test]
     fn safety_code_round_trip_and_lifetime() {
         let mut a = controller();
