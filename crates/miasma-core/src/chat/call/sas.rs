@@ -20,7 +20,11 @@ pub fn sas_bits(
     callee_nonce: &[u8; 16],
     offer_hash: &[u8; 32],
 ) -> [u8; 8] {
-    let (first, second) = if id_a <= id_b { (id_a, id_b) } else { (id_b, id_a) };
+    let (first, second) = if id_a <= id_b {
+        (id_a, id_b)
+    } else {
+        (id_b, id_a)
+    };
     let mut hash = Sha256::new();
     hash.update(label::CALL_SAS);
     hash.update(first);
@@ -49,8 +53,10 @@ mod tests {
         let caller = [5; 16];
         let callee = [6; 16];
         let offer = [7; 32];
-        assert!(sas_bits(&a, &b, &tag, &call, &caller, &callee, &offer)
-            == sas_bits(&b, &a, &tag, &call, &caller, &callee, &offer));
+        assert!(
+            sas_bits(&a, &b, &tag, &call, &caller, &callee, &offer)
+                == sas_bits(&b, &a, &tag, &call, &caller, &callee, &offer)
+        );
     }
 
     #[test]
