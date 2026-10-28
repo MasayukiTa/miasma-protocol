@@ -21,19 +21,31 @@ use super::video_frame::{
 
 /// An encoded video frame handed to or from a codec: opaque bitstream bytes
 /// plus whether it is a keyframe. No codec is chosen in this slice.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct EncodedVideoFrame {
     pub keyframe: bool,
     pub data: Vec<u8>,
 }
 
+impl core::fmt::Debug for EncodedVideoFrame {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("EncodedVideoFrame")
+    }
+}
+
 /// A raw (unencoded) video picture. In this slice it is an opaque byte buffer
 /// with a size, so the test source/sink can move pictures without a codec.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Default)]
 pub struct RawPicture {
     pub width: u16,
     pub height: u16,
     pub pixels: Vec<u8>,
+}
+
+impl core::fmt::Debug for RawPicture {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("RawPicture")
+    }
 }
 
 /// Captures raw pictures. A real implementation wraps a camera; the test
@@ -113,7 +125,7 @@ pub const DEFAULT_REASSEMBLY_BUDGET_BYTES: usize =
     4 * MAX_FRAGMENTS_PER_FRAME as usize * FRAGMENT_PAYLOAD_LEN;
 
 /// The outcome of offering one fragment to the reassembly buffer.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum Reassembled {
     /// The fragment was accepted; the frame is still incomplete.
     Pending,
@@ -123,6 +135,16 @@ pub enum Reassembled {
     /// The fragment was dropped (malformed body, inconsistent header, or it
     /// belonged to a frame already evicted). No state changed.
     Dropped,
+}
+
+impl core::fmt::Debug for Reassembled {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let len = match self {
+            Self::Complete(frame) => frame.data.len(),
+            Self::Pending | Self::Dropped => 0,
+        };
+        f.debug_struct("Reassembled").field("len", &len).finish()
+    }
 }
 
 /// One frame being reassembled: the fragments received so far, keyed by index.
