@@ -390,7 +390,7 @@ mod tests {
         let call_nonce = rand16();
         let a = derive_mk_root(&ck, &hk, &call_id, &call_nonce, Direction::Caller).unwrap();
         let b = derive_mk_root(&ck, &hk, &call_id, &call_nonce, Direction::Caller).unwrap();
-        assert_eq!(a.as_ref(), b.as_ref());
+        assert!(a.as_ref() == b.as_ref());
     }
 
     // §2.2 / §7 2.1: changing call_nonce on one end alone yields a different
@@ -405,7 +405,7 @@ mod tests {
         n2[0] ^= 0x01;
         let a = derive_mk_root(&ck, &hk, &call_id, &n1, Direction::Caller).unwrap();
         let b = derive_mk_root(&ck, &hk, &call_id, &n2, Direction::Caller).unwrap();
-        assert_ne!(a.as_ref(), b.as_ref());
+        assert!(a.as_ref() != b.as_ref());
     }
 
     // §2.2 / §7 2.2: the two directions derive different MK_root values, so a
@@ -418,7 +418,7 @@ mod tests {
         let call_nonce = rand16();
         let caller = derive_mk_root(&ck, &hk, &call_id, &call_nonce, Direction::Caller).unwrap();
         let callee = derive_mk_root(&ck, &hk, &call_id, &call_nonce, Direction::Callee).unwrap();
-        assert_ne!(caller.as_ref(), callee.as_ref());
+        assert!(caller.as_ref() != callee.as_ref());
     }
 
     // §2.2: the hybrid key is mandatory. Dropping it (a different hybrid key)
@@ -432,11 +432,11 @@ mod tests {
         let call_nonce = rand16();
         let a = derive_mk_root(&ck, &hk1, &call_id, &call_nonce, Direction::Caller).unwrap();
         let b = derive_mk_root(&ck, &hk2, &call_id, &call_nonce, Direction::Caller).unwrap();
-        assert_ne!(a.as_ref(), b.as_ref());
+        assert!(a.as_ref() != b.as_ref());
         // and the ratchet half matters too
         let ck2 = rand32();
         let c = derive_mk_root(&ck2, &hk1, &call_id, &call_nonce, Direction::Caller).unwrap();
-        assert_ne!(a.as_ref(), c.as_ref());
+        assert!(a.as_ref() != c.as_ref());
     }
 
     // §2.3 / §4.3.1: the epoch-0 chain key is not MK_root itself (one HKDF
@@ -446,8 +446,8 @@ mod tests {
         let mk = rand32();
         let a = init_chain_key(&mk).unwrap();
         let b = init_chain_key(&mk).unwrap();
-        assert_eq!(a.as_ref(), b.as_ref());
-        assert_ne!(a.as_ref(), &mk);
+        assert!(a.as_ref() == b.as_ref());
+        assert!(a.as_ref() != &mk);
     }
 
     // §2.3 / §4.3.2: one chain step yields a message key and the next chain
@@ -458,11 +458,11 @@ mod tests {
         let ck = rand32();
         let (mk1, next1) = chain_step(&ck).unwrap();
         let (mk2, next2) = chain_step(&ck).unwrap();
-        assert_eq!(mk1.as_ref(), mk2.as_ref());
-        assert_eq!(next1.as_ref(), next2.as_ref());
-        assert_ne!(mk1.as_ref(), next1.as_ref());
-        assert_ne!(mk1.as_ref(), &ck);
-        assert_ne!(next1.as_ref(), &ck);
+        assert!(mk1.as_ref() == mk2.as_ref());
+        assert!(next1.as_ref() == next2.as_ref());
+        assert!(mk1.as_ref() != next1.as_ref());
+        assert!(mk1.as_ref() != &ck);
+        assert!(next1.as_ref() != &ck);
     }
 
     // §2.3: advancing the chain gives a fresh message key each epoch.
@@ -473,9 +473,9 @@ mod tests {
         let (m0, ck1) = chain_step(&ck0).unwrap();
         let (m1, ck2) = chain_step(&ck1).unwrap();
         let (m2, _ck3) = chain_step(&ck2).unwrap();
-        assert_ne!(m0.as_ref(), m1.as_ref());
-        assert_ne!(m1.as_ref(), m2.as_ref());
-        assert_ne!(m0.as_ref(), m2.as_ref());
+        assert!(m0.as_ref() != m1.as_ref());
+        assert!(m1.as_ref() != m2.as_ref());
+        assert!(m0.as_ref() != m2.as_ref());
     }
 
     // §2.3 / §2.2: the call chain labels are dedicated and never coincide with
@@ -494,7 +494,7 @@ mod tests {
         let mut chat_out = [0u8; 32];
         hk.expand(label::CALL_CHAIN, &mut call_out).unwrap();
         hk.expand(label::CHAIN, &mut chat_out).unwrap();
-        assert_ne!(call_out, chat_out);
+        assert!(call_out != chat_out);
     }
 
     // §2.4: the 24-byte nonce has the fields in the right place and the
@@ -503,13 +503,13 @@ mod tests {
     fn nonce_layout_and_zero_pad() {
         let n = media_nonce(Direction::Callee, 0x00ABCD, 0x0102030405060708);
         // direction byte
-        assert_eq!(n[0], 0x01);
+        assert!(n[0] == 0x01);
         // key_epoch big-endian in bytes 1..4 (low 24 bits)
-        assert_eq!(&n[1..4], &[0x00, 0xAB, 0xCD]);
+        assert!(&n[1..4] == &[0x00, 0xAB, 0xCD]);
         // packet_seq big-endian in bytes 4..12
-        assert_eq!(&n[4..12], &0x0102030405060708u64.to_be_bytes());
+        assert!(&n[4..12] == &0x0102030405060708u64.to_be_bytes());
         // trailing 12 bytes are zero
-        assert_eq!(&n[12..24], &[0u8; 12]);
+        assert!(&n[12..24] == &[0u8; 12]);
     }
 
     // §2.4: (direction, key_epoch, packet_seq) are globally unique, so the
@@ -537,12 +537,12 @@ mod tests {
         let a = media_aad(&call_id, Direction::Caller, 7, 9, 0x00);
         assert_eq!(a.len(), AAD_LEN);
         assert_eq!(a[0], MEDIA_PROTOCOL_VERSION);
-        assert_eq!(&a[1..17], &call_id);
+        assert!(&a[1..17] == &call_id);
         // a different media_type gives a different AAD
         let b = media_aad(&call_id, Direction::Caller, 7, 9, 0x01);
-        assert_ne!(a, b);
+        assert!(a != b);
         // a different direction gives a different AAD
         let c = media_aad(&call_id, Direction::Callee, 7, 9, 0x00);
-        assert_ne!(a, c);
+        assert!(a != c);
     }
 }

@@ -318,7 +318,7 @@ mod tests {
         // 4x4 solid white RGBA -> 2x2 I420. White maps to Y=235, U=V=128.
         let rgba = vec![255u8; 4 * 4 * 4];
         let out = rgba_to_i420(&rgba, 4, 4, 2, 2).unwrap();
-        assert_eq!(out, vec![235, 235, 235, 235, 128, 128]);
+        assert!(out == vec![235, 235, 235, 235, 128, 128]);
     }
 
     // Box filter averages, unlike nearest-neighbour. A 2x1 split of black and
@@ -332,20 +332,20 @@ mod tests {
         ];
         // Downscale 2x2 -> 2x2 keeps columns distinct (identity-ish).
         let identity = rgba_to_i420(&rgba, 2, 2, 2, 2).unwrap();
-        assert_eq!(identity[0], 16); // black -> Y 16
-        assert_eq!(identity[1], 235); // white -> Y 235
-                                      // Downscale 2x2 -> single-column would need width 2; instead check that
-                                      // box_average over the whole row yields the mid grey of black+white.
+        assert!(identity[0] == 16); // black -> Y 16
+        assert!(identity[1] == 235); // white -> Y 235
+                                     // Downscale 2x2 -> single-column would need width 2; instead check that
+                                     // box_average over the whole row yields the mid grey of black+white.
         let (r, g, b) = box_average_rgb(&rgba, 2, 0, 2, 0, 1);
-        assert_eq!((r, g, b), (127, 127, 127));
+        assert!((r, g, b) == (127, 127, 127));
     }
 
     #[test]
     fn rejects_bad_sizes() {
         let rgba = vec![0u8; 2 * 2 * 4];
-        assert_eq!(rgba_to_i420(&rgba, 2, 2, 3, 2), None); // odd width
-        assert_eq!(rgba_to_i420(&rgba, 2, 2, 2, 0), None); // zero height
-        assert_eq!(rgba_to_i420(&rgba, usize::MAX, 2, 2, 2), None); // overflow
-        assert_eq!(rgba_to_i420(&rgba, 4, 4, 2, 2), None); // length mismatch
+        assert!(rgba_to_i420(&rgba, 2, 2, 3, 2) == None); // odd width
+        assert!(rgba_to_i420(&rgba, 2, 2, 2, 0) == None); // zero height
+        assert!(rgba_to_i420(&rgba, usize::MAX, 2, 2, 2) == None); // overflow
+        assert!(rgba_to_i420(&rgba, 4, 4, 2, 2) == None); // length mismatch
     }
 }

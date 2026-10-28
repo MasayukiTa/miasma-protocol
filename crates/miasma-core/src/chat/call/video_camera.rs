@@ -266,15 +266,15 @@ mod tests {
             &[0, 0, 0, 255, 255, 255, 0, 0, 0, 255, 255, 255],
             FrameFormat::RAWBGR,
         );
-        assert_eq!(convert(&bgr, 2, 2), Some(vec![16, 235, 16, 235, 128, 128]));
+        assert!(convert(&bgr, 2, 2) == Some(vec![16, 235, 16, 235, 128, 128]));
         let yuy2 = Buffer::new(
             Resolution::new(2, 2),
             &[16, 128, 235, 128, 16, 128, 235, 128],
             FrameFormat::YUYV,
         );
         let out = convert(&yuy2, 2, 2).unwrap();
-        assert_eq!(out, vec![16, 235, 16, 235, 128, 128]);
-        assert_eq!(&out[4..], &[128, 128]);
+        assert!(out == vec![16, 235, 16, 235, 128, 128]);
+        assert!(&out[4..] == &[128, 128]);
     }
     #[test]
     fn mjpeg_black() {
@@ -283,23 +283,22 @@ mod tests {
             include_bytes!("camera_black.jpg"),
             FrameFormat::MJPEG,
         );
-        assert_eq!(convert(&frame, 2, 2), Some(vec![16, 16, 16, 16, 128, 128]));
+        assert!(convert(&frame, 2, 2) == Some(vec![16, 16, 16, 16, 128, 128]));
     }
     #[test]
     fn nearest_and_invalid() {
         let rgb = [0, 0, 0, 255, 255, 255, 255, 255, 255, 0, 0, 0];
-        assert_eq!(
-            rgb_to_i420(&rgb, 2, 2, 4, 2),
-            Some(vec![16, 16, 235, 235, 235, 235, 16, 16, 128, 128, 128, 128])
+        assert!(
+            rgb_to_i420(&rgb, 2, 2, 4, 2)
+                == Some(vec![16, 16, 235, 235, 235, 235, 16, 16, 128, 128, 128, 128])
         );
-        assert_eq!(rgb_to_i420(&rgb, usize::MAX, 2, 2, 2), None);
-        assert_eq!(
+        assert!(rgb_to_i420(&rgb, usize::MAX, 2, 2, 2) == None);
+        assert!(
             convert(
                 &Buffer::new(Resolution::new(2, 2), &[1, 2], FrameFormat::MJPEG),
                 2,
                 2
-            ),
-            None
+            ) == None
         );
     }
 }

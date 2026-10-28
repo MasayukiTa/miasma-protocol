@@ -242,11 +242,11 @@ mod tests {
         let camera = sender.next_packet_type(0, Some(&[0xAA]), 1).unwrap();
         let screen = sender.next_packet_type(0, Some(&[0xBB]), 2).unwrap();
         match receiver.receive(&camera, 0) {
-            RecvOutcome::Video(frame) => assert_eq!(frame[0], 0xAA),
+            RecvOutcome::Video(frame) => assert!(frame[0] == 0xAA),
             _ => panic!("expected camera video"),
         }
         match receiver.receive(&screen, 0) {
-            RecvOutcome::Screen(frame) => assert_eq!(frame[0], 0xBB),
+            RecvOutcome::Screen(frame) => assert!(frame[0] == 0xBB),
             _ => panic!("expected screen"),
         }
         // A screen packet is distinct bytes from a camera packet even if the
@@ -274,8 +274,8 @@ mod tests {
             let kind = if i % 2 == 0 { 1 } else { 2 };
             let packet = sender.next_packet_type(0, Some(&[i as u8]), kind).unwrap();
             match (kind, receiver.receive(&packet, 0)) {
-                (1, RecvOutcome::Video(frame)) => assert_eq!(frame[0], i as u8),
-                (2, RecvOutcome::Screen(frame)) => assert_eq!(frame[0], i as u8),
+                (1, RecvOutcome::Video(frame)) => assert!(frame[0] == i as u8),
+                (2, RecvOutcome::Screen(frame)) => assert!(frame[0] == i as u8),
                 _ => panic!("stream kind mismatch at {i}"),
             }
         }
@@ -287,7 +287,7 @@ mod tests {
         for i in 0..300 {
             let packet = sender.next_packet(0, Some(&[i as u8])).unwrap();
             match receiver.receive(&packet, 0) {
-                RecvOutcome::Audio(frame) => assert_eq!(frame[0], i as u8),
+                RecvOutcome::Audio(frame) => assert!(frame[0] == i as u8),
                 _ => panic!("expected audio"),
             }
             if i == 0 {

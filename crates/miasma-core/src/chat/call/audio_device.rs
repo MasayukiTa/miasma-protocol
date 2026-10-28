@@ -542,7 +542,7 @@ mod tests {
         let mut out = [0i16; 4];
         let taken = ring.pop_into(&mut out);
         assert_eq!(taken, 4);
-        assert_eq!(out, [3, 4, 5, 6]);
+        assert!(out == [3, 4, 5, 6]);
     }
 
     #[test]
@@ -553,7 +553,7 @@ mod tests {
         let taken = ring.pop_into(&mut out);
         assert_eq!(taken, 2);
         // The unfilled tail stays as the pre-set silence.
-        assert_eq!(out, [7, 7, 0, 0]);
+        assert!(out == [7, 7, 0, 0]);
     }
 
     #[test]

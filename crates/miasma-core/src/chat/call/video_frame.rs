@@ -207,61 +207,61 @@ mod tests {
                 out.extend_from_slice(payload);
             }
             out.truncate(len);
-            assert_eq!(out, frame);
+            assert!(out == frame);
         }
     }
 
     #[test]
     fn empty_frame_rejected() {
-        assert_eq!(
-            fragment_frame(0, true, &[]).unwrap_err(),
-            VideoFrameError::FrameSize
-        );
+        assert!(matches!(
+            fragment_frame(0, true, &[]),
+            Err(VideoFrameError::FrameSize)
+        ));
     }
 
     #[test]
     fn oversize_frame_rejected() {
         let too_big = vec![0u8; MAX_FRAGMENTS_PER_FRAME as usize * FRAGMENT_PAYLOAD_LEN + 1];
-        assert_eq!(
-            fragment_frame(0, true, &too_big).unwrap_err(),
-            VideoFrameError::FrameSize
-        );
+        assert!(matches!(
+            fragment_frame(0, true, &too_big),
+            Err(VideoFrameError::FrameSize)
+        ));
     }
 
     #[test]
     fn wrong_body_length_rejected() {
-        assert_eq!(
-            parse_fragment(&[0u8; 59]).unwrap_err(),
-            VideoFrameError::BadBodyLength
-        );
-        assert_eq!(
-            parse_fragment(&[0u8; 61]).unwrap_err(),
-            VideoFrameError::BadBodyLength
-        );
+        assert!(matches!(
+            parse_fragment(&[0u8; 59]),
+            Err(VideoFrameError::BadBodyLength)
+        ));
+        assert!(matches!(
+            parse_fragment(&[0u8; 61]),
+            Err(VideoFrameError::BadBodyLength)
+        ));
     }
 
     #[test]
     fn inconsistent_header_rejected() {
         // count == 0
         let mut body = [0u8; FRAME_PLAINTEXT_LEN];
-        assert_eq!(
-            parse_fragment(&body).unwrap_err(),
-            VideoFrameError::BadHeader
-        );
+        assert!(matches!(
+            parse_fragment(&body),
+            Err(VideoFrameError::BadHeader)
+        ));
         // index >= count
         body[2..4].copy_from_slice(&3u16.to_be_bytes());
         body[4..6].copy_from_slice(&3u16.to_be_bytes());
-        assert_eq!(
-            parse_fragment(&body).unwrap_err(),
-            VideoFrameError::BadHeader
-        );
+        assert!(matches!(
+            parse_fragment(&body),
+            Err(VideoFrameError::BadHeader)
+        ));
         // count above the ceiling
         body[2..4].copy_from_slice(&0u16.to_be_bytes());
         body[4..6].copy_from_slice(&(MAX_FRAGMENTS_PER_FRAME + 1).to_be_bytes());
-        assert_eq!(
-            parse_fragment(&body).unwrap_err(),
-            VideoFrameError::BadHeader
-        );
+        assert!(matches!(
+            parse_fragment(&body),
+            Err(VideoFrameError::BadHeader)
+        ));
     }
 
     #[test]

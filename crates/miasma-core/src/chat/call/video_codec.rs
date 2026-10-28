@@ -215,9 +215,9 @@ mod tests {
             .encode(&vec![128; 16 * 16 * 3], 16, 16, ColorType::Rgb)
             .unwrap();
         let mut decoder = JpegDecoder::new(VIDEO_WIDTH, VIDEO_HEIGHT).unwrap();
-        assert_eq!(
+        assert!(matches!(
             decoder.decode(&data),
             Err(VideoCodecError::InvalidDimensions)
-        );
+        ));
     }
 }

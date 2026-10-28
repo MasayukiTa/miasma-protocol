@@ -248,13 +248,13 @@ mod tests {
     #[test]
     fn fit_frame_pads_short_and_rejects_long() {
         let short = fit_frame(&[1, 2, 3]).unwrap();
-        assert_eq!(short[0], 1);
-        assert_eq!(short[3], 0);
+        assert!(short[0] == 1);
+        assert!(short[3] == 0);
         assert_eq!(short.len(), FRAME_PLAINTEXT_LEN);
         let exact = fit_frame(&[7u8; FRAME_PLAINTEXT_LEN]).unwrap();
-        assert_eq!(exact[FRAME_PLAINTEXT_LEN - 1], 7);
+        assert!(exact[FRAME_PLAINTEXT_LEN - 1] == 7);
         let long = vec![0u8; FRAME_PLAINTEXT_LEN + 1];
-        assert_eq!(fit_frame(&long), Err(CodecError::EncodedTooLong));
+        assert!(matches!(fit_frame(&long), Err(CodecError::EncodedTooLong)));
     }
 
     #[test]
@@ -266,7 +266,7 @@ mod tests {
         let decoded = codec.decode(&encoded).unwrap();
         // The fake carries the first 30 samples (60 bytes / 2) exactly.
         for i in 0..FRAME_PLAINTEXT_LEN / 2 {
-            assert_eq!(decoded[i], pcm[i]);
+            assert!(decoded[i] == pcm[i]);
         }
     }
 
