@@ -30,6 +30,9 @@ pub enum CallAction {
     Reject(u64),
     HangUp,
     ToggleMute,
+    /// Start or stop sharing the screen; the app sends the matching start/stop
+    /// request based on the current screen-sharing state.
+    ToggleScreenShare,
     /// Ask the host for its audio devices, to fill the picker.
     ListDevices,
     /// Choose the input and/or output device by name (`None` means the host default).
@@ -49,6 +52,7 @@ impl std::fmt::Debug for CallAction {
             CallAction::Reject(_) => "Reject",
             CallAction::HangUp => "HangUp",
             CallAction::ToggleMute => "ToggleMute",
+            CallAction::ToggleScreenShare => "ToggleScreenShare",
             CallAction::ListDevices => "ListDevices",
             // The device names are not shown here, so they are never formatted into diagnostics.
             CallAction::SelectDevices { .. } => "SelectDevices",
@@ -99,18 +103,45 @@ pub fn incoming_banner(
     action
 }
 
-/// The in-call panel: the state line, the duration, a mute toggle, hang up, and the safety-code
-/// area. `now_ms` is the current time for the duration. Returns the pressed action, or `None`.
+/// Draw the remote video frame, scaled to fit the available width while keeping its aspect
+/// ratio. `texture` is the egui texture the caller uploaded from the newest RGBA frame, and
+/// `size` its pixel dimensions. Nothing is drawn for a zero-sized frame. Audio-only calls pass
+/// no texture and so look exactly as before.
+pub fn remote_video(ui: &mut egui::Ui, texture: &egui::TextureHandle, size: (u16, u16)) {
+    let (w, h) = (f32::from(size.0), f32::from(size.1));
+    if w < 1.0 || h < 1.0 {
+        return;
+    }
+    // Fit within the panel width, never upscaling past the native size, and keep the aspect
+    // ratio by scaling both axes by the same factor.
+    let avail = ui.available_width().max(1.0);
+    let scale = (avail / w).min(1.0);
+    let shown = egui::vec2(w * scale, h * scale);
+    ui.image(egui::load::SizedTexture::new(texture.id(), shown));
+    ui.add_space(kit::SP_2);
+}
+
+/// The in-call panel: the remote video (when present), the state line, the duration, a mute
+/// toggle, a camera toggle, a screen-share button, hang up, and the safety-code area. `now_ms`
+/// is the current time for the duration. `video` is the remote video texture and its pixel size,
+/// or `None` for an audio-only call or before the first frame arrives. Returns the pressed
+/// action, or `None`.
 pub fn in_call_panel(
     ui: &mut egui::Ui,
     c: &CallStrings,
     state: &CallUi,
     status: Option<&miasma_core::chat::ipc::CallStatusDto>,
     now_ms: u64,
+    video: Option<(&egui::TextureHandle, (u16, u16))>,
 ) -> Option<CallAction> {
     let mut action = None;
     kit::surface(ui, |ui| {
         kit::section(ui, c.panel_title, |_| {});
+        // The remote video, when a frame has arrived and video was negotiated. Drawn above the
+        // state line so it reads as the main content of the call.
+        if let Some((texture, size)) = video {
+            remote_video(ui, texture, size);
+        }
         // The state line (calling / ringing / connecting / connected).
         kit::paragraph(ui, call::call_state_text(c, state.state()));
         // The duration, once the call is connected.
@@ -130,6 +161,30 @@ pub fn in_call_panel(
                 .clicked()
             {
                 action = Some(CallAction::ToggleMute);
+            }
+            ui.add_space(kit::SP_2);
+            // Camera toggle, next to mute. The label follows the status flag (`camera_in_use`).
+            // The core call IPC has no camera on/off request in this build, so the button is
+            // shown but disabled, with a neutral tooltip saying so; its label still reports the
+            // current state. When the toggle request lands, enable it and return an action here.
+            let camera_on = status.map_or(false, |s| s.camera_in_use);
+            let camera_label = if camera_on { c.camera_on } else { c.camera_off };
+            crate::form_check::add_enabled(ui, false, kit::secondary_button(camera_label))
+                .on_disabled_hover_text(c.camera_unavailable)
+                .on_disabled_hover_text(c.a11y_camera);
+            ui.add_space(kit::SP_2);
+            // Screen share toggle, next to the camera. The label follows the status flag
+            // (`screen_sharing`); a press asks the app to start or stop the real screen-share
+            // request, which the daemon honours only while the call is connected with video
+            // negotiated.
+            let screen_on = status.map_or(false, |s| s.screen_sharing);
+            let screen_label = if screen_on { c.screen_off } else { c.screen_on };
+            if ui
+                .add(kit::secondary_button(screen_label))
+                .on_hover_text(c.a11y_screen_share)
+                .clicked()
+            {
+                action = Some(CallAction::ToggleScreenShare);
             }
             ui.add_space(kit::SP_2);
             if ui

@@ -574,6 +574,11 @@ pub struct VideoDriver<S, K, E, D> {
     last_completed: Option<u16>,
     last_gap_request_ms: Option<u64>,
     gap_request_pending: bool,
+    /// The most recently decoded remote picture, waiting to be taken by the
+    /// media task so it can be published for the UI. Replaced each time a
+    /// frame decodes; taking it clears the slot. Holds pixel bytes only, no
+    /// key, nonce, call id or peer id.
+    last_decoded: Option<RawPicture>,
     pub frames_sent: u64,
     pub frames_played: u64,
 }
@@ -593,6 +598,7 @@ impl<S: VideoSource, K: VideoSink, E: VideoEncoder, D: VideoDecoder> VideoDriver
             last_completed: None,
             last_gap_request_ms: None,
             gap_request_pending: false,
+            last_decoded: None,
             frames_sent: 0,
             frames_played: 0,
         }
@@ -663,6 +669,7 @@ impl<S: VideoSource, K: VideoSink, E: VideoEncoder, D: VideoDecoder> VideoDriver
             }
             if let Some(picture) = self.decoder.decode(&frame) {
                 self.sink.put_picture(&picture);
+                self.last_decoded = Some(picture);
                 self.frames_played = self.frames_played.saturating_add(1);
             }
         }
@@ -674,6 +681,13 @@ impl<S: VideoSource, K: VideoSink, E: VideoEncoder, D: VideoDecoder> VideoDriver
 
     pub fn sink(&self) -> &K {
         &self.sink
+    }
+
+    /// Take the most recently decoded remote picture, if one arrived since the
+    /// last take, clearing the slot. The media task calls this each tick to
+    /// publish the latest frame for the UI without cloning on every tick.
+    pub fn take_decoded_picture(&mut self) -> Option<RawPicture> {
+        self.last_decoded.take()
     }
 }
 

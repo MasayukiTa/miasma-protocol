@@ -316,7 +316,28 @@ pub struct ChatUi {
     /// pending-call token, so it does not derive `Debug`.
     #[cfg(feature = "pqc")]
     call: CallUi,
+    /// The egui texture holding the newest decoded remote video frame, uploaded from the RGBA
+    /// bytes the call screen state keeps. `None` until a frame arrives; freed when the call ends.
+    #[cfg(feature = "pqc")]
+    call_video_texture: Option<egui::TextureHandle>,
+    /// The counter of the frame currently in `call_video_texture`, so a frame is uploaded to the
+    /// GPU only when a newer one has arrived, not every repaint.
+    #[cfg(feature = "pqc")]
+    call_video_counter: u64,
+    /// The pixel size of the frame currently in `call_video_texture`, for scaling it on screen.
+    #[cfg(feature = "pqc")]
+    call_video_size: (u16, u16),
+    /// When the last `RemoteFrame` poll went out (ms since the epoch), to space those polls by
+    /// `FRAME_POLL_INTERVAL_MS` while a video call is connected.
+    #[cfg(feature = "pqc")]
+    last_frame_poll_ms: u64,
 }
+
+/// How often to ask the daemon for the newest decoded remote video frame while a video call is
+/// connected. Faster than the once-a-second status poll so the remote video updates smoothly;
+/// the daemon answers with nothing when no newer frame exists, so an idle poll is cheap.
+#[cfg(feature = "pqc")]
+const FRAME_POLL_INTERVAL_MS: u64 = 100;
 
 /// Width of the Chat area (the page column) from which the conversation list sits beside the
 /// open conversation: a window of 900 px or more, less the side margins of the column. Narrower
@@ -407,6 +428,14 @@ impl Default for ChatUi {
             group: GroupUi::default(),
             #[cfg(feature = "pqc")]
             call: CallUi::default(),
+            #[cfg(feature = "pqc")]
+            call_video_texture: None,
+            #[cfg(feature = "pqc")]
+            call_video_counter: 0,
+            #[cfg(feature = "pqc")]
+            call_video_size: (0, 0),
+            #[cfg(feature = "pqc")]
+            last_frame_poll_ms: 0,
         }
     }
 }
@@ -616,6 +645,23 @@ impl ChatUi {
                         since: self.call.events_since(),
                     }));
                 }
+            }
+            // While a call is connected and the peer's video is negotiated, poll the newest
+            // decoded remote frame on a faster cadence than the status poll, reusing this same
+            // periodic tick (no extra thread). `last_seen` is the counter of the frame already
+            // held, so the daemon answers with nothing until a newer one exists.
+            let wants_video = self
+                .call
+                .status()
+                .map_or(false, |s| s.state == "connected" && s.negotiated_video);
+            if wants_video
+                && call_now.saturating_sub(self.last_frame_poll_ms) >= FRAME_POLL_INTERVAL_MS
+            {
+                use miasma_core::chat::ipc::CallRequest;
+                self.last_frame_poll_ms = call_now;
+                let last_seen = self.call.remote_frame().map_or(0, |f| f.counter);
+                self.out
+                    .push_back(ChatRequest::Call(CallRequest::RemoteFrame { last_seen }));
             }
         }
         if !area_open {
@@ -957,7 +1003,8 @@ impl ChatUi {
     ///
     /// `Status` carries the state word and any ringing token, and (once connected) starts the
     /// duration clock. `Events` advances the poll cursor and ends the call on a `call_ended`
-    /// notice. `Ok`, `Unavailable` and `Error` change nothing here: the next `Status` reports
+    /// notice. `RemoteFrame` hands a newer decoded remote video frame to the call screen state.
+    /// `Ok`, `Unavailable` and `Error` change nothing here: the next `Status` reports
     /// the real state (an ended call shows as `idle`, which resets the screen).
     #[cfg(feature = "pqc")]
     fn on_call_answer(&mut self, resp: miasma_core::chat::ipc::CallResponse) {
@@ -965,12 +1012,25 @@ impl ChatUi {
         match resp {
             CallResponse::Status(dto) => {
                 let now = self.clock().now_ms;
+                let was_active = self.call.exists();
                 self.call.on_status(&dto, now);
+                // An `idle` status ends the call inside `on_status`; free the video texture too.
+                if was_active && !self.call.exists() {
+                    self.free_call_video_texture();
+                }
             }
             CallResponse::Events { next, notices, .. } => {
                 self.call.set_events_since(next);
                 if notices.iter().any(|n| n.code == "call_ended") {
                     self.call.end();
+                    self.free_call_video_texture();
+                }
+            }
+            // A newer decoded remote frame: hand it to the call screen state.
+            // `None` means nothing newer than what was last seen, so skip it.
+            CallResponse::RemoteFrame(frame) => {
+                if let Some(frame) = frame {
+                    self.call.on_remote_frame(frame);
                 }
             }
             CallResponse::AudioDevices(devices) => {
@@ -1287,11 +1347,59 @@ impl ChatUi {
     /// carried by the call IPC and a peer id must never be shown, so a neutral word stands in for
     /// it. Each press is turned into the matching `CallRequest` on the worker queue and the call
     /// state is updated; the token in Accept / Reject is carried in the action, never drawn.
+    /// Bring the remote-video GPU texture in step with the frame the call state holds.
+    ///
+    /// When a newer frame is present (its counter above the one already uploaded), its RGBA bytes
+    /// are uploaded, replacing the previous texture contents; the size is recorded for scaling.
+    /// When no frame is held — an audio-only call, or a call that has ended and cleared it — the
+    /// texture is freed so no call content outlives the call. A malformed frame whose byte length
+    /// does not match its dimensions is ignored rather than uploaded.
+    #[cfg(feature = "pqc")]
+    fn sync_call_video_texture(&mut self, ctx: &egui::Context) {
+        match self.call.remote_frame() {
+            Some(frame) if frame.counter != self.call_video_counter => {
+                let (w, h) = (usize::from(frame.width), usize::from(frame.height));
+                let expected = w.saturating_mul(h).saturating_mul(4);
+                if w == 0 || h == 0 || frame.rgba.len() != expected {
+                    return;
+                }
+                let image = egui::ColorImage::from_rgba_unmultiplied([w, h], &frame.rgba);
+                match &mut self.call_video_texture {
+                    Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
+                    None => {
+                        self.call_video_texture = Some(ctx.load_texture(
+                            "call_remote_video",
+                            image,
+                            egui::TextureOptions::LINEAR,
+                        ));
+                    }
+                }
+                self.call_video_counter = frame.counter;
+                self.call_video_size = (frame.width, frame.height);
+            }
+            Some(_) => {}
+            None => self.free_call_video_texture(),
+        }
+    }
+
+    /// Free the remote-video texture and forget its frame counter and size. Called when the call
+    /// has no frame to show, so the GPU texture does not outlive the call.
+    #[cfg(feature = "pqc")]
+    fn free_call_video_texture(&mut self) {
+        self.call_video_texture = None;
+        self.call_video_counter = 0;
+        self.call_video_size = (0, 0);
+    }
+
     #[cfg(feature = "pqc")]
     pub fn call_screens(&mut self, ui: &mut egui::Ui) {
         use miasma_core::chat::ipc::CallRequest;
         let cc = crate::locale::call_strings(self.locale);
         let now = self.clock().now_ms;
+        // Bring the GPU texture in step with the newest decoded remote frame the call state holds.
+        // A newer frame is uploaded (replacing the old one); no frame at all (audio-only call, or
+        // the call ended) frees the texture, so stale call content never lingers.
+        self.sync_call_video_texture(ui.ctx());
         let mut pressed: Option<CallAction> = None;
         if let Some(token) = self.call.pending_token() {
             if let Some(a) = crate::call_ui::incoming_banner(ui, cc, cc.caller_unknown, token) {
@@ -1299,8 +1407,12 @@ impl ChatUi {
             }
         }
         if self.call.exists() && self.call.pending_token().is_none() {
+            let video = self
+                .call_video_texture
+                .as_ref()
+                .map(|t| (t, self.call_video_size));
             if let Some(a) =
-                crate::call_ui::in_call_panel(ui, cc, &self.call, self.call.status(), now)
+                crate::call_ui::in_call_panel(ui, cc, &self.call, self.call.status(), now, video)
             {
                 pressed = Some(a);
             }
@@ -1317,15 +1429,28 @@ impl ChatUi {
                 self.out
                     .push_back(ChatRequest::Call(crate::call::reject(token)));
                 self.call.end();
+                self.free_call_video_texture();
             }
             Some(CallAction::HangUp) => {
                 self.out.push_back(ChatRequest::Call(CallRequest::HangUp));
                 self.call.end();
+                self.free_call_video_texture();
             }
             Some(CallAction::ToggleMute) => {
                 let muted = !self.call.is_muted();
                 self.out
                     .push_back(ChatRequest::Call(CallRequest::SetMuted { muted }));
+            }
+            Some(CallAction::ToggleScreenShare) => {
+                // Toggle against the last status flag: sharing now means stop, otherwise start.
+                // The daemon honours a start only while connected with video negotiated.
+                let sharing = self.call.status().map_or(false, |s| s.screen_sharing);
+                let request = if sharing {
+                    CallRequest::StopScreenShare
+                } else {
+                    CallRequest::StartScreenShare
+                };
+                self.out.push_back(ChatRequest::Call(request));
             }
             Some(CallAction::ListDevices) => {
                 self.out

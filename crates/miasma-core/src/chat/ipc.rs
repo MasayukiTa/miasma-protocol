@@ -94,6 +94,13 @@ pub enum CallRequest {
     StartScreenShare,
     /// Stop sharing the screen. The camera stream, if any, is unaffected.
     StopScreenShare,
+    /// Ask for the latest decoded remote video frame, but only when its frame
+    /// counter is above `last_seen`. The caller passes the counter it last
+    /// received (0 to always get the current frame); the handler answers with
+    /// `CallResponse::RemoteFrame(None)` when nothing newer is available.
+    RemoteFrame {
+        last_seen: u64,
+    },
 }
 
 /// The audio devices the host reports, carried in an IPC response. Plain names
@@ -134,6 +141,9 @@ pub enum CallResponse {
         #[serde(default)]
         output: Option<String>,
     },
+    /// The latest decoded remote video frame, or `None` when none is newer than
+    /// the `last_seen` the request carried (or no frame has been decoded yet).
+    RemoteFrame(Option<RemoteFrameData>),
 }
 
 #[cfg(feature = "pqc")]
@@ -168,6 +178,69 @@ pub struct CallStatusDto {
 pub struct CallNoticeDto {
     /// A fixed lowercase notice code, such as `incoming_ringing` or `call_ended`.
     pub code: String,
+}
+
+/// The most recent decoded remote video frame handed to the desktop UI: the
+/// RGBA pixel bytes, the picture size, and a monotonically increasing frame
+/// counter the UI uses to tell a new frame from one it has already drawn.
+///
+/// Privacy: the pixel bytes are call content. This type does NOT derive
+/// `Debug`; the manual implementation below prints only the width, height and
+/// byte length so the pixels never reach a log or an error line.
+#[cfg(feature = "pqc")]
+#[derive(Clone, Serialize, Deserialize)]
+pub struct RemoteFrameData {
+    pub width: u16,
+    pub height: u16,
+    /// Tightly packed RGBA bytes, `width * height * 4` long for a full frame.
+    pub rgba: Vec<u8>,
+    /// Increases by one each time the media task stores a newer frame.
+    pub counter: u64,
+}
+
+#[cfg(feature = "pqc")]
+impl std::fmt::Debug for RemoteFrameData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteFrameData")
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("bytes", &self.rgba.len())
+            .finish()
+    }
+}
+
+/// Where the media task stores the latest decoded remote frame and the IPC
+/// handler reads it. `None` until the first frame is decoded. The counter in
+/// the stored frame only ever increases, so a reader can poll with the counter
+/// it last saw and receive a frame only when a newer one exists.
+#[cfg(feature = "pqc")]
+pub type RemoteFrameStore = std::sync::Arc<std::sync::Mutex<Option<RemoteFrameData>>>;
+
+/// Store `frame` as the latest remote frame, giving it the next counter value
+/// (one above whatever is currently held). Used by the media task each time it
+/// decodes a remote picture.
+#[cfg(feature = "pqc")]
+pub fn store_remote_frame(store: &RemoteFrameStore, width: u16, height: u16, rgba: Vec<u8>) {
+    let mut slot = store.lock().unwrap_or_else(|e| e.into_inner());
+    let counter = slot.as_ref().map_or(0, |f| f.counter).saturating_add(1);
+    *slot = Some(RemoteFrameData {
+        width,
+        height,
+        rgba,
+        counter,
+    });
+}
+
+/// Read the latest remote frame, but only when its counter is strictly above
+/// `last_seen`; otherwise `None`. Used by the IPC handler to answer
+/// [`CallRequest::RemoteFrame`].
+#[cfg(feature = "pqc")]
+pub fn remote_frame_since(store: &RemoteFrameStore, last_seen: u64) -> Option<RemoteFrameData> {
+    let slot = store.lock().unwrap_or_else(|e| e.into_inner());
+    match slot.as_ref() {
+        Some(frame) if frame.counter > last_seen => Some(frame.clone()),
+        _ => None,
+    }
 }
 
 // IPC values may contain untrusted strings or tokens, so never format their contents.
@@ -719,6 +792,7 @@ mod tests {
             },
             CallRequest::StartScreenShare,
             CallRequest::StopScreenShare,
+            CallRequest::RemoteFrame { last_seen: 5 },
         ];
         for request in requests {
             let value = serde_json::to_value(ChatRequest::Call(request)).unwrap();
@@ -761,6 +835,13 @@ mod tests {
                 input: Some("Mic A".into()),
                 output: None,
             },
+            CallResponse::RemoteFrame(None),
+            CallResponse::RemoteFrame(Some(RemoteFrameData {
+                width: 2,
+                height: 2,
+                rgba: vec![1, 2, 3, 4],
+                counter: 9,
+            })),
         ];
         for response in responses {
             let value = serde_json::to_value(ChatResponse::Call(response)).unwrap();
@@ -811,6 +892,50 @@ mod tests {
             response,
             ChatResponse::Call(CallResponse::Unavailable)
         ));
+    }
+
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn remote_frame_store_replaces_and_counts_up() {
+        let store: RemoteFrameStore = std::sync::Arc::new(std::sync::Mutex::new(None));
+        // Nothing stored yet: no frame is newer than any `last_seen`.
+        assert!(remote_frame_since(&store, 0).is_none());
+        // First store gets counter 1 and is returned when `last_seen` is below it.
+        store_remote_frame(&store, 4, 2, vec![1, 2, 3, 4]);
+        let first = remote_frame_since(&store, 0).expect("a frame newer than 0");
+        assert_eq!((first.width, first.height, first.counter), (4, 2, 1));
+        assert_eq!(first.rgba, vec![1, 2, 3, 4]);
+        // Reading again with `last_seen` equal to the current counter yields
+        // nothing: only a strictly newer frame is handed back.
+        assert!(remote_frame_since(&store, 1).is_none());
+        // A second store replaces the frame and advances the counter to 2.
+        store_remote_frame(&store, 8, 8, vec![9, 9]);
+        assert!(remote_frame_since(&store, 2).is_none());
+        let second = remote_frame_since(&store, 1).expect("a frame newer than 1");
+        assert_eq!((second.width, second.height, second.counter), (8, 8, 2));
+        assert_eq!(second.rgba, vec![9, 9]);
+    }
+
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn remote_frame_debug_hides_pixels() {
+        // The pixel bytes are call content: the manual Debug prints the size
+        // and the byte count, never the pixels themselves.
+        let frame = RemoteFrameData {
+            width: 3,
+            height: 2,
+            rgba: vec![0xAB, 0xCD, 0xEF, 0x12, 0x34],
+            counter: 7,
+        };
+        let shown = format!("{frame:?}");
+        assert!(shown.contains("width"), "{shown}");
+        assert!(shown.contains("height"), "{shown}");
+        assert!(shown.contains("bytes"), "{shown}");
+        // The byte length is shown, but no pixel value and no `rgba` field.
+        assert!(shown.contains('5'), "{shown}");
+        assert!(!shown.contains("rgba"), "{shown}");
+        assert!(!shown.contains("171") && !shown.contains("AB"), "{shown}");
+        assert!(!shown.contains("205") && !shown.contains("CD"), "{shown}");
     }
 
     #[test]

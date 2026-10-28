@@ -7,7 +7,10 @@ use super::{
     video::ScreenSourceFactory,
 };
 use crate::chat::{
-    ipc::{AudioDeviceListDto, CallNoticeDto, CallRequest, CallResponse, CallStatusDto},
+    ipc::{
+        remote_frame_since, AudioDeviceListDto, CallNoticeDto, CallRequest, CallResponse,
+        CallStatusDto, RemoteFrameStore,
+    },
     service::ChatService,
 };
 use std::{
@@ -88,6 +91,9 @@ struct Inner {
     /// on StopScreenShare, on hang up and whenever the call leaves Connected.
     /// Never set automatically.
     screen_sharing: bool,
+    /// The latest decoded remote video frame, shared with the media task that
+    /// writes it and read by the IPC handler. Lives beside the call status.
+    remote_frames: RemoteFrameStore,
 }
 impl Inner {
     fn collect(&mut self) {
@@ -111,6 +117,7 @@ fn media_failed<P: CallPorts>(controller: &mut CallController<P>, notices: &mut 
 /// task gets a fresh set, so the factory is called once per task start.
 type VideoPartsFactory = dyn Fn() -> Option<VideoParts> + Send + Sync;
 
+#[allow(clippy::too_many_arguments)]
 fn sync_media<P: CallPorts>(
     controller: &mut CallController<P>,
     provider: Arc<dyn MediaLinkProvider>,
@@ -121,6 +128,7 @@ fn sync_media<P: CallPorts>(
     devices: AudioChoice,
     screen_factory: Option<&Arc<dyn ScreenSourceFactory>>,
     screen_sharing: bool,
+    remote_frames: RemoteFrameStore,
 ) {
     if controller.status().state != State::Connected {
         *stats = None;
@@ -155,6 +163,7 @@ fn sync_media<P: CallPorts>(
             muted,
             devices,
             screen_source,
+            remote_frames,
         );
         *stats = media.as_ref().map(|_| new_stats);
     }
@@ -220,6 +229,7 @@ impl CallRuntime {
         // stays dormant until a build or test supplies a working factory.
         let screen_factory: Arc<dyn ScreenSourceFactory> = Arc::new(NoScreenFactory);
         let task_screen_factory = screen_factory.clone();
+        let remote_frames: RemoteFrameStore = Arc::new(Mutex::new(None));
         let inner = Arc::new(Mutex::new(Inner {
             controller,
             notices: NoticeRing::default(),
@@ -227,6 +237,7 @@ impl CallRuntime {
             muted: Arc::new(AtomicBool::new(false)),
             devices: AudioChoice::default(),
             screen_sharing: false,
+            remote_frames: remote_frames.clone(),
         }));
         let wake = Arc::new(Notify::new());
         let stop_task = Arc::new(Notify::new());
@@ -235,6 +246,7 @@ impl CallRuntime {
         let task_wake = wake.clone();
         let task_stop = stop_task.clone();
         let task_video = video_factory;
+        let task_frames = remote_frames;
         let mut stop = svc.call_shutdown();
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -291,6 +303,7 @@ impl CallRuntime {
                         devices,
                         Some(&task_screen_factory),
                         screen_sharing,
+                        task_frames.clone(),
                     );
                     let sends = state.controller.drain_encoded();
                     state.collect();
@@ -402,6 +415,9 @@ impl CallRuntime {
             CallRequest::ListAudioDevices => CallResponse::AudioDevices(host_device_list()),
             CallRequest::SelectAudioDevices { input, output } => {
                 apply_selection(&mut state.devices, input, output)
+            }
+            CallRequest::RemoteFrame { last_seen } => {
+                CallResponse::RemoteFrame(remote_frame_since(&state.remote_frames, last_seen))
             }
         };
         state.collect();
@@ -639,6 +655,7 @@ mod tests {
             AudioChoice::default(),
             None,
             false,
+            Arc::new(Mutex::new(None)),
         );
         sync_media(
             &mut b,
@@ -650,6 +667,7 @@ mod tests {
             AudioChoice::default(),
             None,
             false,
+            Arc::new(Mutex::new(None)),
         );
         sync_media(
             &mut a,
@@ -661,6 +679,7 @@ mod tests {
             AudioChoice::default(),
             None,
             false,
+            Arc::new(Mutex::new(None)),
         );
         tokio::task::yield_now().await;
         assert_eq!(provider.opens.load(Ordering::SeqCst), 2);
@@ -694,6 +713,7 @@ mod tests {
             AudioChoice::default(),
             None,
             false,
+            Arc::new(Mutex::new(None)),
         );
         sync_media(
             &mut b,
@@ -705,6 +725,7 @@ mod tests {
             AudioChoice::default(),
             None,
             false,
+            Arc::new(Mutex::new(None)),
         );
         assert!(am.is_none() && bm.is_none());
         for status in [
@@ -734,6 +755,7 @@ mod tests {
             AudioChoice::default(),
             None,
             false,
+            Arc::new(Mutex::new(None)),
         );
         assert!(!media.take().unwrap().await.unwrap());
         let mut notices = NoticeRing::default();

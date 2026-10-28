@@ -8,7 +8,7 @@
 //! Only built with the `pqc` feature, because the call IPC surface
 //! (`miasma_core::chat::ipc::CallRequest` and friends) is defined only there.
 
-use miasma_core::chat::ipc::{AudioDeviceListDto, CallRequest, CallStatusDto};
+use miasma_core::chat::ipc::{AudioDeviceListDto, CallRequest, CallStatusDto, RemoteFrameData};
 
 use crate::locale::CallStrings;
 
@@ -85,6 +85,10 @@ pub struct CallUi {
     selected_output: Option<String>,
     /// True after a `SelectAudioDevices` request is sent, until its answer confirms the choice.
     device_select_pending: bool,
+    /// The latest decoded remote video frame handed to this screen, or `None`
+    /// until one arrives. Part 2 draws it; this part only stores it. The frame
+    /// carries call content, so it is cleared when the call ends.
+    remote_frame: Option<RemoteFrameData>,
 }
 
 impl Default for CallUi {
@@ -102,6 +106,7 @@ impl Default for CallUi {
             selected_input: None,
             selected_output: None,
             device_select_pending: false,
+            remote_frame: None,
         }
     }
 }
@@ -168,10 +173,24 @@ impl CallUi {
         self.connected_ms = None;
         self.muted = false;
         self.status = None;
+        self.remote_frame = None;
     }
 
     pub fn status(&self) -> Option<&CallStatusDto> {
         self.status.as_ref()
+    }
+
+    /// Store the latest decoded remote video frame handed up from the daemon.
+    /// Replaces any frame held; the newest frame is the only one the screen
+    /// draws. Part 2 renders it from [`CallUi::remote_frame`].
+    pub fn on_remote_frame(&mut self, frame: RemoteFrameData) {
+        self.remote_frame = Some(frame);
+    }
+
+    /// The latest decoded remote video frame, or `None` when none has arrived
+    /// (or the call has ended).
+    pub fn remote_frame(&self) -> Option<&RemoteFrameData> {
+        self.remote_frame.as_ref()
     }
 
     /// The elapsed seconds of a connected call at `now_ms`, or `None` when not connected yet.
@@ -516,5 +535,50 @@ mod tests {
         assert!(ui.selected_input().is_none());
         assert!(ui.selected_output().is_none());
         assert!(!ui.device_select_pending());
+    }
+
+    fn frame(width: u16, height: u16, counter: u64) -> RemoteFrameData {
+        // Built through serde, like `status` above, so a new defaulted field on the frame DTO
+        // never breaks this helper. The pixel bytes are a short fixed pattern; their content is
+        // not asserted on, only that the newest frame is the one held.
+        serde_json::from_value(serde_json::json!({
+            "width": width,
+            "height": height,
+            "rgba": [1, 2, 3, 4],
+            "counter": counter,
+        }))
+        .expect("a remote frame with the required fields")
+    }
+
+    #[test]
+    fn a_remote_frame_is_stored_and_the_newest_replaces_the_previous_one() {
+        let mut ui = CallUi::default();
+        // No frame until one arrives.
+        assert!(ui.remote_frame().is_none());
+        ui.on_remote_frame(frame(4, 2, 1));
+        let first = ui.remote_frame().expect("the first frame is held");
+        assert_eq!((first.width, first.height, first.counter), (4, 2, 1));
+        // A newer frame replaces the previous one: only the latest is kept.
+        ui.on_remote_frame(frame(8, 6, 2));
+        let second = ui.remote_frame().expect("the newer frame replaces it");
+        assert_eq!((second.width, second.height, second.counter), (8, 6, 2));
+    }
+
+    #[test]
+    fn the_remote_frame_is_cleared_when_the_call_ends() {
+        // The frame carries call content, so it must not linger past the call. `end()` clears it,
+        // and an `idle` status (which routes through `end()`) clears it too.
+        let mut ui = CallUi::default();
+        ui.on_status(&status("connected", None), 1_000);
+        ui.on_remote_frame(frame(4, 2, 1));
+        assert!(ui.remote_frame().is_some());
+        ui.end();
+        assert!(ui.remote_frame().is_none());
+        // Via an idle status as well.
+        ui.on_status(&status("connected", None), 2_000);
+        ui.on_remote_frame(frame(4, 2, 3));
+        assert!(ui.remote_frame().is_some());
+        ui.on_status(&status("idle", None), 3_000);
+        assert!(ui.remote_frame().is_none());
     }
 }
