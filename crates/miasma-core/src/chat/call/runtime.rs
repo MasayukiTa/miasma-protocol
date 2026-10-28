@@ -106,7 +106,11 @@ fn sync_media<P: CallPorts>(
             task.abort();
         }
     } else if media.is_none() {
-        let new_stats = MediaStats::default();
+        let mut new_stats = MediaStats::default();
+        // Share the runtime's mute flag with the media task via `stats.muted`
+        // so a mid-call SetMuted reaches the tick loop; the media task reads
+        // the flag through the stats it was handed.
+        new_stats.muted = muted.clone();
         *media = maybe_start_media(controller, provider, false, new_stats.clone(), None, muted);
         *stats = media.as_ref().map(|_| new_stats);
     }

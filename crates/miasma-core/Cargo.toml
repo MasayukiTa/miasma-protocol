@@ -79,6 +79,16 @@ rand_core_pqc = { package = "rand_core", version = "0.10", default-features = fa
 jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"], optional = true }
 zune-jpeg = { version = "0.5.15", default-features = false, optional = true }
 nokhwa = { version = "0.10", default-features = false, features = ["input-msmf", "decoding"], optional = true }
+# Real call audio (see src/chat/call/audio_device.rs and codec.rs). Both are
+# optional, desktop-only, and gated by the `call-audio` feature.
+# cpal: capture and playback on Windows and macOS through the
+# default host audio API; it is the only module that talks to a device.
+cpal = { version = "0.15", optional = true }
+# opus: bindings to libopus for the 48 kHz mono 20 ms voice codec. The crate
+# builds libopus from source, so a C toolchain is needed at build time; the
+# codec sits behind small traits so this one dependency can be swapped for a
+# crate that statically bundles libopus without changing the call code.
+opus = { version = "0.3", optional = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -93,10 +103,13 @@ objc2 = "0.6"
 objc2-foundation = "0.3"
 
 [features]
-default = ["iroh", "call-video", "call-camera"]
+default = ["iroh", "call-audio", "call-video", "call-camera"]
 # `miasma daemon --no-iroh` / `transport.iroh_mode = "off"` switch it off at run
 # time; building without the feature removes the code and the dependency tree.
 iroh = ["dep:iroh", "dep:iroh-mdns-address-lookup"]
+# Real capture, playback and Opus on Windows and macOS. On by default; other
+# platforms and builds without this feature use pseudo devices.
+call-audio = ["dep:cpal", "dep:opus"]
 call-video = ["dep:jpeg-encoder", "dep:zune-jpeg"]
 call-camera = ["dep:nokhwa"]
 # Hybrid X25519 + ML-KEM-768 key exchange primitives. Library only; not

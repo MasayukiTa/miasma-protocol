@@ -37,6 +37,20 @@ impl JitterBuffer {
         self.played = Some(seq);
         Some(frame)
     }
+    /// Like [`pop_ready`](Self::pop_ready) but also reports the gap: how many
+    /// sequence numbers were skipped between the last played frame and this
+    /// one. A gap greater than zero marks lost frames a decoder may conceal.
+    /// The first frame of a call has no predecessor and so reports no gap.
+    pub fn pop_ready_gap(&mut self) -> Option<(u64, Zeroizing<[u8; FRAME_PLAINTEXT_LEN]>)> {
+        let previous = self.played;
+        let (seq, frame) = self.frames.pop_first()?;
+        self.played = Some(seq);
+        let gap = match previous {
+            Some(previous) => seq.saturating_sub(previous).saturating_sub(1),
+            None => 0,
+        };
+        Some((gap, frame))
+    }
     pub fn len(&self) -> usize {
         self.frames.len()
     }
