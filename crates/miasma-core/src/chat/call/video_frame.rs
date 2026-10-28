@@ -48,8 +48,8 @@ use super::media::FRAME_PLAINTEXT_LEN;
 
 /// Fragment header length in bytes, placed at the front of each 60-byte media
 /// plaintext body: frame_number(2) + fragment_index(2) + fragment_count(2) +
-/// flags(1). Kept small and fixed so the payload per fragment is maximal.
-pub const FRAGMENT_HEADER_LEN: usize = 7;
+/// flags(1) + encoded_length(2). The length is present on fragment zero.
+pub const FRAGMENT_HEADER_LEN: usize = 9;
 
 /// Bitstream bytes carried in one fragment body (the 60-byte plaintext minus
 /// the fragment header). The final fragment of a frame is zero-padded up to
@@ -97,6 +97,7 @@ pub struct FragmentHeader {
     pub fragment_index: u16,
     pub fragment_count: u16,
     pub keyframe: bool,
+    pub encoded_length: u16,
 }
 
 impl FragmentHeader {
@@ -104,6 +105,11 @@ impl FragmentHeader {
         if self.fragment_count == 0
             || self.fragment_count > MAX_FRAGMENTS_PER_FRAME
             || self.fragment_index >= self.fragment_count
+            || (self.fragment_index == 0
+                && (self.encoded_length == 0
+                    || (self.encoded_length as usize).div_ceil(FRAGMENT_PAYLOAD_LEN)
+                        != self.fragment_count as usize))
+            || (self.fragment_index != 0 && self.encoded_length != 0)
         {
             return Err(VideoFrameError::BadHeader);
         }
@@ -141,6 +147,7 @@ pub fn fragment_frame(
             fragment_index: index as u16,
             fragment_count,
             keyframe,
+            encoded_length: if index == 0 { frame.len() as u16 } else { 0 },
         };
         write_header(&mut body, &header);
         body[FRAGMENT_HEADER_LEN..FRAGMENT_HEADER_LEN + chunk.len()].copy_from_slice(chunk);
@@ -155,6 +162,7 @@ fn write_header(body: &mut [u8; FRAME_PLAINTEXT_LEN], header: &FragmentHeader) {
     body[2..4].copy_from_slice(&header.fragment_index.to_be_bytes());
     body[4..6].copy_from_slice(&header.fragment_count.to_be_bytes());
     body[6] = if header.keyframe { FLAG_KEYFRAME } else { 0 };
+    body[7..9].copy_from_slice(&header.encoded_length.to_be_bytes());
 }
 
 /// Parse the fragment header and return it together with the fragment's
@@ -169,6 +177,7 @@ pub fn parse_fragment(body: &[u8]) -> Result<(FragmentHeader, &[u8]), VideoFrame
         fragment_index: u16::from_be_bytes([body[2], body[3]]),
         fragment_count: u16::from_be_bytes([body[4], body[5]]),
         keyframe: body[6] & FLAG_KEYFRAME != 0,
+        encoded_length: u16::from_be_bytes([body[7], body[8]]),
     };
     header.validate()?;
     Ok((header, &body[FRAGMENT_HEADER_LEN..]))
@@ -194,6 +203,7 @@ mod tests {
                 assert_eq!(h.frame_number, 42);
                 assert_eq!(h.fragment_index, i as u16);
                 assert_eq!(h.fragment_count as usize, expected_count);
+                assert_eq!(h.encoded_length as usize, if i == 0 { len } else { 0 });
                 out.extend_from_slice(payload);
             }
             out.truncate(len);

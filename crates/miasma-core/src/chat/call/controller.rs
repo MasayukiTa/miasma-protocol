@@ -55,6 +55,7 @@ struct PendingSend {
 }
 struct CallKeys {
     role: Role,
+    negotiated: Option<caps::Negotiated>,
     call_id: Zeroizing<[u8; 16]>,
     caller_share: Option<Zeroizing<[u8; 32]>>,
     callee_share: Option<Zeroizing<[u8; 32]>>,
@@ -715,6 +716,7 @@ pub struct CallController<P: CallPorts> {
     call_keys: Option<CallKeys>,
     sas_context: Option<CallSasContext>,
     safety_code: OnceLock<String>,
+    negotiated_media: u8,
     entered_at_ms: Option<u64>,
     offer_limiter: OfferLimiter,
     dropped_offers: u64,
@@ -741,6 +743,7 @@ impl<P: CallPorts> CallController<P> {
             call_keys: None,
             sas_context: None,
             safety_code: OnceLock::new(),
+            negotiated_media: 0,
             entered_at_ms: None,
             offer_limiter: OfferLimiter::new(),
             dropped_offers: 0,
@@ -767,6 +770,7 @@ impl<P: CallPorts> CallController<P> {
                 call_nonce,
                 expires_at_ms,
                 key_share,
+                capabilities,
                 ..
             } => {
                 let from_contact = self.ports.is_contact_allowed(&peer)
@@ -777,6 +781,9 @@ impl<P: CallPorts> CallController<P> {
                 }
                 incoming_context = Some(CallKeys {
                     role: Role::Callee,
+                    negotiated: Capabilities::decode(&capabilities).ok().and_then(|remote| {
+                        caps::negotiate(&remote, &Capabilities::default_local()).ok()
+                    }),
                     call_id: Zeroizing::new(call_id),
                     caller_share: Some(key_share),
                     callee_share: None,
@@ -805,9 +812,10 @@ impl<P: CallPorts> CallController<P> {
             } if self.peer == Some(peer) => {
                 let id = CallId(call_id);
                 if old_state == State::Calling && self.machine.matches_active(&id) {
-                    if let Err(error) = Capabilities::decode(&capabilities)
-                        .and_then(|remote| caps::negotiate(&Capabilities::default_local(), &remote))
-                    {
+                    let negotiated = Capabilities::decode(&capabilities).and_then(|remote| {
+                        caps::negotiate(&Capabilities::default_local(), &remote)
+                    });
+                    if let Err(error) = negotiated {
                         // UserHangUp cancels the pending call and clears the machine.
                         self.apply_event(Event::UserHangUp, now);
                         if let Some(send) = self.pending_sends.back_mut() {
@@ -823,6 +831,9 @@ impl<P: CallPorts> CallController<P> {
                             }
                         }
                         return;
+                    }
+                    if let Some(keys) = self.call_keys.as_mut() {
+                        keys.negotiated = negotiated.ok();
                     }
                 }
                 if old_state == State::Calling && self.machine.matches_active(&id) {
@@ -898,6 +909,7 @@ impl<P: CallPorts> CallController<P> {
         let encoded = record.encode_zeroizing().map_err(|_| CallError::NotReady)?;
         self.call_keys = Some(CallKeys {
             role: Role::Caller,
+            negotiated: None,
             call_id: Zeroizing::new(call_id.0),
             caller_share: Some(share),
             callee_share: None,
@@ -1128,10 +1140,16 @@ impl<P: CallPorts> CallController<P> {
                 })
             });
             let _ = self.safety_code();
+            self.negotiated_media = self
+                .call_keys
+                .as_ref()
+                .and_then(|keys| keys.negotiated)
+                .map_or(0, |caps| caps.media_types);
         }
         if transition.next == State::Idle {
             self.sas_context = None;
             self.safety_code = OnceLock::new();
+            self.negotiated_media = 0;
             self.call_keys = None;
             self.pending_sends.retain(|send| send.encoded.is_none());
             self.peer = None;
@@ -1213,6 +1231,10 @@ impl<P: CallPorts> CallController<P> {
             &digits[15..20]
         );
         Some(self.safety_code.get_or_init(|| code).clone())
+    }
+
+    pub fn negotiated_video(&self) -> bool {
+        self.machine.state() == State::Connected && self.negotiated_media & caps::MEDIA_VIDEO != 0
     }
 
     pub fn active_peer(&self) -> Option<[u8; 32]> {
@@ -1628,6 +1650,38 @@ mod tests {
         assert!(*ar.send != *br.recv);
     }
 
+    #[test]
+    fn negotiated_video_tracks_active_call() {
+        for video in [true, false] {
+            let a_peer = signal::new_key_share();
+            let b_peer = signal::new_key_share();
+            let mut a = controller();
+            let mut b = controller();
+            assert!(a.dial(*b_peer).is_ok());
+            let offer_bytes = a.drain_encoded().remove(0).1;
+            let mut offer = Record::decode(&offer_bytes).unwrap();
+            if !video {
+                if let Record::Offer { capabilities, .. } = &mut offer {
+                    *capabilities = Capabilities::audio_only().encode();
+                }
+            }
+            b.on_inbound(inbound(*a_peer, offer));
+            assert!(b.accept(b.status().pending_token.unwrap()));
+            let mut answer = Record::decode(&b.drain_encoded().remove(0).1).unwrap();
+            if !video {
+                if let Record::Answer { capabilities, .. } = &mut answer {
+                    *capabilities = Capabilities::audio_only().encode();
+                }
+            }
+            a.on_inbound(inbound(*b_peer, answer));
+            assert_eq!(a.negotiated_video(), video);
+            assert_eq!(b.negotiated_video(), video);
+            a.hang_up();
+            b.hang_up();
+            assert!(!a.negotiated_video());
+            assert!(!b.negotiated_video());
+        }
+    }
     #[test]
     fn hang_up_discards_unclaimed_roots() {
         let a_peer = signal::new_key_share();

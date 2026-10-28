@@ -5,6 +5,7 @@ use super::{
     media::Direction,
     session::{DatagramLink, MediaSession, TickStatus},
     state::State,
+    video::{VideoDecoder, VideoDriver, VideoEncoder, VideoSink, VideoSource},
 };
 use crate::transport::{
     call_link::IrohDatagramLink,
@@ -16,7 +17,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock, Weak,
     },
     time::{Duration, Instant},
@@ -29,6 +30,20 @@ pub struct MediaStats {
     pub frames_played: Arc<AtomicU64>,
     pub video_frames_sent: Arc<AtomicU64>,
     pub video_frames_played: Arc<AtomicU64>,
+    pub camera_in_use: Arc<AtomicBool>,
+}
+
+pub struct VideoParts {
+    pub source: Box<dyn VideoSource + Send>,
+    pub sink: Box<dyn VideoSink + Send>,
+    pub encoder: Box<dyn VideoEncoder + Send>,
+    pub decoder: Box<dyn VideoDecoder + Send>,
+}
+struct CameraGuard(Arc<AtomicBool>);
+impl Drop for CameraGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
 }
 
 pub trait MediaLinkProvider: Send + Sync {
@@ -161,14 +176,22 @@ pub(super) fn maybe_start_media<P: CallPorts>(
     provider: Arc<dyn MediaLinkProvider>,
     running: bool,
     stats: MediaStats,
+    video: Option<VideoParts>,
 ) -> Option<JoinHandle<bool>> {
     if running || controller.status().state != State::Connected {
         return None;
     }
+    let video = if controller.negotiated_video() {
+        video
+    } else {
+        None
+    };
     let peer = controller.active_peer()?;
     let call_id = controller.active_call_id()?;
     let roots = controller.take_media_roots()?;
     Some(tokio::spawn(async move {
+        let _camera_guard = CameraGuard(stats.camera_in_use.clone());
+        let mut video = video.map(|p| VideoDriver::new(p.source, p.sink, p.encoder, p.decoder, 20));
         let Some(link) = provider.open(peer, roots.direction).await else {
             return false;
         };
@@ -189,7 +212,24 @@ pub(super) fn maybe_start_media<P: CallPorts>(
         let mut interval = tokio::time::interval(Duration::from_millis(20));
         loop {
             interval.tick().await;
-            let status = session.tick(crate::chat::engine::now_ms());
+            let now = crate::chat::engine::now_ms();
+            let status = if let Some(driver) = video.as_mut() {
+                stats
+                    .camera_in_use
+                    .store(driver.source_is_open(), Ordering::Relaxed);
+                let packets = driver.tick(now);
+                let status =
+                    session.tick_with_video(now, &packets, |body, time| driver.receive(body, time));
+                stats
+                    .video_frames_sent
+                    .store(driver.frames_sent, Ordering::Relaxed);
+                stats
+                    .video_frames_played
+                    .store(driver.frames_played, Ordering::Relaxed);
+                status
+            } else {
+                session.tick(now)
+            };
             stats
                 .frames_sent
                 .store(session.stats().sent, Ordering::Relaxed);
