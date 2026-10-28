@@ -23,13 +23,20 @@ fn pal() -> Palette {
 /// What a press on a call widget asks the app to do. The app turns it into the matching
 /// [`miasma_core::chat::ipc::CallRequest`] (see the builders in `call.rs`) and updates its
 /// [`CallUi`]. Accept and Reject carry the ringing call's token.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum CallAction {
     Dial,
     Accept(u64),
     Reject(u64),
     HangUp,
     ToggleMute,
+    /// Ask the host for its audio devices, to fill the picker.
+    ListDevices,
+    /// Choose the input and/or output device by name (`None` means the host default).
+    SelectDevices {
+        input: Option<String>,
+        output: Option<String>,
+    },
 }
 
 // The token is not shown and not logged, so the action may be formatted safely for diagnostics
@@ -42,6 +49,9 @@ impl std::fmt::Debug for CallAction {
             CallAction::Reject(_) => "Reject",
             CallAction::HangUp => "HangUp",
             CallAction::ToggleMute => "ToggleMute",
+            CallAction::ListDevices => "ListDevices",
+            // The device names are not shown here, so they are never formatted into diagnostics.
+            CallAction::SelectDevices { .. } => "SelectDevices",
         };
         f.write_str(name)
     }
@@ -157,6 +167,96 @@ pub fn in_call_panel(
         }
     });
     action
+}
+
+/// The audio-device picker: two drop-downs, input and output, each with a "default" entry that
+/// stands for the host default (sent as `None`). The current selection comes from `state`; the
+/// list of names comes from the host's last `ListAudioDevices` answer, also held in `state`. When
+/// a drop-down changes, the chosen input and output are returned together as a
+/// [`CallAction::SelectDevices`] (each `None` for the default entry); otherwise `None`.
+///
+/// The widget holds no state of its own: the caller applies the returned action and, once the
+/// runtime confirms it, the new selection shows here.
+pub fn device_picker(ui: &mut egui::Ui, c: &CallStrings, state: &CallUi) -> Option<CallAction> {
+    // The default entry is a neutral word; a real name is shown as itself. The empty selection
+    // (host default) maps to that entry.
+    let mut input = state.selected_input().map(str::to_owned);
+    let mut output = state.selected_output().map(str::to_owned);
+    let mut changed = false;
+
+    ui.add(egui::Label::new(
+        kit::meta_text(c.device_heading, pal().muted).strong(),
+    ));
+
+    // Input drop-down.
+    ui.horizontal(|ui| {
+        kit::paragraph_muted(ui, c.device_input_label);
+        let shown = input.as_deref().unwrap_or(c.device_default);
+        egui::ComboBox::from_id_source("call_device_input")
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(input.is_none(), c.device_default)
+                    .clicked()
+                    && input.is_some()
+                {
+                    input = None;
+                    changed = true;
+                }
+                for name in state.device_inputs() {
+                    if ui
+                        .selectable_label(input.as_deref() == Some(name.as_str()), name)
+                        .clicked()
+                        && input.as_deref() != Some(name.as_str())
+                    {
+                        input = Some(name.clone());
+                        changed = true;
+                    }
+                }
+            })
+            .response
+            .widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, c.device_input_label)
+            });
+    });
+
+    // Output drop-down.
+    ui.horizontal(|ui| {
+        kit::paragraph_muted(ui, c.device_output_label);
+        let shown = output.as_deref().unwrap_or(c.device_default);
+        egui::ComboBox::from_id_source("call_device_output")
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(output.is_none(), c.device_default)
+                    .clicked()
+                    && output.is_some()
+                {
+                    output = None;
+                    changed = true;
+                }
+                for name in state.device_outputs() {
+                    if ui
+                        .selectable_label(output.as_deref() == Some(name.as_str()), name)
+                        .clicked()
+                        && output.as_deref() != Some(name.as_str())
+                    {
+                        output = Some(name.clone());
+                        changed = true;
+                    }
+                }
+            })
+            .response
+            .widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, c.device_output_label)
+            });
+    });
+
+    if changed {
+        Some(CallAction::SelectDevices { input, output })
+    } else {
+        None
+    }
 }
 
 /// The always-on indicator shown while the microphone is in use during a call. It is a design

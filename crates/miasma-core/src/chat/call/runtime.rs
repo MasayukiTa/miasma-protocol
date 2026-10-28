@@ -1,10 +1,12 @@
 use super::{
     controller::{CallController, CallError, CallNotice, CallPorts, MediaGate, SasInputs},
-    media_task::{maybe_start_media, IrohLinkProvider, MediaLinkProvider, MediaStats, VideoParts},
+    media_task::{
+        maybe_start_media, AudioChoice, IrohLinkProvider, MediaLinkProvider, MediaStats, VideoParts,
+    },
     state::State,
 };
 use crate::chat::{
-    ipc::{CallNoticeDto, CallRequest, CallResponse, CallStatusDto},
+    ipc::{AudioDeviceListDto, CallNoticeDto, CallRequest, CallResponse, CallStatusDto},
     service::ChatService,
 };
 use std::{
@@ -76,6 +78,10 @@ struct Inner {
     notices: NoticeRing,
     media_stats: Option<MediaStats>,
     muted: Arc<AtomicBool>,
+    /// The audio devices chosen for the next call. A running call keeps the
+    /// devices it already opened; this is read when the next call starts its
+    /// media task.
+    devices: AudioChoice,
 }
 impl Inner {
     fn collect(&mut self) {
@@ -102,6 +108,7 @@ fn sync_media<P: CallPorts>(
     stats: &mut Option<MediaStats>,
     muted: Arc<AtomicBool>,
     video_factory: Option<&Arc<VideoPartsFactory>>,
+    devices: AudioChoice,
 ) {
     if controller.status().state != State::Connected {
         *stats = None;
@@ -120,7 +127,15 @@ fn sync_media<P: CallPorts>(
         // When this endpoint injects pseudo video parts, build a fresh set for
         // this media task; audio-only endpoints pass no factory and get `None`.
         let video = video_factory.and_then(|factory| factory());
-        *media = maybe_start_media(controller, provider, false, new_stats.clone(), video, muted);
+        *media = maybe_start_media(
+            controller,
+            provider,
+            false,
+            new_stats.clone(),
+            video,
+            muted,
+            devices,
+        );
         *stats = media.as_ref().map(|_| new_stats);
     }
 }
@@ -176,6 +191,7 @@ impl CallRuntime {
             notices: NoticeRing::default(),
             media_stats: None,
             muted: Arc::new(AtomicBool::new(false)),
+            devices: AudioChoice::default(),
         }));
         let wake = Arc::new(Notify::new());
         let stop_task = Arc::new(Notify::new());
@@ -223,15 +239,19 @@ impl CallRuntime {
                         controller,
                         media_stats,
                         muted,
+                        devices,
                         ..
                     } = &mut *state;
+                    let muted = muted.clone();
+                    let devices = devices.clone();
                     sync_media(
                         controller,
                         provider.clone(),
                         &mut media,
                         media_stats,
-                        muted.clone(),
+                        muted,
                         task_video.as_ref(),
+                        devices,
                     );
                     let sends = state.controller.drain_encoded();
                     state.collect();
@@ -319,6 +339,10 @@ impl CallRuntime {
                 CallResponse::Status(dto)
             }
             CallRequest::Events { since } => state.notices.events(since),
+            CallRequest::ListAudioDevices => CallResponse::AudioDevices(host_device_list()),
+            CallRequest::SelectAudioDevices { input, output } => {
+                apply_selection(&mut state.devices, input, output)
+            }
         };
         state.collect();
         drop(state);
@@ -326,6 +350,19 @@ impl CallRuntime {
         response
     }
 }
+/// Record a device choice for the next call and echo it back. A running call
+/// keeps the devices it already opened; only the next call reads this. Split
+/// out so the pure storage behaviour can be tested without a running service.
+fn apply_selection(
+    devices: &mut AudioChoice,
+    input: Option<String>,
+    output: Option<String>,
+) -> CallResponse {
+    devices.input = input.clone();
+    devices.output = output.clone();
+    CallResponse::AudioDevicesSelected { input, output }
+}
+
 fn status_dto<P: CallPorts>(
     controller: &CallController<P>,
     stats: Option<&MediaStats>,
@@ -382,6 +419,26 @@ fn notice_word(notice: CallNotice) -> &'static str {
         CallNotice::SendFailed => "send_failed",
     }
 }
+/// The host's audio devices as an IPC DTO. On a desktop build with the audio
+/// backend this enumerates the host (off the caller's thread, inside
+/// [`super::audio_device::list_devices`]); on every other platform the backend
+/// is absent, so the lists are empty and the selection is accepted but unused.
+#[cfg(all(feature = "call-audio", any(windows, target_os = "macos")))]
+fn host_device_list() -> AudioDeviceListDto {
+    let list = super::audio_device::list_devices();
+    AudioDeviceListDto {
+        inputs: list.inputs,
+        outputs: list.outputs,
+        default_input: list.default_input,
+        default_output: list.default_output,
+    }
+}
+
+#[cfg(not(all(feature = "call-audio", any(windows, target_os = "macos"))))]
+fn host_device_list() -> AudioDeviceListDto {
+    AudioDeviceListDto::default()
+}
+
 static RUNTIMES: OnceLock<Mutex<HashMap<PathBuf, Arc<CallRuntime>>>> = OnceLock::new();
 fn runtimes() -> &'static Mutex<HashMap<PathBuf, Arc<CallRuntime>>> {
     RUNTIMES.get_or_init(|| Mutex::new(HashMap::new()))
@@ -520,6 +577,7 @@ mod tests {
             &mut a_stats,
             Arc::new(AtomicBool::new(false)),
             None,
+            AudioChoice::default(),
         );
         sync_media(
             &mut b,
@@ -528,6 +586,7 @@ mod tests {
             &mut b_stats,
             Arc::new(AtomicBool::new(false)),
             None,
+            AudioChoice::default(),
         );
         sync_media(
             &mut a,
@@ -536,6 +595,7 @@ mod tests {
             &mut a_stats,
             Arc::new(AtomicBool::new(false)),
             None,
+            AudioChoice::default(),
         );
         tokio::task::yield_now().await;
         assert_eq!(provider.opens.load(Ordering::SeqCst), 2);
@@ -566,6 +626,7 @@ mod tests {
             &mut a_stats,
             Arc::new(AtomicBool::new(false)),
             None,
+            AudioChoice::default(),
         );
         sync_media(
             &mut b,
@@ -574,6 +635,7 @@ mod tests {
             &mut b_stats,
             Arc::new(AtomicBool::new(false)),
             None,
+            AudioChoice::default(),
         );
         assert!(am.is_none() && bm.is_none());
         for status in [
@@ -600,6 +662,7 @@ mod tests {
             &mut stats,
             Arc::new(AtomicBool::new(false)),
             None,
+            AudioChoice::default(),
         );
         assert!(!media.take().unwrap().await.unwrap());
         let mut notices = NoticeRing::default();
@@ -656,6 +719,53 @@ mod tests {
                 state_word(State::Connected)
             ],
             ["idle", "calling", "ringing", "connected"]
+        );
+    }
+
+    #[test]
+    fn a_selection_is_stored_and_echoed() {
+        // The chosen names are recorded for the next call and echoed back.
+        let mut devices = AudioChoice::default();
+        assert!(devices.input.is_none() && devices.output.is_none());
+        let response = apply_selection(
+            &mut devices,
+            Some("Mic A".to_owned()),
+            Some("Speaker B".to_owned()),
+        );
+        assert_eq!(devices.input.as_deref(), Some("Mic A"));
+        assert_eq!(devices.output.as_deref(), Some("Speaker B"));
+        match response {
+            CallResponse::AudioDevicesSelected { input, output } => {
+                assert_eq!(input.as_deref(), Some("Mic A"));
+                assert_eq!(output.as_deref(), Some("Speaker B"));
+            }
+            _ => panic!("unexpected response"),
+        }
+        // Choosing the host default on both clears the stored names.
+        let response = apply_selection(&mut devices, None, None);
+        assert!(devices.input.is_none() && devices.output.is_none());
+        assert!(matches!(
+            response,
+            CallResponse::AudioDevicesSelected {
+                input: None,
+                output: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn listing_audio_devices_never_panics() {
+        // On a platform without the audio backend this returns empty lists; on
+        // a desktop build it enumerates the host. Either way it must return a
+        // value rather than panic, so a client always gets an answer.
+        let list = host_device_list();
+        // Without the backend both lists are empty; with it they may or may not
+        // be, so only the no-panic return is asserted here.
+        let _ = (
+            list.inputs,
+            list.outputs,
+            list.default_input,
+            list.default_output,
         );
     }
 }

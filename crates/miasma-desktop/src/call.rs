@@ -8,7 +8,7 @@
 //! Only built with the `pqc` feature, because the call IPC surface
 //! (`miasma_core::chat::ipc::CallRequest` and friends) is defined only there.
 
-use miasma_core::chat::ipc::{CallRequest, CallStatusDto};
+use miasma_core::chat::ipc::{AudioDeviceListDto, CallRequest, CallStatusDto};
 
 use crate::locale::CallStrings;
 
@@ -76,6 +76,15 @@ pub struct CallUi {
     events_since: u64,
     /// When the last poll went out (ms since the epoch), to space polls by `POLL_INTERVAL_MS`.
     last_poll_ms: u64,
+    /// The audio devices the host last reported, for the device picker. Empty until a
+    /// `ListAudioDevices` answer arrives. Plain names only; no handle and no secret.
+    devices: AudioDeviceListDto,
+    /// The input device the runtime has confirmed as chosen, or `None` for the host default.
+    selected_input: Option<String>,
+    /// The output device the runtime has confirmed as chosen, or `None` for the host default.
+    selected_output: Option<String>,
+    /// True after a `SelectAudioDevices` request is sent, until its answer confirms the choice.
+    device_select_pending: bool,
 }
 
 impl Default for CallUi {
@@ -89,6 +98,10 @@ impl Default for CallUi {
             connected_ms: None,
             events_since: 0,
             last_poll_ms: 0,
+            devices: AudioDeviceListDto::default(),
+            selected_input: None,
+            selected_output: None,
+            device_select_pending: false,
         }
     }
 }
@@ -197,6 +210,60 @@ impl CallUi {
     pub fn mark_polled(&mut self, now_ms: u64) {
         self.last_poll_ms = now_ms;
     }
+
+    /// Store the device list the host reported, in answer to `ListAudioDevices`. Replaces any
+    /// earlier list; the names are shown in the picker. Does not change the current selection.
+    pub fn on_audio_devices(&mut self, devices: AudioDeviceListDto) {
+        self.devices = devices;
+    }
+
+    /// Apply the selection the runtime confirmed, in answer to `SelectAudioDevices`. Records the
+    /// chosen names (or `None` for the host default) and clears the pending flag.
+    pub fn on_audio_devices_selected(&mut self, input: Option<String>, output: Option<String>) {
+        self.selected_input = input;
+        self.selected_output = output;
+        self.device_select_pending = false;
+    }
+
+    /// The input device names the host reported, for the picker.
+    pub fn device_inputs(&self) -> &[String] {
+        &self.devices.inputs
+    }
+
+    /// The output device names the host reported, for the picker.
+    pub fn device_outputs(&self) -> &[String] {
+        &self.devices.outputs
+    }
+
+    /// The host's default input name, if the host reported one.
+    pub fn default_input(&self) -> Option<&str> {
+        self.devices.default_input.as_deref()
+    }
+
+    /// The host's default output name, if the host reported one.
+    pub fn default_output(&self) -> Option<&str> {
+        self.devices.default_output.as_deref()
+    }
+
+    /// The confirmed input choice, or `None` for the host default.
+    pub fn selected_input(&self) -> Option<&str> {
+        self.selected_input.as_deref()
+    }
+
+    /// The confirmed output choice, or `None` for the host default.
+    pub fn selected_output(&self) -> Option<&str> {
+        self.selected_output.as_deref()
+    }
+
+    /// Note that a `SelectAudioDevices` request has gone out and its answer is awaited.
+    pub fn mark_device_select_pending(&mut self) {
+        self.device_select_pending = true;
+    }
+
+    /// Whether a device selection is awaiting its confirming answer.
+    pub fn device_select_pending(&self) -> bool {
+        self.device_select_pending
+    }
 }
 
 /// Build the `Dial` request for a contact (its endpoint id or label, as the chat requests use).
@@ -214,6 +281,17 @@ pub fn accept(token: u64) -> CallRequest {
 /// Build the `Reject` request for a ringing call's token.
 pub fn reject(token: u64) -> CallRequest {
     CallRequest::Reject { token }
+}
+
+/// Build the `ListAudioDevices` request that asks the host for its devices.
+pub fn list_audio_devices() -> CallRequest {
+    CallRequest::ListAudioDevices
+}
+
+/// Build the `SelectAudioDevices` request for the chosen input and output (each `None` for the
+/// host default).
+pub fn select_audio_devices(input: Option<String>, output: Option<String>) -> CallRequest {
+    CallRequest::SelectAudioDevices { input, output }
 }
 
 #[cfg(test)]
@@ -373,5 +451,70 @@ mod tests {
         assert!(matches!(dial("alice"), CallRequest::Dial { contact } if contact == "alice"));
         assert!(matches!(accept(3), CallRequest::Accept { token: 3 }));
         assert!(matches!(reject(4), CallRequest::Reject { token: 4 }));
+        assert!(matches!(
+            list_audio_devices(),
+            CallRequest::ListAudioDevices
+        ));
+        assert!(matches!(
+            select_audio_devices(Some("Mic A".to_owned()), None),
+            CallRequest::SelectAudioDevices { input, output }
+                if input.as_deref() == Some("Mic A") && output.is_none()
+        ));
+        assert!(matches!(
+            select_audio_devices(None, None),
+            CallRequest::SelectAudioDevices {
+                input: None,
+                output: None,
+            }
+        ));
+    }
+
+    fn device_list() -> AudioDeviceListDto {
+        // Built through serde, like the status helper above, so a new defaulted field in the DTO
+        // never breaks this helper.
+        serde_json::from_value(serde_json::json!({
+            "inputs": ["Mic A", "Mic B"],
+            "outputs": ["Speaker A"],
+            "default_input": "Mic A",
+            "default_output": "Speaker A",
+        }))
+        .expect("a device list with only names")
+    }
+
+    #[test]
+    fn the_reported_device_list_is_stored_for_the_picker() {
+        let mut ui = CallUi::default();
+        // Nothing reported yet: the picker has empty lists and no default.
+        assert!(ui.device_inputs().is_empty());
+        assert!(ui.device_outputs().is_empty());
+        assert!(ui.default_input().is_none());
+        assert!(ui.default_output().is_none());
+        ui.on_audio_devices(device_list());
+        assert_eq!(ui.device_inputs(), ["Mic A", "Mic B"]);
+        assert_eq!(ui.device_outputs(), ["Speaker A"]);
+        assert_eq!(ui.default_input(), Some("Mic A"));
+        assert_eq!(ui.default_output(), Some("Speaker A"));
+        // Storing the list does not invent a selection.
+        assert!(ui.selected_input().is_none());
+        assert!(ui.selected_output().is_none());
+    }
+
+    #[test]
+    fn a_confirmed_selection_is_shown_and_clears_the_pending_flag() {
+        let mut ui = CallUi::default();
+        assert!(!ui.device_select_pending());
+        // A request goes out: the pending flag is set until the answer confirms it.
+        ui.mark_device_select_pending();
+        assert!(ui.device_select_pending());
+        ui.on_audio_devices_selected(Some("Mic B".to_owned()), Some("Speaker A".to_owned()));
+        assert_eq!(ui.selected_input(), Some("Mic B"));
+        assert_eq!(ui.selected_output(), Some("Speaker A"));
+        assert!(!ui.device_select_pending());
+        // Choosing the host default on both is recorded as no name, and still clears pending.
+        ui.mark_device_select_pending();
+        ui.on_audio_devices_selected(None, None);
+        assert!(ui.selected_input().is_none());
+        assert!(ui.selected_output().is_none());
+        assert!(!ui.device_select_pending());
     }
 }
