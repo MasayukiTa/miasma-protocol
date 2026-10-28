@@ -1,5 +1,5 @@
 use super::{
-    controller::{CallController, CallError, CallNotice, CallPorts, MediaGate},
+    controller::{CallController, CallError, CallNotice, CallPorts, MediaGate, SasInputs},
     media_task::{maybe_start_media, IrohLinkProvider, MediaLinkProvider, MediaStats},
     state::State,
 };
@@ -27,6 +27,9 @@ impl CallPorts for RuntimePorts {
     }
     fn media_gate(&self, peer: &[u8; 32]) -> MediaGate {
         self.0.media_gate(peer)
+    }
+    fn sas_inputs(&self, peer: super::state::PeerId) -> Option<SasInputs> {
+        self.0.sas_inputs(&peer.0)
     }
 }
 
@@ -267,6 +270,7 @@ fn status_dto<P: CallPorts>(
         state: state_word(status.state).into(),
         pending_token: status.pending_token,
         signalling_connected: status.signalling_connected,
+        safety_code: controller.safety_code(),
         media_frames_sent: stats.map_or(0, |s| s.frames_sent.load(Ordering::Relaxed)),
         media_frames_played: stats.map_or(0, |s| s.frames_played.load(Ordering::Relaxed)),
     }
@@ -355,6 +359,9 @@ mod tests {
         }
         fn media_gate(&self, _: &[u8; 32]) -> MediaGate {
             MediaGate::Ready
+        }
+        fn sas_inputs(&self, _: super::super::state::PeerId) -> Option<SasInputs> {
+            None
         }
     }
     struct Link {

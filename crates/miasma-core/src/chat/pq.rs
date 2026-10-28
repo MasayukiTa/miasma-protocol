@@ -915,6 +915,36 @@ impl PqState {
         }
     }
 
+    pub(crate) fn sas_inputs(
+        &self,
+        peer: &[u8; 32],
+        sid: Option<[u8; 32]>,
+    ) -> Option<super::call::controller::SasInputs> {
+        let sid = sid?;
+        let mut g = self.lock();
+        if !g.peers.contains_key(peer) {
+            if !self.path(peer).exists() {
+                return None;
+            }
+            let Inner { peers, order, .. } = &mut *g;
+            let _ = self.slot_split(peers, order, peer, sid);
+        }
+        let p = g.peers.get(peer)?;
+        if p.sid != sid || p.phase != Phase::Active || p.key.is_none() {
+            return None;
+        }
+        let tag = if self.own_id < *peer {
+            p.own_tag
+        } else {
+            p.peer_tag
+        };
+        Some(super::call::controller::SasInputs {
+            local_identity: self.own_id,
+            peer_identity: *peer,
+            confirm_tag: Zeroizing::new(tag),
+        })
+    }
+
     pub fn seal_key(&self, peer: &[u8; 32], sid: &[u8; 32]) -> Option<Zeroizing<[u8; 32]>> {
         self.key_of(peer, sid, |p| p.phase == Phase::Active)
     }

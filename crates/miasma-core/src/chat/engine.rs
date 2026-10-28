@@ -901,6 +901,13 @@ impl ChatCore {
         self.pq.pass(peer, self.session_id(peer), have_text, now)
     }
 
+    #[cfg(feature = "pqc")]
+    pub(crate) fn sas_inputs(&self, peer: &[u8; 32]) -> Option<super::call::controller::SasInputs> {
+        let _g = self.gate();
+        self.pq.sas_inputs(peer, self.session_id(peer))
+    }
+
+    #[cfg(feature = "pqc")]
     pub(crate) fn media_gate(&self, peer: &[u8; 32]) -> super::call::controller::MediaGate {
         let _g = self.gate();
         self.pq.media_gate(peer, self.session_id(peer))

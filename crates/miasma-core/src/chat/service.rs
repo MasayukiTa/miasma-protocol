@@ -441,6 +441,11 @@ impl ChatService {
     }
 
     #[cfg(feature = "pqc")]
+    pub(crate) fn sas_inputs(&self, peer: &[u8; 32]) -> Option<super::call::controller::SasInputs> {
+        self.core.sas_inputs(peer)
+    }
+
+    #[cfg(feature = "pqc")]
     pub(crate) fn media_gate(&self, peer: &[u8; 32]) -> super::call::controller::MediaGate {
         self.core.media_gate(peer)
     }

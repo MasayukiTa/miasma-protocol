@@ -89,6 +89,8 @@ pub struct CallStatusDto {
     pub pending_token: Option<u64>,
     pub signalling_connected: bool,
     #[serde(default)]
+    pub safety_code: Option<String>,
+    #[serde(default)]
     pub media_frames_sent: u64,
     #[serde(default)]
     pub media_frames_played: u64,
@@ -645,6 +647,7 @@ mod tests {
                 state: "ringing".into(),
                 pending_token: Some(1),
                 signalling_connected: true,
+                safety_code: None,
                 media_frames_sent: 0,
                 media_frames_played: 0,
             }),
@@ -666,6 +669,7 @@ mod tests {
             r#"{"state":"idle","pending_token":null,"signalling_connected":false}"#,
         )
         .unwrap();
+        assert!(old_status.safety_code.is_none());
         assert_eq!(old_status.media_frames_sent, 0);
         assert_eq!(old_status.media_frames_played, 0);
         let old: ChatRequest = serde_json::from_str(r#"{"Conversations":{}}"#).unwrap();
