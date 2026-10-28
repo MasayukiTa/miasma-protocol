@@ -789,7 +789,11 @@ impl<P: CallPorts> CallController<P> {
                     peer_id: PeerId(peer),
                     from_contact,
                     expired: expires_at_ms < now,
-                    other_call_active: old_state != State::Idle,
+                    other_call_active: match old_state {
+                        State::Idle => false,
+                        State::Calling => self.peer != Some(peer),
+                        _ => true,
+                    },
                 })
             }
             Record::Answer {
@@ -1424,7 +1428,11 @@ mod tests {
         } else {
             (&mut a, &mut b, [2; 32])
         };
+        assert_eq!(caller.status().state, State::Calling);
         assert_eq!(callee.status().state, State::Ringing);
+        assert_eq!(callee.call_keys.as_ref().unwrap().role, Role::Callee);
+        assert!(callee.call_keys.as_ref().unwrap().callee_share.is_none());
+        assert!(*caller.active_call_id().unwrap() == *callee.active_call_id().unwrap());
         assert!(callee.accept(callee.status().pending_token.unwrap()));
         let answer = callee
             .drain_encoded()
@@ -1438,8 +1446,36 @@ mod tests {
             })
             .unwrap();
         deliver(caller, callee_id, &answer);
+        assert_eq!(caller.status().state, State::Connected);
+        assert_eq!(callee.status().state, State::Connected);
         assert!(caller.safety_code().is_some());
         assert_eq!(caller.safety_code(), callee.safety_code());
+        let caller_roots = caller.take_media_roots().unwrap();
+        let callee_roots = callee.take_media_roots().unwrap();
+        assert!(*caller_roots.send == *callee_roots.recv);
+        assert!(*caller_roots.recv == *callee_roots.send);
+    }
+
+    #[test]
+    fn crossed_offer_from_different_peer_is_busy() {
+        let mut a = controller();
+        let mut c = controller();
+        a.dial([2; 32]).unwrap();
+        a.drain_encoded();
+        c.dial([1; 32]).unwrap();
+        let offer = c.drain_encoded().remove(0).1;
+        let offered_id = match Record::decode(&offer).unwrap() {
+            Record::Offer { call_id, .. } => call_id,
+            _ => panic!("expected offer"),
+        };
+        deliver(&mut a, [3; 32], &offer);
+        assert_eq!(a.status().state, State::Calling);
+        let sends = a.drain_encoded();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].0, [3; 32]);
+        assert!(
+            matches!(Record::decode(&sends[0].1), Ok(Record::Busy { call_id, .. }) if call_id == offered_id)
+        );
     }
 
     #[test]
