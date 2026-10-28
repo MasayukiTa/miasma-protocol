@@ -110,6 +110,21 @@ Both settings persist across restarts.
 - This is intentional — your encrypted content is preserved in `%LOCALAPPDATA%\miasma\data\`
 - To fully remove all data, delete that directory after uninstalling
 
+## Calls
+
+**No microphone or camera found**: Check that the device is connected and available to your system. On Windows, check the microphone or camera settings and select an available device. Video and screen sharing depend on availability; on platforms other than Windows and macOS, calls use test devices only.
+
+**Permission denied on Windows**: Open Windows Settings > Privacy & security > Microphone or Camera. Allow access to the device and allow desktop apps to use it, then try again.
+
+**Turn calls off**: In `config.toml`, set `enabled = false` under `[call]`:
+
+```toml
+[call]
+enabled = false
+```
+
+**Safety code**: During a call, each person sees a 20-digit code. Read the codes to each other and compare all 20 digits. If they differ, an attacker may be interfering; end the call and check with your contact. The code helps detect interference; calls are beta and have not been independently audited. Do not use them for material whose exposure would be serious.
+
 ## Getting support
 
 1. Open the Status tab
