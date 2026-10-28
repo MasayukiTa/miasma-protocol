@@ -1,7 +1,8 @@
 use super::{
     controller::{CallController, CallError, CallNotice, CallPorts, MediaGate, SasInputs},
     media_task::{
-        maybe_start_media, AudioChoice, IrohLinkProvider, MediaLinkProvider, MediaStats, VideoParts,
+        maybe_start_media, AudioChoice, IrohLinkProvider, MediaControl, MediaLinkProvider,
+        MediaStats, VideoParts,
     },
     state::State,
     video::ScreenSourceFactory,
@@ -102,13 +103,7 @@ struct Inner {
     /// `NoCameraFactory`, which always declines, so StartCamera reports
     /// `no_camera`.
     camera_factory: Arc<dyn ScreenSourceFactory>,
-    /// The camera source opened by the StartCamera handler, waiting for the
-    /// next media sync to hand it to the media task. Opened once on the press
-    /// (so the device is not opened twice), taken by the media sync. Dropped,
-    /// releasing the device, on StopCamera, on hang up and whenever the call
-    /// leaves Connected. Holds a device handle and no key, nonce, call id or
-    /// peer id; it is never logged or formatted.
-    pending_camera: Option<Box<dyn super::video::VideoSource + Send>>,
+    screen_factory: Arc<dyn ScreenSourceFactory>,
     /// The latest decoded remote video frame, shared with the media task that
     /// writes it and read by the IPC handler. Lives beside the call status.
     remote_frames: RemoteFrameStore,
@@ -120,13 +115,10 @@ impl Inner {
         }
         // Neither the screen share nor the camera can outlive the connected
         // call it belongs to; both are cleared the moment the call leaves
-        // Connected. Dropping `pending_camera` releases a camera opened for
-        // this call but not yet handed to a media task, so the device is
-        // released when the call ends even if no media task ever took it.
+        // Connected. The media task releases its sources on shutdown.
         if self.controller.status().state != State::Connected {
             self.screen_sharing = false;
             self.camera_requested = false;
-            self.pending_camera = None;
         }
     }
 }
@@ -335,7 +327,6 @@ impl CallRuntime {
         if !offers_video {
             controller.set_local_offers_video(false);
         }
-        let task_screen_factory = screen_factory.clone();
         let remote_frames: RemoteFrameStore = Arc::new(Mutex::new(None));
         let inner = Arc::new(Mutex::new(Inner {
             controller,
@@ -346,7 +337,7 @@ impl CallRuntime {
             screen_sharing: false,
             camera_requested: false,
             camera_factory,
-            pending_camera: None,
+            screen_factory,
             remote_frames: remote_frames.clone(),
         }));
         let wake = Arc::new(Notify::new());
@@ -397,25 +388,10 @@ impl CallRuntime {
                         media_stats,
                         muted,
                         devices,
-                        screen_sharing,
-                        pending_camera,
                         ..
                     } = &mut *state;
                     let muted = muted.clone();
                     let devices = devices.clone();
-                    let screen_sharing = *screen_sharing;
-                    // Hand the opened camera source to the media sync only when
-                    // one is about to be started (no media task yet). Taking it
-                    // only then avoids dropping the source on a sync that does
-                    // not start a task; a later sync that does start one still
-                    // finds it waiting. When a media task is already running,
-                    // the source stays in `pending_camera` until that task ends
-                    // and the next sync can use it.
-                    let camera_source = if media.is_none() {
-                        pending_camera.take()
-                    } else {
-                        None
-                    };
                     sync_media(
                         controller,
                         provider.clone(),
@@ -424,9 +400,9 @@ impl CallRuntime {
                         muted,
                         task_video.as_ref(),
                         devices,
-                        camera_source,
-                        Some(&task_screen_factory),
-                        screen_sharing,
+                        None,
+                        None,
+                        false,
                         task_frames.clone(),
                     );
                     let sends = state.controller.drain_encoded();
@@ -513,58 +489,55 @@ impl CallRuntime {
                 let mut dto = status_dto(
                     &state.controller,
                     state.media_stats.as_ref(),
-                    state.screen_sharing,
+                    state
+                        .media_stats
+                        .as_ref()
+                        .map_or(false, |s| s.screen_sharing.load(Ordering::SeqCst)),
                 );
                 dto.muted = state.muted.load(Ordering::SeqCst);
                 CallResponse::Status(dto)
             }
-            // Screen sharing is honoured only while the call is connected with
-            // video negotiated, and is never started automatically.
             CallRequest::StartScreenShare => {
-                if state.controller.negotiated_video() {
-                    state.screen_sharing = true;
-                    CallResponse::Ok
-                } else {
+                if !state.controller.negotiated_video() {
                     CallResponse::Error("not_ready".into())
+                } else if state.screen_sharing {
+                    CallResponse::Ok
+                } else if let Some(source) = state.screen_factory.create() {
+                    if send_media_control(&state.media_stats, MediaControl::AttachScreen(source)) {
+                        state.screen_sharing = true;
+                        CallResponse::Ok
+                    } else {
+                        CallResponse::Error("not_ready".into())
+                    }
+                } else {
+                    CallResponse::Error("no_screen".into())
                 }
             }
-            // Stopping is idempotent: it always succeeds and leaves any camera
-            // stream untouched.
             CallRequest::StopScreenShare => {
+                send_media_control(&state.media_stats, MediaControl::DetachScreen);
                 state.screen_sharing = false;
                 CallResponse::Ok
             }
-            // The camera is honoured only while the call is connected with video
-            // negotiated, and is never started automatically. The device is
-            // opened here, on the explicit press: the factory is consulted and,
-            // if it opens a camera, the source is held until the next media sync
-            // hands it to the media task and `camera_in_use` follows. If no
-            // device can be opened the factory declines and the request is
-            // refused with `no_camera`; nothing is left requested. Leaving video
-            // unnegotiated refuses the request outright with `not_ready` without
-            // touching any device.
             CallRequest::StartCamera => {
-                let negotiated = state.controller.negotiated_video();
-                let (response, source) =
-                    decide_start_camera(negotiated, state.camera_requested, &state.camera_factory);
-                // Only a fresh successful start yields a source: hold it for the
-                // next media sync and mark the camera requested. A refusal or an
-                // idempotent repeat changes no state.
+                let (response, source) = decide_start_camera(
+                    state.controller.negotiated_video(),
+                    state.camera_requested,
+                    &state.camera_factory,
+                );
                 if let Some(source) = source {
-                    state.pending_camera = Some(source);
-                    state.camera_requested = true;
+                    if send_media_control(&state.media_stats, MediaControl::AttachCamera(source)) {
+                        state.camera_requested = true;
+                        response
+                    } else {
+                        CallResponse::Error("not_ready".into())
+                    }
+                } else {
+                    response
                 }
-                response
             }
-            // Stopping is idempotent: it always succeeds, clears the request and
-            // drops any camera source opened but not yet taken by a media task
-            // (releasing the device), and leaves any screen stream untouched. A
-            // media task already driving the camera releases the device when it
-            // ends; the next media sync starts no new camera because the flag is
-            // clear.
             CallRequest::StopCamera => {
+                send_media_control(&state.media_stats, MediaControl::DetachCamera);
                 state.camera_requested = false;
-                state.pending_camera = None;
                 CallResponse::Ok
             }
             CallRequest::Events { since } => state.notices.events(since),
@@ -593,6 +566,20 @@ fn apply_selection(
     devices.input = input.clone();
     devices.output = output.clone();
     CallResponse::AudioDevicesSelected { input, output }
+}
+
+fn send_media_control(stats: &Option<MediaStats>, control: MediaControl) -> bool {
+    stats
+        .as_ref()
+        .and_then(|stats| {
+            stats
+                .control
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map(|tx| tx.send(control).is_ok())
+        })
+        .unwrap_or(false)
 }
 
 /// The StartCamera decision, factored out so it can be unit-tested without a
