@@ -11,10 +11,11 @@ use super::{
     session::{DatagramLink, MediaSession, TickStatus},
     state::State,
     video::{
-        DiscardVideoSink, PassthroughCodec, VideoDecoder, VideoDriver, VideoEncoder, VideoSink,
-        VideoSource,
+        DiscardVideoSink, PassthroughCodec, RawPicture, VideoDecoder, VideoDriver, VideoEncoder,
+        VideoSink, VideoSource,
     },
 };
+use crate::chat::ipc::{store_remote_frame, RemoteFrameStore};
 use crate::transport::{
     call_link::IrohDatagramLink,
     iroh_direct::{CallConnectionHandler, IrohNode},
@@ -211,6 +212,7 @@ pub(super) struct AudioChoice {
     pub output: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn maybe_start_media<P: CallPorts>(
     controller: &mut CallController<P>,
     provider: Arc<dyn MediaLinkProvider>,
@@ -220,6 +222,7 @@ pub(super) fn maybe_start_media<P: CallPorts>(
     _muted: Arc<AtomicBool>,
     devices: AudioChoice,
     screen_source: Option<Box<dyn VideoSource + Send>>,
+    remote_frames: RemoteFrameStore,
 ) -> Option<JoinHandle<bool>> {
     if running || controller.status().state != State::Connected {
         return None;
@@ -345,7 +348,20 @@ pub(super) fn maybe_start_media<P: CallPorts>(
                     },
                 )
             };
-            if let Some(driver) = video.as_ref() {
+            if let Some(driver) = video.as_mut() {
+                // Publish the newest decoded remote picture for the UI. The
+                // camera driver hands back at most one picture per tick; the
+                // store gives it the next counter so a reader sees only new
+                // frames. Only the camera stream feeds the remote view; the
+                // screen stream's decoded frames are discarded.
+                if let Some(picture) = driver.take_decoded_picture() {
+                    let RawPicture {
+                        width,
+                        height,
+                        pixels,
+                    } = picture;
+                    store_remote_frame(&remote_frames, width, height, pixels);
+                }
                 stats
                     .video_frames_sent
                     .store(driver.frames_sent, Ordering::Relaxed);

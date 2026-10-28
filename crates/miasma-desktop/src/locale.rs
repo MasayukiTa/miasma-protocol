@@ -3417,6 +3417,11 @@ call_strings! {
     state_calling, state_ringing, state_connecting, state_connected,
     // The in-call panel itself.
     panel_title, duration_label, mute, unmute, a11y_mute, hang_up, a11y_hang_up,
+    // Camera on/off toggle, next to mute. The label follows the current state; the camera
+    // control is not wired to a core request in this build, so the button is shown but inert,
+    // with a neutral tooltip saying so. Screen share is likewise shown but disabled.
+    camera_on, camera_off, a11y_camera, camera_unavailable, screen_share, a11y_screen_share,
+    screen_share_unavailable,
     // The safety-code area (the code itself is not ready yet, so a neutral line stands in).
     safety_heading, safety_pending, safety_explain,
     // The always-on line shown while the microphone is in use during a call.
@@ -3457,6 +3462,13 @@ static CALL_EN: CallStrings = CallStrings {
     a11y_mute: "Mute your microphone",
     hang_up: "Hang up",
     a11y_hang_up: "Hang up the call",
+    camera_on: "Camera on",
+    camera_off: "Camera off",
+    a11y_camera: "Turn your camera on or off",
+    camera_unavailable: "The camera cannot be turned on in this build yet.",
+    screen_share: "Share screen",
+    a11y_screen_share: "Share your screen",
+    screen_share_unavailable: "Not available in this build.",
     safety_heading: "Safety code",
     safety_pending: "The safety code is not ready yet.",
     safety_explain:
@@ -3493,6 +3505,13 @@ static CALL_JA: CallStrings = CallStrings {
     a11y_mute: "マイクをミュートする",
     hang_up: "通話を終了",
     a11y_hang_up: "通話を終了する",
+    camera_on: "カメラをオン",
+    camera_off: "カメラをオフ",
+    a11y_camera: "カメラのオン・オフを切り替える",
+    camera_unavailable: "このビルドではまだカメラをオンにできません。",
+    screen_share: "画面を共有",
+    a11y_screen_share: "画面を共有する",
+    screen_share_unavailable: "このビルドでは使えません。",
     safety_heading: "安全確認コード",
     safety_pending: "安全確認コードはまだ準備できていません。",
     safety_explain:
@@ -3530,6 +3549,13 @@ static CALL_ZH_CN: CallStrings = CallStrings {
     a11y_mute: "将你的麦克风静音",
     hang_up: "挂断",
     a11y_hang_up: "挂断通话",
+    camera_on: "打开摄像头",
+    camera_off: "关闭摄像头",
+    a11y_camera: "打开或关闭摄像头",
+    camera_unavailable: "此版本尚无法打开摄像头。",
+    screen_share: "共享屏幕",
+    a11y_screen_share: "共享你的屏幕",
+    screen_share_unavailable: "此版本暂不可用。",
     safety_heading: "安全码",
     safety_pending: "安全码尚未就绪。",
     safety_explain: "请向对方读出此安全码；如果双方的安全码不同，请结束通话。",
