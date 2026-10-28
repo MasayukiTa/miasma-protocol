@@ -48,12 +48,12 @@ Miasma は、送る側と受け取る側の両方に必要です。お使いの�
 
 Rust や Visual Studio などの開発ツールは要りません。
 
-1. [Releases ページ](https://github.com/MasayukiTa/miasma-protocol/releases)で、使いたいリリースから `Miasma-Setup-<バージョン>-x64.exe`(例: `Miasma-Setup-0.3.2-beta.12-x64.exe`)をダウンロードします。64 ビット Windows 用のインストーラーです。
+1. [Releases ページ](https://github.com/MasayukiTa/miasma-protocol/releases)で、使いたいリリースから `Miasma-Setup-<バージョン>-x64.exe`(例: `Miasma-Setup-0.3.2-beta.13-x64.exe`)をダウンロードします。64 ビット Windows 用のインストーラーです。
 2. 実行して、画面の案内に従います。Miasma デスクトップ、バックグラウンドサービス、コマンドラインツールが、まとめて `C:\Program Files\Miasma Protocol` に入ります。Microsoft Visual C++ ランタイムが無いパソコンでは、それも入ります。管理者の承認を一度求められます。
 3. インストーラーにはまだコード署名が付いていないので、Windows SmartScreen の警告(「Windows によって PC が保護されました」)が出ることがあります。「詳細情報」を押し、「実行」を選んでください。ダウンロードしたファイルが公開したものと同じか確かめるには、同じリリースの `SHA256SUMS-windows.txt` と SHA-256 を見比べます。
 
    ```powershell
-   Get-FileHash .\Miasma-Setup-0.3.2-beta.12-x64.exe -Algorithm SHA256
+   Get-FileHash .\Miasma-Setup-0.3.2-beta.13-x64.exe -Algorithm SHA256
    ```
 
    表示されたハッシュが、同じファイル名の横に書かれたものと一致している必要があります。

@@ -15,7 +15,7 @@ BIN="${CARGO_TARGET_DIR:-$PWD/target}/release"
 VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
 # Apple requires CFBundleShortVersionString and CFBundleVersion to be numeric
 # (up to three integers), so they keep the plain version. The full label, for
-# example 0.3.2-beta.12, goes in the custom MiasmaVersion key.
+# example 0.3.2-beta.13, goes in the custom MiasmaVersion key.
 FULL_VERSION="$VERSION"
 if [ -n "${MIASMA_PRERELEASE:-}" ]; then
     LABEL="${MIASMA_PRERELEASE#-}"

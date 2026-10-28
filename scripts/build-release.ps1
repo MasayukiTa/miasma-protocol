@@ -46,7 +46,7 @@ if ($Target -eq "release") {
 # The desktop and CLI packages include the hybrid chat upgrade through their
 # default features (the setting itself stays off). --locked keeps the build on
 # the committed Cargo.lock. The pre-release label in MIASMA_PRERELEASE (for
-# example beta.12), when set, ends up in the app title and version string.
+# example beta.13), when set, ends up in the app title and version string.
 & cargo @cargoArgs --locked -p miasma-cli -p miasma-desktop -p miasma-bridge
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Cargo build failed."
