@@ -30,6 +30,9 @@ pub enum CallAction {
     Reject(u64),
     HangUp,
     ToggleMute,
+    /// Start or stop sharing the screen; the app sends the matching start/stop
+    /// request based on the current screen-sharing state.
+    ToggleScreenShare,
     /// Ask the host for its audio devices, to fill the picker.
     ListDevices,
     /// Choose the input and/or output device by name (`None` means the host default).
@@ -49,6 +52,7 @@ impl std::fmt::Debug for CallAction {
             CallAction::Reject(_) => "Reject",
             CallAction::HangUp => "HangUp",
             CallAction::ToggleMute => "ToggleMute",
+            CallAction::ToggleScreenShare => "ToggleScreenShare",
             CallAction::ListDevices => "ListDevices",
             // The device names are not shown here, so they are never formatted into diagnostics.
             CallAction::SelectDevices { .. } => "SelectDevices",
@@ -169,11 +173,19 @@ pub fn in_call_panel(
                 .on_disabled_hover_text(c.camera_unavailable)
                 .on_disabled_hover_text(c.a11y_camera);
             ui.add_space(kit::SP_2);
-            // Screen share: shown but disabled, because screen capture is not merged in this
-            // build. No screen-capture code is wired here; the tooltip says it is unavailable.
-            crate::form_check::add_enabled(ui, false, kit::secondary_button(c.screen_share))
-                .on_disabled_hover_text(c.screen_share_unavailable)
-                .on_disabled_hover_text(c.a11y_screen_share);
+            // Screen share toggle, next to the camera. The label follows the status flag
+            // (`screen_sharing`); a press asks the app to start or stop the real screen-share
+            // request, which the daemon honours only while the call is connected with video
+            // negotiated.
+            let screen_on = status.map_or(false, |s| s.screen_sharing);
+            let screen_label = if screen_on { c.screen_off } else { c.screen_on };
+            if ui
+                .add(kit::secondary_button(screen_label))
+                .on_hover_text(c.a11y_screen_share)
+                .clicked()
+            {
+                action = Some(CallAction::ToggleScreenShare);
+            }
             ui.add_space(kit::SP_2);
             if ui
                 .add(kit::secondary_button(c.hang_up))

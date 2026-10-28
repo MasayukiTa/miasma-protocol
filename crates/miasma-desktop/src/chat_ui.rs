@@ -1441,6 +1441,17 @@ impl ChatUi {
                 self.out
                     .push_back(ChatRequest::Call(CallRequest::SetMuted { muted }));
             }
+            Some(CallAction::ToggleScreenShare) => {
+                // Toggle against the last status flag: sharing now means stop, otherwise start.
+                // The daemon honours a start only while connected with video negotiated.
+                let sharing = self.call.status().map_or(false, |s| s.screen_sharing);
+                let request = if sharing {
+                    CallRequest::StopScreenShare
+                } else {
+                    CallRequest::StartScreenShare
+                };
+                self.out.push_back(ChatRequest::Call(request));
+            }
             Some(CallAction::ListDevices) => {
                 self.out
                     .push_back(ChatRequest::Call(crate::call::list_audio_devices()));
