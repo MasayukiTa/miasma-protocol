@@ -15,6 +15,18 @@ pub trait DatagramLink: Send {
     fn try_recv(&mut self) -> Option<Vec<u8>>;
 }
 
+impl DatagramLink for Box<dyn DatagramLink> {
+    fn max_len(&self) -> usize {
+        (**self).max_len()
+    }
+    fn send(&mut self, packet: &[u8]) -> bool {
+        (**self).send(packet)
+    }
+    fn try_recv(&mut self) -> Option<Vec<u8>> {
+        (**self).try_recv()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SessionError {
     DatagramTooSmall,
@@ -62,6 +74,18 @@ impl<S: AudioSource, K: AudioSink, L: DatagramLink> MediaSession<S, K, L> {
         sink: K,
         link: L,
     ) -> Result<Self, SessionError> {
+        Self::with_roots(root, root, call_id, direction, now_ms, source, sink, link)
+    }
+    pub fn with_roots(
+        send_root: &Zeroizing<[u8; 32]>,
+        recv_root: &Zeroizing<[u8; 32]>,
+        call_id: [u8; 16],
+        direction: Direction,
+        now_ms: u64,
+        source: S,
+        sink: K,
+        link: L,
+    ) -> Result<Self, SessionError> {
         if link.max_len() < FRAME_WIRE_LEN {
             return Err(SessionError::DatagramTooSmall);
         }
@@ -69,9 +93,9 @@ impl<S: AudioSource, K: AudioSink, L: DatagramLink> MediaSession<S, K, L> {
             Direction::Caller => Direction::Callee,
             Direction::Callee => Direction::Caller,
         };
-        let sender =
-            MediaSender::new(root, call_id, direction, now_ms).map_err(|_| SessionError::Media)?;
-        let receiver = MediaReceiver::new(root, call_id, peer_direction, now_ms)
+        let sender = MediaSender::new(send_root, call_id, direction, now_ms)
+            .map_err(|_| SessionError::Media)?;
+        let receiver = MediaReceiver::new(recv_root, call_id, peer_direction, now_ms)
             .map_err(|_| SessionError::Media)?;
         Ok(Self {
             sender: Some(sender),
@@ -247,6 +271,75 @@ mod tests {
         assert_eq!(b.stats().played, 300);
         assert_eq!(a.stats().dropped, 0);
         assert_eq!(b.stats().late_dropped, 0);
+    }
+    #[test]
+    fn directional_roots_and_authentication() {
+        let first = Zeroizing::new([1; 32]);
+        let second = Zeroizing::new([2; 32]);
+        let id = id();
+        let (a, b) = LoopLink::pair();
+        let mut a = MediaSession::with_roots(
+            &first,
+            &second,
+            id,
+            Direction::Caller,
+            0,
+            ToneSource::new(),
+            RecordingSink::new(),
+            a,
+        )
+        .unwrap();
+        let mut b = MediaSession::with_roots(
+            &second,
+            &first,
+            id,
+            Direction::Callee,
+            0,
+            ToneSource::new(),
+            RecordingSink::new(),
+            b,
+        )
+        .unwrap();
+        for n in 0..100 {
+            assert_eq!(a.tick(n * 20), TickStatus::Running);
+            assert_eq!(b.tick(n * 20), TickStatus::Running);
+        }
+        assert!(a.stats().played > 0 && b.stats().played > 0);
+        let (a, b) = LoopLink::pair();
+        let mut a = MediaSession::with_roots(
+            &first,
+            &second,
+            id,
+            Direction::Caller,
+            0,
+            ToneSource::new(),
+            RecordingSink::new(),
+            a,
+        )
+        .unwrap();
+        let mut b = MediaSession::with_roots(
+            &first,
+            &second,
+            id,
+            Direction::Callee,
+            0,
+            ToneSource::new(),
+            RecordingSink::new(),
+            b,
+        )
+        .unwrap();
+        let mut fatal = false;
+        for n in 0..100 {
+            let x = a.tick(n * 20);
+            let y = b.tick(n * 20);
+            if x == TickStatus::Fatal || y == TickStatus::Fatal {
+                fatal = true;
+                break;
+            }
+        }
+        assert!(fatal);
+        assert_eq!(a.stats().played, 0);
+        assert_eq!(b.stats().played, 0);
     }
     #[test]
     fn too_small_and_losses() {

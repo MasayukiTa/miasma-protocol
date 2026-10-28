@@ -53,6 +53,7 @@ impl IrohDatagramLink {
 
     pub fn close(&self) {
         self.reader.abort();
+        self.connection.close(0u32.into(), b"");
     }
 }
 

@@ -16,6 +16,8 @@ pub mod frame;
 pub mod inbound;
 pub mod jitter;
 pub mod media;
+#[cfg(feature = "iroh")]
+pub mod media_task;
 pub mod packet;
 pub mod receiver;
 #[cfg(feature = "iroh")]
