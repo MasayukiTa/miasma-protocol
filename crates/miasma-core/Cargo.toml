@@ -75,6 +75,10 @@ iroh-mdns-address-lookup = { version = "0.6", optional = true }
 ml-kem = { version = "0.3.3", default-features = false, features = ["zeroize"], optional = true }
 rand_core_pqc = { package = "rand_core", version = "0.10", default-features = false, optional = true }
 
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"], optional = true }
+zune-jpeg = { version = "0.5.15", default-features = false, optional = true }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
@@ -88,10 +92,11 @@ objc2 = "0.6"
 objc2-foundation = "0.3"
 
 [features]
-default = ["iroh"]
+default = ["iroh", "call-video"]
 # `miasma daemon --no-iroh` / `transport.iroh_mode = "off"` switch it off at run
 # time; building without the feature removes the code and the dependency tree.
 iroh = ["dep:iroh", "dep:iroh-mdns-address-lookup"]
+call-video = ["dep:jpeg-encoder", "dep:zune-jpeg"]
 # Hybrid X25519 + ML-KEM-768 key exchange primitives. Library only; not
 # enabled by default and not used by any live handshake.
 pqc = ["dep:ml-kem", "dep:rand_core_pqc"]
@@ -118,3 +123,4 @@ harness = false
 # `fuzzing` is set by cargo-fuzz (see the fuzz/ directory).
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+
