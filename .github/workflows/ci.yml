@@ -83,7 +83,7 @@ jobs:
           cargo test -p miasma-core --features pqc --locked
           --test pqc_old_peer_compat_test --test chat_pqc_net_test
           --test wire_compat_test --test wire_compat_net_test --test wire_compat_group_test
-          --test persisted_paths_lint --test call_media_pr5_test
+          --test persisted_paths_lint --test call_media_pr5_test --test call_e2e_pr6_test
 
       - name: Check the mobile bridge with the feature
         run: cargo check -p miasma-ffi --features pqc --locked
