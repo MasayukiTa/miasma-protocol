@@ -1093,6 +1093,14 @@ impl<P: CallPorts> CallController<P> {
         }
     }
 
+    pub fn active_peer(&self) -> Option<[u8; 32]> {
+        self.peer
+    }
+
+    pub fn active_call_id(&self) -> Option<Zeroizing<[u8; 16]>> {
+        self.call_keys.as_ref().map(|keys| keys.call_id.clone())
+    }
+
     pub fn take_media_roots(&mut self) -> Option<MediaRoots> {
         if self.machine.state() != State::Connected {
             return None;

@@ -1,5 +1,6 @@
 use super::{
     controller::{CallController, CallError, CallNotice, CallPorts, MediaGate},
+    media_task::{maybe_start_media, IrohLinkProvider, MediaLinkProvider},
     state::State,
 };
 use crate::chat::{
@@ -75,6 +76,25 @@ impl Inner {
         }
     }
 }
+fn media_failed<P: CallPorts>(controller: &mut CallController<P>, notices: &mut NoticeRing) {
+    if controller.status().state == State::Connected {
+        notices.push(CallNotice::EstablishmentFailed);
+        controller.hang_up();
+    }
+}
+fn sync_media<P: CallPorts>(
+    controller: &mut CallController<P>,
+    provider: Arc<dyn MediaLinkProvider>,
+    media: &mut Option<JoinHandle<bool>>,
+) {
+    if controller.status().state != State::Connected {
+        if let Some(task) = media.take() {
+            task.abort();
+        }
+    } else if media.is_none() {
+        *media = maybe_start_media(controller, provider, false);
+    }
+}
 pub struct CallRuntime {
     svc: Arc<ChatService>,
     inner: Arc<Mutex<Inner>>,
@@ -84,6 +104,13 @@ pub struct CallRuntime {
 }
 impl CallRuntime {
     pub fn start(svc: Arc<ChatService>) -> Arc<Self> {
+        let provider = Arc::new(IrohLinkProvider::new(svc.node().clone()));
+        Self::start_with_provider(svc, provider)
+    }
+    pub fn start_with_provider(
+        svc: Arc<ChatService>,
+        provider: Arc<dyn MediaLinkProvider>,
+    ) -> Arc<Self> {
         let (tx, mut rx) = mpsc::channel(32);
         svc.set_call_sink(tx);
         let inner = Arc::new(Mutex::new(Inner {
@@ -100,6 +127,7 @@ impl CallRuntime {
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
             let mut sending = tokio::task::JoinSet::new();
+            let mut media: Option<JoinHandle<bool>> = None;
             loop {
                 tokio::select! {
                     incoming = rx.recv() => match incoming {
@@ -115,11 +143,21 @@ impl CallRuntime {
                             state.collect();
                         }
                     },
+                    result = async { match media.as_mut() { Some(task) => Some(task.await), None => None } }, if media.is_some() => {
+                        media = None;
+                        if matches!(result, Some(Ok(false))) {
+                            let mut state = task_inner.lock().unwrap_or_else(|e| e.into_inner());
+                            let Inner { controller, notices } = &mut *state;
+                            media_failed(controller, notices);
+                            state.collect();
+                        }
+                    },
                     _ = stop.changed() => break,
                     _ = task_stop.notified() => break,
                 }
                 let sends = {
                     let mut state = task_inner.lock().unwrap_or_else(|e| e.into_inner());
+                    sync_media(&mut state.controller, provider.clone(), &mut media);
                     let sends = state.controller.drain_encoded();
                     state.collect();
                     sends
@@ -137,6 +175,10 @@ impl CallRuntime {
                         (ticket, ok)
                     });
                 }
+            }
+            if let Some(task) = media {
+                task.abort();
+                let _ = task.await;
             }
             sending.shutdown().await;
         });
@@ -264,7 +306,128 @@ pub(crate) fn runtime_for_service(svc: &Arc<ChatService>) -> Option<Arc<CallRunt
 
 #[cfg(test)]
 mod tests {
+    use super::super::{
+        inbound::CallInbound, media::Direction, session::DatagramLink, signal::Record,
+    };
     use super::*;
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    struct Ports;
+    impl CallPorts for Ports {
+        fn now_ms(&self) -> u64 {
+            1000
+        }
+        fn is_contact_allowed(&self, _: &[u8; 32]) -> bool {
+            true
+        }
+        fn media_gate(&self, _: &[u8; 32]) -> MediaGate {
+            MediaGate::Ready
+        }
+    }
+    struct Link {
+        incoming: Arc<Mutex<VecDeque<Vec<u8>>>>,
+        outgoing: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    }
+    impl DatagramLink for Link {
+        fn max_len(&self) -> usize {
+            90
+        }
+        fn send(&mut self, packet: &[u8]) -> bool {
+            self.outgoing.lock().unwrap().push_back(packet.to_vec());
+            true
+        }
+        fn try_recv(&mut self) -> Option<Vec<u8>> {
+            self.incoming.lock().unwrap().pop_front()
+        }
+    }
+    struct Provider {
+        links: Mutex<VecDeque<Box<dyn DatagramLink>>>,
+        opens: AtomicUsize,
+    }
+    impl MediaLinkProvider for Provider {
+        fn open(
+            &self,
+            _: [u8; 32],
+            _: Direction,
+        ) -> Pin<Box<dyn Future<Output = Option<Box<dyn DatagramLink>>> + Send>> {
+            self.opens.fetch_add(1, Ordering::SeqCst);
+            let link = self.links.lock().unwrap().pop_front();
+            Box::pin(async move { link })
+        }
+    }
+    fn connected() -> (CallController<Ports>, CallController<Ports>) {
+        let mut a = CallController::new(Ports);
+        let mut b = CallController::new(Ports);
+        assert!(a.dial([2; 32]).is_ok());
+        let offer = a.drain_encoded().remove(0).1;
+        b.on_inbound(CallInbound {
+            peer: [1; 32],
+            signal: Record::decode(&offer).unwrap(),
+            received_at_ms: 1000,
+        });
+        assert!(b.accept(b.status().pending_token.unwrap()));
+        let answer = b.drain_encoded().remove(0).1;
+        a.on_inbound(CallInbound {
+            peer: [2; 32],
+            signal: Record::decode(&answer).unwrap(),
+            received_at_ms: 1000,
+        });
+        (a, b)
+    }
+    #[tokio::test]
+    async fn media_starts_once_and_stops_on_hangup() {
+        let (mut a, mut b) = connected();
+        let x = Arc::new(Mutex::new(VecDeque::new()));
+        let y = Arc::new(Mutex::new(VecDeque::new()));
+        let provider = Arc::new(Provider {
+            links: Mutex::new(VecDeque::from([
+                Box::new(Link {
+                    incoming: x.clone(),
+                    outgoing: y.clone(),
+                }) as Box<dyn DatagramLink>,
+                Box::new(Link {
+                    incoming: y,
+                    outgoing: x,
+                }) as Box<dyn DatagramLink>,
+            ])),
+            opens: AtomicUsize::new(0),
+        });
+        let mut am = None;
+        let mut bm = None;
+        sync_media(&mut a, provider.clone(), &mut am);
+        sync_media(&mut b, provider.clone(), &mut bm);
+        sync_media(&mut a, provider.clone(), &mut am);
+        tokio::task::yield_now().await;
+        assert_eq!(provider.opens.load(Ordering::SeqCst), 2);
+        a.hang_up();
+        b.hang_up();
+        sync_media(&mut a, provider.clone(), &mut am);
+        sync_media(&mut b, provider, &mut bm);
+        assert!(am.is_none() && bm.is_none());
+    }
+    #[tokio::test]
+    async fn unreachable_link_reports_failure_and_hangs_up() {
+        let (mut a, _) = connected();
+        let provider = Arc::new(Provider {
+            links: Mutex::new(VecDeque::new()),
+            opens: AtomicUsize::new(0),
+        });
+        let mut media = None;
+        sync_media(&mut a, provider, &mut media);
+        assert!(!media.take().unwrap().await.unwrap());
+        let mut notices = NoticeRing::default();
+        media_failed(&mut a, &mut notices);
+        assert_eq!(a.status().state, State::Idle);
+        assert!(notices
+            .items
+            .iter()
+            .any(|(_, n)| *n == CallNotice::EstablishmentFailed));
+        assert!(!a.drain_encoded().is_empty());
+    }
     #[test]
     fn ring_is_bounded_and_reports_gaps() {
         let mut ring = NoticeRing::default();
