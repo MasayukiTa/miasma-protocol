@@ -16,12 +16,15 @@
 //! string only.
 
 use std::collections::VecDeque;
+use zeroize::Zeroizing;
 
 use super::caps::{self, Capabilities};
 use super::inbound::CallInbound;
+use super::media::{self, Direction};
 use super::signal::{self, Record};
 use super::state::{
-    CallId, CallMachine, Control, Effect, Event, Notice, Offer, PeerId, Reason, State, OFFER_TTL_MS,
+    CallId, CallMachine, Control, Effect, Event, Notice, Offer, PeerId, Reason, Role, State,
+    OFFER_TTL_MS,
 };
 
 pub trait CallSender {
@@ -47,10 +50,22 @@ pub struct SendTicket {
 struct PendingSend {
     peer: [u8; 32],
     effect: Effect,
+    encoded: Option<Zeroizing<Vec<u8>>>,
 }
-struct OfferContext {
-    call_id: CallId,
-    nonce: [u8; 16],
+struct CallKeys {
+    role: Role,
+    call_id: Zeroizing<[u8; 16]>,
+    caller_share: Option<Zeroizing<[u8; 32]>>,
+    callee_share: Option<Zeroizing<[u8; 32]>>,
+    caller_nonce: Zeroizing<[u8; 16]>,
+    callee_nonce: Option<Zeroizing<[u8; 16]>>,
+    offer_hash: Option<Zeroizing<[u8; 32]>>,
+}
+
+pub struct MediaRoots {
+    pub send: Zeroizing<[u8; 32]>,
+    pub recv: Zeroizing<[u8; 32]>,
+    pub direction: Direction,
 }
 
 fn wire_reason(reason: Option<Reason>) -> u8 {
@@ -678,10 +693,16 @@ pub struct CallController<P: CallPorts> {
     pending_token: Option<u64>,
     next_token: u64,
     pending_sends: VecDeque<PendingSend>,
-    offer_contexts: VecDeque<OfferContext>,
+    call_keys: Option<CallKeys>,
     entered_at_ms: Option<u64>,
     offer_limiter: OfferLimiter,
     dropped_offers: u64,
+}
+
+impl<P: CallPorts> Drop for CallController<P> {
+    fn drop(&mut self) {
+        self.call_keys = None;
+    }
 }
 
 impl<P: CallPorts> CallController<P> {
@@ -695,7 +716,7 @@ impl<P: CallPorts> CallController<P> {
             pending_token: None,
             next_token: 0,
             pending_sends: VecDeque::with_capacity(16),
-            offer_contexts: VecDeque::with_capacity(32),
+            call_keys: None,
             entered_at_ms: None,
             offer_limiter: OfferLimiter::new(),
             dropped_offers: 0,
@@ -708,11 +729,20 @@ impl<P: CallPorts> CallController<P> {
         let old_state = self.machine.state();
         let peer = inbound.peer;
         let mut incoming_context = None;
+        let offer_hash = if matches!(&inbound.signal, Record::Offer { .. }) {
+            match inbound.signal.encode_zeroizing() {
+                Ok(bytes) => Some(Zeroizing::new(signal::offer_hash(&bytes))),
+                Err(_) => return,
+            }
+        } else {
+            None
+        };
         let event = match inbound.signal {
             Record::Offer {
                 call_id,
                 call_nonce,
                 expires_at_ms,
+                key_share,
                 ..
             } => {
                 let from_contact = self.ports.is_contact_allowed(&peer)
@@ -721,7 +751,15 @@ impl<P: CallPorts> CallController<P> {
                     self.dropped_offers = self.dropped_offers.saturating_add(1);
                     return;
                 }
-                incoming_context = Some((CallId(call_id), call_nonce));
+                incoming_context = Some(CallKeys {
+                    role: Role::Callee,
+                    call_id: Zeroizing::new(call_id),
+                    caller_share: Some(key_share),
+                    callee_share: None,
+                    caller_nonce: Zeroizing::new(call_nonce),
+                    callee_nonce: None,
+                    offer_hash,
+                });
                 Event::ReceivedOffer(Offer {
                     call_id: CallId(call_id),
                     peer_id: PeerId(peer),
@@ -733,6 +771,8 @@ impl<P: CallPorts> CallController<P> {
             Record::Answer {
                 call_id,
                 capabilities,
+                call_nonce,
+                key_share,
                 ..
             } if self.peer == Some(peer) => {
                 let id = CallId(call_id);
@@ -757,6 +797,14 @@ impl<P: CallPorts> CallController<P> {
                         return;
                     }
                 }
+                if old_state == State::Calling && self.machine.matches_active(&id) {
+                    if let Some(keys) = self.call_keys.as_mut() {
+                        if keys.role == Role::Caller && *keys.call_id == call_id {
+                            keys.callee_share = Some(key_share);
+                            keys.callee_nonce = Some(Zeroizing::new(call_nonce));
+                        }
+                    }
+                }
                 Event::ReceivedAnswer { call_id: id }
             }
             Record::Reject { call_id, .. } if self.peer == Some(peer) => Event::ReceivedReject {
@@ -778,9 +826,7 @@ impl<P: CallPorts> CallController<P> {
         self.apply_event_to(event, now, if is_offer { Some(peer) } else { None });
         if is_offer && old_state != State::Ringing && self.machine.state() == State::Ringing {
             self.peer = Some(peer);
-            if let Some((id, nonce)) = incoming_context {
-                self.remember_offer(id, nonce);
-            }
+            self.call_keys = incoming_context;
             self.begin_incoming();
         }
     }
@@ -797,14 +843,6 @@ impl<P: CallPorts> CallController<P> {
         }
     }
 
-    fn remember_offer(&mut self, call_id: CallId, nonce: [u8; 16]) {
-        if self.offer_contexts.len() >= 32 {
-            self.offer_contexts.pop_front();
-        }
-        self.offer_contexts
-            .push_back(OfferContext { call_id, nonce });
-    }
-
     pub fn dial(&mut self, peer: [u8; 32]) -> Result<(), CallError> {
         if !self.ports.is_contact_allowed(&peer) {
             return Err(CallError::NotAllowed);
@@ -819,8 +857,27 @@ impl<P: CallPorts> CallController<P> {
         }
         let now = self.ports.now_ms();
         let call_id = CallId(signal::new_call_id());
+        let nonce = signal::new_call_nonce();
+        let share = signal::new_key_share();
+        let record = Record::Offer {
+            call_id: call_id.0,
+            call_nonce: nonce,
+            key_share: share.clone(),
+            created_at_ms: now,
+            expires_at_ms: now.saturating_add(OFFER_TTL_MS),
+            capabilities: Capabilities::default_local().encode(),
+        };
+        let encoded = record.encode_zeroizing().map_err(|_| CallError::NotReady)?;
+        self.call_keys = Some(CallKeys {
+            role: Role::Caller,
+            call_id: Zeroizing::new(call_id.0),
+            caller_share: Some(share),
+            callee_share: None,
+            caller_nonce: Zeroizing::new(nonce),
+            callee_nonce: None,
+            offer_hash: Some(Zeroizing::new(signal::offer_hash(&encoded))),
+        });
         self.peer = Some(peer);
-        self.remember_offer(call_id, signal::new_call_nonce());
         self.apply_event(
             Event::UserDial {
                 call_id,
@@ -828,6 +885,9 @@ impl<P: CallPorts> CallController<P> {
             },
             now,
         );
+        if let Some(send) = self.pending_sends.back_mut() {
+            send.encoded = Some(encoded);
+        }
         Ok(())
     }
 
@@ -835,7 +895,30 @@ impl<P: CallPorts> CallController<P> {
         if !self.approve(token) {
             return false;
         }
-        self.apply_event(Event::UserAccept, self.ports.now_ms());
+        let now = self.ports.now_ms();
+        let keys = match self.call_keys.as_mut() {
+            Some(keys) if keys.role == Role::Callee => keys,
+            _ => return false,
+        };
+        let share = signal::new_key_share();
+        let nonce = signal::new_call_nonce();
+        let record = Record::Answer {
+            call_id: *keys.call_id,
+            call_nonce: nonce,
+            key_share: share.clone(),
+            created_at_ms: now,
+            capabilities: Capabilities::default_local().encode(),
+        };
+        let encoded = match record.encode_zeroizing() {
+            Ok(bytes) => bytes,
+            Err(_) => return false,
+        };
+        keys.callee_share = Some(share);
+        keys.callee_nonce = Some(Zeroizing::new(nonce));
+        self.apply_event(Event::UserAccept, now);
+        if let Some(send) = self.pending_sends.back_mut() {
+            send.encoded = Some(encoded);
+        }
         true
     }
 
@@ -873,35 +956,7 @@ impl<P: CallPorts> CallController<P> {
             } => {
                 let id = call_id.0;
                 match control {
-                    Control::Offer | Control::Answer => {
-                        let nonce = self
-                            .offer_contexts
-                            .iter()
-                            .rev()
-                            .find(|c| c.call_id == call_id)?
-                            .nonce;
-                        let capabilities = Capabilities::default_local().encode();
-                        if control == Control::Offer {
-                            Record::Offer {
-                                call_id: id,
-                                call_nonce: nonce,
-                                // TODO(step B): retain the share for media key derivation.
-                                key_share: signal::new_key_share(),
-                                created_at_ms: now,
-                                expires_at_ms: now.saturating_add(OFFER_TTL_MS),
-                                capabilities,
-                            }
-                        } else {
-                            Record::Answer {
-                                call_id: id,
-                                call_nonce: nonce,
-                                // TODO(step B): retain the share for media key derivation.
-                                key_share: signal::new_key_share(),
-                                created_at_ms: now,
-                                capabilities,
-                            }
-                        }
-                    }
+                    Control::Offer | Control::Answer => return None,
                     Control::Reject => Record::Reject {
                         call_id: id,
                         created_at_ms: now,
@@ -944,7 +999,11 @@ impl<P: CallPorts> CallController<P> {
             let ticket = SendTicket {
                 effect: send.effect,
             };
-            if let Some(bytes) = self.encode_send(&ticket.effect) {
+            if let Some(bytes) = send
+                .encoded
+                .map(|bytes| bytes.to_vec())
+                .or_else(|| self.encode_send(&ticket.effect))
+            {
                 encoded.push((send.peer, bytes, ticket));
             } else {
                 self.report_send_result(ticket, false);
@@ -1010,18 +1069,76 @@ impl<P: CallPorts> CallController<P> {
                         if self.pending_sends.len() >= 16 {
                             self.pending_sends.pop_front();
                         }
-                        self.pending_sends.push_back(PendingSend { peer, effect });
+                        self.pending_sends.push_back(PendingSend {
+                            peer,
+                            effect,
+                            encoded: None,
+                        });
                     } else {
                         self.notices.push(CallNotice::SendFailed);
                     }
                 }
-                Effect::ZeroizeKeys | Effect::ReplaceSasInput { .. } => {}
+                Effect::ZeroizeKeys => {
+                    self.call_keys = None;
+                    self.pending_sends.retain(|send| send.encoded.is_none());
+                }
+                Effect::ReplaceSasInput { .. } => {}
             }
         }
         if transition.next == State::Idle {
+            self.call_keys = None;
+            self.pending_sends.retain(|send| send.encoded.is_none());
             self.peer = None;
             self.pending_token = None;
         }
+    }
+
+    pub fn take_media_roots(&mut self) -> Option<MediaRoots> {
+        if self.machine.state() != State::Connected {
+            return None;
+        }
+        let keys = self.call_keys.as_ref()?;
+        let caller = keys.caller_share.as_ref()?;
+        let callee = keys.callee_share.as_ref()?;
+        let nonce = keys.callee_nonce.as_ref()?;
+        let hash = keys.offer_hash.as_ref()?;
+        let direction = match keys.role {
+            Role::Caller => Direction::Caller,
+            Role::Callee => Direction::Callee,
+        };
+        let peer_direction = match direction {
+            Direction::Caller => Direction::Callee,
+            Direction::Callee => Direction::Caller,
+        };
+        let send = media::derive_mk_root_from_shares(
+            caller,
+            callee,
+            &keys.call_id,
+            &keys.caller_nonce,
+            nonce,
+            hash,
+            direction,
+        )
+        .ok()?;
+        let recv = media::derive_mk_root_from_shares(
+            caller,
+            callee,
+            &keys.call_id,
+            &keys.caller_nonce,
+            nonce,
+            hash,
+            peer_direction,
+        )
+        .ok()?;
+        if let Some(keys) = self.call_keys.as_mut() {
+            keys.caller_share = None;
+            keys.callee_share = None;
+        }
+        Some(MediaRoots {
+            send,
+            recv,
+            direction,
+        })
     }
 
     /// A snapshot of the controller for a UI.
@@ -1095,6 +1212,92 @@ mod tests {
 
     fn controller() -> CallController<FakePorts> {
         CallController::new(FakePorts { now: 1_000 })
+    }
+
+    fn deliver(target: &mut CallController<FakePorts>, peer: [u8; 32], bytes: &[u8]) {
+        target.on_inbound(CallInbound {
+            peer,
+            signal: Record::decode(bytes).unwrap(),
+            received_at_ms: 1_000,
+        });
+    }
+
+    #[test]
+    fn media_roots_exchange_and_cleanup() {
+        let a_peer = signal::new_key_share();
+        let b_peer = signal::new_key_share();
+        let mut a = controller();
+        let mut b = controller();
+        assert!(a.dial(*b_peer).is_ok());
+        assert!(a.take_media_roots().is_none());
+        let offer = a.drain_encoded().remove(0).1;
+        let offer_nonce = match Record::decode(&offer).unwrap() {
+            Record::Offer { call_nonce, .. } => call_nonce,
+            _ => panic!("expected offer"),
+        };
+        deliver(&mut b, *a_peer, &offer);
+        assert!(b.take_media_roots().is_none());
+        assert!(b.accept(b.status().pending_token.unwrap()));
+        let answer = b.drain_encoded().remove(0).1;
+        let answer_nonce = match Record::decode(&answer).unwrap() {
+            Record::Answer { call_nonce, .. } => call_nonce,
+            _ => panic!("expected answer"),
+        };
+        assert!(offer_nonce != answer_nonce);
+        deliver(&mut a, *b_peer, &answer);
+        let ar = a.take_media_roots().unwrap();
+        let br = b.take_media_roots().unwrap();
+        assert!(*ar.send == *br.recv);
+        assert!(*ar.recv == *br.send);
+        assert!(*ar.send != *ar.recv);
+        assert!(a.take_media_roots().is_none());
+        assert!(b.take_media_roots().is_none());
+        a.hang_up();
+        assert!(a.take_media_roots().is_none());
+    }
+
+    #[test]
+    fn altered_offer_changes_roots_and_wrong_answer_is_ignored() {
+        let a_peer = signal::new_key_share();
+        let b_peer = signal::new_key_share();
+        let mut a = controller();
+        let mut b = controller();
+        assert!(a.dial(*b_peer).is_ok());
+        let mut offer = a.drain_encoded().remove(0).1;
+        let wrong_answer = Record::Answer {
+            call_id: signal::new_call_id(),
+            call_nonce: signal::new_call_nonce(),
+            key_share: signal::new_key_share(),
+            created_at_ms: 1_000,
+            capabilities: Capabilities::default_local().encode(),
+        };
+        deliver(&mut a, *b_peer, &wrong_answer.encode_zeroizing().unwrap());
+        assert!(a.take_media_roots().is_none());
+        assert!(a.call_keys.as_ref().unwrap().callee_share.is_none());
+        // The share is at a fixed offset after the kind, id and nonce.
+        offer[1 + 16 + 16] ^= 1;
+        deliver(&mut b, *a_peer, &offer);
+        assert!(b.accept(b.status().pending_token.unwrap()));
+        let answer = b.drain_encoded().remove(0).1;
+        deliver(&mut a, *b_peer, &answer);
+        let ar = a.take_media_roots().unwrap();
+        let br = b.take_media_roots().unwrap();
+        assert!(*ar.send != *br.recv);
+    }
+
+    #[test]
+    fn hang_up_discards_unclaimed_roots() {
+        let a_peer = signal::new_key_share();
+        let b_peer = signal::new_key_share();
+        let mut a = controller();
+        let mut b = controller();
+        assert!(a.dial(*b_peer).is_ok());
+        let offer = a.drain_encoded().remove(0).1;
+        deliver(&mut b, *a_peer, &offer);
+        assert!(b.accept(b.status().pending_token.unwrap()));
+        b.hang_up();
+        assert!(b.take_media_roots().is_none());
+        assert!(b.call_keys.is_none());
     }
 
     #[test]
