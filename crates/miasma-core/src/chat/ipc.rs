@@ -594,7 +594,19 @@ pub fn handle_with(
             };
             let peer = match &request {
                 CallRequest::Dial { contact } => resolve(contact).map(|(peer, _)| peer),
-                _ => None,
+                CallRequest::Accept { .. }
+                | CallRequest::Reject { .. }
+                | CallRequest::HangUp
+                | CallRequest::SetMuted { .. }
+                | CallRequest::Status
+                | CallRequest::Events { .. }
+                | CallRequest::ListAudioDevices
+                | CallRequest::SelectAudioDevices { .. }
+                | CallRequest::StartScreenShare
+                | CallRequest::StopScreenShare
+                | CallRequest::StartCamera
+                | CallRequest::StopCamera
+                | CallRequest::RemoteFrame { .. } => None,
             };
             ChatResponse::Call(runtime.handle(request, peer))
         }

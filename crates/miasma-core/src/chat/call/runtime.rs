@@ -789,8 +789,12 @@ mod tests {
         }
     }
     fn connected() -> (CallController<Ports>, CallController<Ports>) {
+        connected_with_video(true)
+    }
+    fn connected_with_video(offers_video: bool) -> (CallController<Ports>, CallController<Ports>) {
         let mut a = CallController::new(Ports);
         let mut b = CallController::new(Ports);
+        a.set_local_offers_video(offers_video);
         assert!(a.dial([2; 32]).is_ok());
         let offer = a.drain_encoded().remove(0).1;
         b.on_inbound(CallInbound {
@@ -1141,6 +1145,26 @@ mod tests {
         let (response, source) = decide_start_camera(idle.negotiated_video(), false, &factory);
         assert!(matches!(response, CallResponse::Error(ref s) if s == "not_ready"));
         assert!(source.is_none());
+    }
+
+    #[test]
+    fn connected_audio_only_call_refuses_camera_without_opening_device() {
+        struct CountingFactory(Arc<AtomicUsize>);
+        impl ScreenSourceFactory for CountingFactory {
+            fn create(&self) -> Option<Box<dyn super::super::video::VideoSource + Send>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                None
+            }
+        }
+        let (a, _) = connected_with_video(false);
+        assert_eq!(a.status().state, State::Connected);
+        assert!(!a.negotiated_video());
+        let opens = Arc::new(AtomicUsize::new(0));
+        let factory: Arc<dyn ScreenSourceFactory> = Arc::new(CountingFactory(opens.clone()));
+        let (response, source) = decide_start_camera(a.negotiated_video(), false, &factory);
+        assert!(matches!(response, CallResponse::Error(ref s) if s == "not_ready"));
+        assert!(source.is_none());
+        assert_eq!(opens.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
