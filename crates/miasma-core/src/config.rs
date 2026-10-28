@@ -32,18 +32,30 @@ pub struct NodeConfig {
     /// How published transfers are written on the wire.
     #[serde(default)]
     pub transfer: TransferConfig,
-    /// Calls are disabled by default and unfinished (no audio device yet).
+    /// Calls (on by default; no audio device yet).
     #[serde(default)]
     pub call: CallConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+/// `[call]` in `config.toml`: the call runtime.
+///
+/// `enabled` has a `default = true` serde default, so a fresh config and a
+/// `config.toml` written by an older version (without the `[call]` section, or
+/// without the `enabled` key) both read as enabled. Set `enabled = false`
+/// explicitly to keep the runtime off.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CallConfig {
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
 }
 
-/// Whether the unfinished call runtime is enabled.
+impl Default for CallConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// Whether the call runtime is enabled.
 pub fn calls_enabled(cfg: &NodeConfig) -> bool {
     cfg.call.enabled
 }
@@ -1721,25 +1733,32 @@ mod call_config_tests {
     use super::*;
 
     #[test]
-    fn calls_are_disabled_by_default() {
-        assert!(!calls_enabled(&NodeConfig::default()));
+    fn calls_are_enabled_by_default() {
+        // Old expectation: the default was disabled (`!calls_enabled`).
+        // New expectation: calls are on by default (beta.13).
+        assert!(calls_enabled(&NodeConfig::default()));
     }
 
     #[test]
-    fn a_file_without_a_call_section_disables_calls() {
+    fn a_file_without_a_call_section_enables_calls() {
+        // Old expectation: a file with no [call] section disabled calls.
+        // New expectation: the missing key reads as the new default (enabled),
+        // decided through the `serde(default = "default_true")` on `enabled`.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             crate::paths::config_file(dir.path()),
             "[chat]\nenabled = true\n",
         )
         .unwrap();
-        assert!(!calls_enabled(&NodeConfig::load(dir.path()).unwrap()));
+        assert!(calls_enabled(&NodeConfig::load(dir.path()).unwrap()));
     }
 
     #[test]
-    fn a_call_section_can_enable_calls() {
-        let cfg: NodeConfig = toml::from_str("[call]\nenabled = true\n").unwrap();
-        assert!(calls_enabled(&cfg));
+    fn a_call_section_can_disable_calls() {
+        // Turning calls off must still work: an explicit `enabled = false`
+        // keeps the runtime off.
+        let cfg: NodeConfig = toml::from_str("[call]\nenabled = false\n").unwrap();
+        assert!(!calls_enabled(&cfg));
     }
 
     #[test]
