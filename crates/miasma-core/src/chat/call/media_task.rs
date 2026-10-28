@@ -5,6 +5,7 @@ use super::{
     controller::{CallController, CallPorts},
     device::{AudioSink, AudioSource, RecordingSink, ToneSource},
     media::Direction,
+    media::FRAME_PLAINTEXT_LEN,
     session::{DatagramLink, MediaSession, TickStatus},
     state::State,
 };
@@ -18,7 +19,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock, Weak,
     },
     time::{Duration, Instant},
@@ -35,6 +36,24 @@ pub struct MediaStats {
     pub muted: Arc<std::sync::atomic::AtomicBool>,
 }
 
+struct MutedSource<S> {
+    source: S,
+    muted: Arc<AtomicBool>,
+}
+impl<S: AudioSource> AudioSource for MutedSource<S> {
+    fn next_frame(&mut self) -> Option<[u8; FRAME_PLAINTEXT_LEN]> {
+        if self.muted.load(Ordering::SeqCst) {
+            Some([0; FRAME_PLAINTEXT_LEN])
+        } else {
+            self.source.next_frame()
+        }
+    }
+}
+impl<S: AudioSource> MuteControl for MutedSource<S> {
+    fn set_muted(&self, muted: bool) {
+        self.muted.store(muted, Ordering::SeqCst);
+    }
+}
 pub trait MediaLinkProvider: Send + Sync {
     fn open(
         &self,
@@ -165,6 +184,7 @@ pub(super) fn maybe_start_media<P: CallPorts>(
     provider: Arc<dyn MediaLinkProvider>,
     running: bool,
     stats: MediaStats,
+    muted: Arc<AtomicBool>,
 ) -> Option<JoinHandle<bool>> {
     if running || controller.status().state != State::Connected {
         return None;
@@ -208,7 +228,12 @@ async fn run_media(
     // below, so both the real sink and the pseudo sink report the same way;
     // the pseudo sink needs no counter of its own.
     // On other platforms calls carry the pseudo tone pattern rather than voice.
-    let source = ToneSource::new();
+    // The pseudo source is wrapped in `MutedSource` sharing the same
+    // `stats.muted` flag, so mute applies on the fallback path too.
+    let source = MutedSource {
+        source: ToneSource::new(),
+        muted: stats.muted.clone(),
+    };
     let sink = RecordingSink::new();
     drive_session(roots, call_id, source, sink, link, stats).await
 }
@@ -272,5 +297,23 @@ impl MuteControl for ToneSource {
 impl MuteControl for super::audio_bridge::EncodingSource {
     fn set_muted(&self, muted: bool) {
         super::audio_bridge::EncodingSource::set_muted(self, muted);
+    }
+}
+
+#[cfg(test)]
+mod mute_tests {
+    use super::*;
+    #[test]
+    fn muted_source_sends_silence_and_resumes_source() {
+        let muted = Arc::new(AtomicBool::new(false));
+        let mut source = MutedSource {
+            source: ToneSource::new(),
+            muted: muted.clone(),
+        };
+        assert_eq!(source.next_frame(), Some([0; FRAME_PLAINTEXT_LEN]));
+        muted.store(true, Ordering::SeqCst);
+        assert_eq!(source.next_frame(), Some([0; FRAME_PLAINTEXT_LEN]));
+        muted.store(false, Ordering::SeqCst);
+        assert_eq!(source.next_frame(), Some([1; FRAME_PLAINTEXT_LEN]));
     }
 }

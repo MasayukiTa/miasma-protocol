@@ -1,3 +1,31 @@
+# Miasma v0.3.2-beta.13
+
+This beta adds calls between contacts.
+
+## What's new
+
+- Contacts can make voice calls, with video and screen sharing when available. Calls ring only for contacts. Calls are on by default; to turn them off, set `enabled = false` under `[call]` in `config.toml`.
+- Calls are end-to-end protected, with keys exchanged inside the chat channel. During a call, both people can read the 20-digit safety code shown on their screens to each other. If the codes differ, an attacker may be interfering; end the call and check with your contact.
+- An indicator stays visible while the microphone, camera or screen is in use.
+
+## Notes
+
+- **Calls are beta and have not been independently audited.** Do not use them for material whose exposure would be serious.
+- Voice uses the Opus codec on Windows and macOS. Other platforms use test devices only. Calls are not yet available through the mobile apps.
+- Video is simple in this release, at 160x120.
+
+## How to get it
+
+### Windows
+
+See the release for the available Windows files.
+
+### macOS
+
+See the release for the available macOS files.
+
+---
+
 # Miasma v0.3.2-beta.12
 
 This beta makes the post-quantum key exchange required by default and adds easier ways to add contacts. It also keeps file transfers smooth and ships a Windows installer.
