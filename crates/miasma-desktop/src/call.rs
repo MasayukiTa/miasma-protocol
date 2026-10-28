@@ -89,6 +89,10 @@ pub struct CallUi {
     /// until one arrives. Part 2 draws it; this part only stores it. The frame
     /// carries call content, so it is cleared when the call ends.
     remote_frame: Option<RemoteFrameData>,
+    /// True after the daemon answered a camera-start with `no_camera`, so the
+    /// panel shows the "camera unavailable" notice. Cleared once the camera is
+    /// in use (a later start succeeded) and when the call ends.
+    camera_unavailable: bool,
 }
 
 impl Default for CallUi {
@@ -107,6 +111,7 @@ impl Default for CallUi {
             selected_output: None,
             device_select_pending: false,
             remote_frame: None,
+            camera_unavailable: false,
         }
     }
 }
@@ -161,6 +166,10 @@ impl CallUi {
         }
         self.state = status.state.clone();
         self.muted = status.muted;
+        // The camera is in use now, so a start succeeded: drop any earlier "no camera" notice.
+        if status.camera_in_use {
+            self.camera_unavailable = false;
+        }
         self.status = Some(status.clone());
     }
 
@@ -174,6 +183,7 @@ impl CallUi {
         self.muted = false;
         self.status = None;
         self.remote_frame = None;
+        self.camera_unavailable = false;
     }
 
     pub fn status(&self) -> Option<&CallStatusDto> {
@@ -191,6 +201,17 @@ impl CallUi {
     /// (or the call has ended).
     pub fn remote_frame(&self) -> Option<&RemoteFrameData> {
         self.remote_frame.as_ref()
+    }
+
+    /// Note that the daemon could not open a camera (`no_camera`): the panel shows the
+    /// "camera unavailable" notice until the camera comes into use or the call ends.
+    pub fn set_camera_unavailable(&mut self) {
+        self.camera_unavailable = true;
+    }
+
+    /// Whether the "camera unavailable" notice should be shown.
+    pub fn camera_unavailable(&self) -> bool {
+        self.camera_unavailable
     }
 
     /// The elapsed seconds of a connected call at `now_ms`, or `None` when not connected yet.
@@ -300,6 +321,19 @@ pub fn accept(token: u64) -> CallRequest {
 /// Build the `Reject` request for a ringing call's token.
 pub fn reject(token: u64) -> CallRequest {
     CallRequest::Reject { token }
+}
+
+/// Build the `StartCamera` request that begins sending the local camera. Honoured by the daemon
+/// only while the call is connected with video negotiated; answered `Ok`, or `Error` with
+/// `not_ready` (no video) or `no_camera` (no camera could be opened).
+pub fn start_camera() -> CallRequest {
+    CallRequest::StartCamera
+}
+
+/// Build the `StopCamera` request that stops sending the local camera and releases the device.
+/// Stopping is idempotent; the screen stream, if any, is unaffected.
+pub fn stop_camera() -> CallRequest {
+    CallRequest::StopCamera
 }
 
 /// Build the `ListAudioDevices` request that asks the host for its devices.
@@ -486,6 +520,45 @@ mod tests {
                 output: None,
             }
         ));
+        // The camera toggle builds StartCamera when the camera is off and StopCamera when on.
+        assert!(matches!(start_camera(), CallRequest::StartCamera));
+        assert!(matches!(stop_camera(), CallRequest::StopCamera));
+    }
+
+    #[test]
+    fn the_camera_toggle_builds_start_when_off_and_stop_when_on() {
+        // The panel sends StartCamera while the camera is not in use, and StopCamera while it is.
+        let off = false;
+        let on = true;
+        let when = |in_use: bool| {
+            if in_use {
+                stop_camera()
+            } else {
+                start_camera()
+            }
+        };
+        assert!(matches!(when(off), CallRequest::StartCamera));
+        assert!(matches!(when(on), CallRequest::StopCamera));
+    }
+
+    #[test]
+    fn a_no_camera_answer_shows_the_notice_until_the_camera_is_in_use_or_the_call_ends() {
+        let mut ui = CallUi::default();
+        assert!(!ui.camera_unavailable());
+        // The daemon answered `no_camera`: the notice is shown.
+        ui.set_camera_unavailable();
+        assert!(ui.camera_unavailable());
+        // A later status with the camera in use means a start succeeded: the notice is dropped.
+        ui.on_status(&status("connected", None), 1_000);
+        let mut dto = status("connected", None);
+        dto.camera_in_use = true;
+        ui.on_status(&dto, 2_000);
+        assert!(!ui.camera_unavailable());
+        // Set again, then end the call: the notice is cleared with the rest of the call state.
+        ui.set_camera_unavailable();
+        assert!(ui.camera_unavailable());
+        ui.end();
+        assert!(!ui.camera_unavailable());
     }
 
     fn device_list() -> AudioDeviceListDto {

@@ -33,6 +33,9 @@ pub enum CallAction {
     /// Start or stop sharing the screen; the app sends the matching start/stop
     /// request based on the current screen-sharing state.
     ToggleScreenShare,
+    /// Start or stop sending the local camera; the app sends the matching
+    /// start/stop request based on the current `camera_in_use` state.
+    ToggleCamera,
     /// Ask the host for its audio devices, to fill the picker.
     ListDevices,
     /// Choose the input and/or output device by name (`None` means the host default).
@@ -53,6 +56,7 @@ impl std::fmt::Debug for CallAction {
             CallAction::HangUp => "HangUp",
             CallAction::ToggleMute => "ToggleMute",
             CallAction::ToggleScreenShare => "ToggleScreenShare",
+            CallAction::ToggleCamera => "ToggleCamera",
             CallAction::ListDevices => "ListDevices",
             // The device names are not shown here, so they are never formatted into diagnostics.
             CallAction::SelectDevices { .. } => "SelectDevices",
@@ -163,15 +167,20 @@ pub fn in_call_panel(
                 action = Some(CallAction::ToggleMute);
             }
             ui.add_space(kit::SP_2);
-            // Camera toggle, next to mute. The label follows the status flag (`camera_in_use`).
-            // The core call IPC has no camera on/off request in this build, so the button is
-            // shown but disabled, with a neutral tooltip saying so; its label still reports the
-            // current state. When the toggle request lands, enable it and return an action here.
+            // Camera toggle, next to mute. The label follows the status flag (`camera_in_use`):
+            // a press sends StartCamera when it is off and StopCamera when it is on. Enabled only
+            // while the call is connected with video negotiated, the state the daemon honours a
+            // start in; the request builder lives in `call.rs` and the handling in `chat_ui.rs`.
             let camera_on = status.map_or(false, |s| s.camera_in_use);
             let camera_label = if camera_on { c.camera_on } else { c.camera_off };
-            crate::form_check::add_enabled(ui, false, kit::secondary_button(camera_label))
-                .on_disabled_hover_text(c.camera_unavailable)
-                .on_disabled_hover_text(c.a11y_camera);
+            let camera_ready =
+                state.state() == "connected" && status.map_or(false, |s| s.negotiated_video);
+            if crate::form_check::add_enabled(ui, camera_ready, kit::secondary_button(camera_label))
+                .on_hover_text(c.a11y_camera)
+                .clicked()
+            {
+                action = Some(CallAction::ToggleCamera);
+            }
             ui.add_space(kit::SP_2);
             // Screen share toggle, next to the camera. The label follows the status flag
             // (`screen_sharing`); a press asks the app to start or stop the real screen-share
@@ -215,6 +224,11 @@ pub fn in_call_panel(
             if status.screen_sharing {
                 kit::notice(ui, Level::Warn, c.screen_sharing);
             }
+        }
+        // The daemon answered a camera-start with `no_camera`: a neutral notice says the camera
+        // could not be turned on. It clears when the camera comes into use or the call ends.
+        if state.camera_unavailable() {
+            kit::notice(ui, Level::Warn, c.camera_unavailable);
         }
         if state.mic_in_use() {
             ui.add_space(kit::SP_2);
@@ -319,4 +333,88 @@ pub fn device_picker(ui: &mut egui::Ui, c: &CallStrings, state: &CallUi) -> Opti
 /// has no dismiss control.
 pub fn mic_indicator(ui: &mut egui::Ui, c: &CallStrings) {
     kit::notice(ui, Level::Warn, c.mic_in_use);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use miasma_core::chat::ipc::{CallRequest, CallStatusDto};
+
+    fn status_with_camera(in_use: bool, negotiated_video: bool) -> CallStatusDto {
+        // Built through serde so a new defaulted status field never breaks this helper.
+        serde_json::from_value(serde_json::json!({
+            "state": "connected",
+            "pending_token": null,
+            "signalling_connected": true,
+            "negotiated_video": negotiated_video,
+            "camera_in_use": in_use,
+        }))
+        .expect("a status with only the required fields")
+    }
+
+    // The panel chooses the camera label from `camera_in_use` and enables the button only while
+    // connected with video negotiated; these mirror that decision without a window.
+    fn camera_label<'a>(c: &'a CallStrings, status: &CallStatusDto) -> &'a str {
+        if status.camera_in_use {
+            c.camera_on
+        } else {
+            c.camera_off
+        }
+    }
+    fn camera_ready(state: &str, status: &CallStatusDto) -> bool {
+        state == "connected" && status.negotiated_video
+    }
+
+    #[test]
+    fn the_camera_toggle_action_is_named_without_a_value() {
+        // Like the other actions, the camera toggle formats to a bare name for diagnostics.
+        assert_eq!(format!("{:?}", CallAction::ToggleCamera), "ToggleCamera");
+    }
+
+    #[test]
+    fn the_camera_toggle_builds_start_when_off_and_stop_when_on() {
+        // Off: a press sends StartCamera. On: a press sends StopCamera. This mirrors the handler
+        // in `chat_ui.rs`, which chooses the request from the last `camera_in_use` flag.
+        let request_for = |in_use: bool| {
+            if in_use {
+                crate::call::stop_camera()
+            } else {
+                crate::call::start_camera()
+            }
+        };
+        assert!(matches!(request_for(false), CallRequest::StartCamera));
+        assert!(matches!(request_for(true), CallRequest::StopCamera));
+    }
+
+    #[test]
+    fn the_camera_label_follows_the_flag_and_the_button_needs_connected_video() {
+        let c = crate::locale::call_strings(crate::locale::Locale::En);
+        let off = status_with_camera(false, true);
+        let on = status_with_camera(true, true);
+        assert_eq!(camera_label(c, &off), c.camera_off);
+        assert_eq!(camera_label(c, &on), c.camera_on);
+        // Enabled only while connected with video negotiated.
+        assert!(camera_ready("connected", &status_with_camera(false, true)));
+        assert!(!camera_ready(
+            "connecting",
+            &status_with_camera(false, true)
+        ));
+        assert!(!camera_ready(
+            "connected",
+            &status_with_camera(false, false)
+        ));
+    }
+
+    #[test]
+    fn a_no_camera_answer_drives_the_panel_notice_flag() {
+        // The error handling the panel reads: `no_camera` sets the notice; it clears when the
+        // camera comes into use or the call ends. (`not_ready` leaves it untouched, as the
+        // chat_ui handler only sets it on `no_camera`.)
+        let mut call = CallUi::default();
+        assert!(!call.camera_unavailable());
+        call.set_camera_unavailable();
+        assert!(call.camera_unavailable());
+        call.on_status(&status_with_camera(true, true), 1_000);
+        assert!(!call.camera_unavailable());
+    }
 }
