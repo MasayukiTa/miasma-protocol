@@ -76,6 +76,9 @@ ml-kem = { version = "0.3.3", default-features = false, features = ["zeroize"], 
 rand_core_pqc = { package = "rand_core", version = "0.10", default-features = false, optional = true }
 
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"], optional = true }
+zune-jpeg = { version = "0.5.15", default-features = false, optional = true }
+nokhwa = { version = "0.10", default-features = false, features = ["input-msmf", "decoding"], optional = true }
 # Real call audio (see src/chat/call/audio_device.rs and codec.rs). Both are
 # optional, desktop-only, and gated by the `call-audio` feature.
 # cpal: capture and playback on Windows and macOS through the
@@ -100,13 +103,15 @@ objc2 = "0.6"
 objc2-foundation = "0.3"
 
 [features]
-default = ["iroh", "call-audio"]
+default = ["iroh", "call-audio", "call-video", "call-camera"]
 # `miasma daemon --no-iroh` / `transport.iroh_mode = "off"` switch it off at run
 # time; building without the feature removes the code and the dependency tree.
 iroh = ["dep:iroh", "dep:iroh-mdns-address-lookup"]
 # Real capture, playback and Opus on Windows and macOS. On by default; other
 # platforms and builds without this feature use pseudo devices.
 call-audio = ["dep:cpal", "dep:opus"]
+call-video = ["dep:jpeg-encoder", "dep:zune-jpeg"]
+call-camera = ["dep:nokhwa"]
 # Hybrid X25519 + ML-KEM-768 key exchange primitives. Library only; not
 # enabled by default and not used by any live handshake.
 pqc = ["dep:ml-kem", "dep:rand_core_pqc"]
@@ -133,3 +138,4 @@ harness = false
 # `fuzzing` is set by cargo-fuzz (see the fuzz/ directory).
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+

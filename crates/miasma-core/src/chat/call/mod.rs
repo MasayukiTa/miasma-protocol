@@ -33,6 +33,10 @@ pub mod sender;
 pub mod session;
 pub mod signal;
 pub mod state;
+pub mod video;
+#[cfg(all(feature = "call-video", any(windows, target_os = "macos")))]
+pub mod video_codec;
+pub mod video_frame;
 
 pub use caps::{negotiate, Capabilities, CapsError, Negotiated};
 pub use frame::{open_frame, seal_frame, AdvanceReason, ReplayWindow, SendChain};
@@ -48,3 +52,15 @@ pub use signal::{
     CALL_NONCE_LEN, CALL_TTL_SECONDS_DEFAULT, CALL_TTL_SECONDS_MAX, CALL_TTL_SECONDS_MIN,
     OFFER_HASH_LEN,
 };
+pub use video::{
+    EncodedVideoFrame, PassthroughCodec, RawPicture, Reassembled, ReassemblyBuffer,
+    RecordingVideoSink, SendScheduler, TestPatternSource, TickFill, VideoDecoder, VideoEncoder,
+    VideoSink, VideoSource, DEFAULT_REASSEMBLY_BUDGET_BYTES, MAX_VIDEO_FRAGMENTS_PER_TICK,
+};
+pub use video_frame::{
+    fragment_frame, parse_fragment, FragmentHeader, VideoFrameError, FLAG_KEYFRAME,
+    FRAGMENT_HEADER_LEN, FRAGMENT_PAYLOAD_LEN, MAX_FRAGMENTS_PER_FRAME,
+};
+
+#[cfg(all(feature = "call-camera", any(windows, target_os = "macos")))]
+pub mod video_camera;

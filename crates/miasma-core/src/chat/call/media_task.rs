@@ -8,6 +8,7 @@ use super::{
     media::FRAME_PLAINTEXT_LEN,
     session::{DatagramLink, MediaSession, TickStatus},
     state::State,
+    video::{VideoDecoder, VideoDriver, VideoEncoder, VideoSink, VideoSource},
 };
 use crate::transport::{
     call_link::IrohDatagramLink,
@@ -30,10 +31,26 @@ use tokio::{sync::Notify, task::JoinHandle};
 pub struct MediaStats {
     pub frames_sent: Arc<AtomicU64>,
     pub frames_played: Arc<AtomicU64>,
+    pub video_frames_sent: Arc<AtomicU64>,
+    pub video_frames_played: Arc<AtomicU64>,
+    pub camera_in_use: Arc<AtomicBool>,
     /// Set true to mute the local microphone mid-call. The media task reads it
     /// each tick and tells the capture source; with no input device it has no
     /// effect.
     pub muted: Arc<std::sync::atomic::AtomicBool>,
+}
+
+pub struct VideoParts {
+    pub source: Box<dyn VideoSource + Send>,
+    pub sink: Box<dyn VideoSink + Send>,
+    pub encoder: Box<dyn VideoEncoder + Send>,
+    pub decoder: Box<dyn VideoDecoder + Send>,
+}
+struct CameraGuard(Arc<AtomicBool>);
+impl Drop for CameraGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
 }
 
 struct MutedSource<S> {
@@ -184,18 +201,79 @@ pub(super) fn maybe_start_media<P: CallPorts>(
     provider: Arc<dyn MediaLinkProvider>,
     running: bool,
     stats: MediaStats,
-    muted: Arc<AtomicBool>,
+    video: Option<VideoParts>,
+    _muted: Arc<AtomicBool>,
 ) -> Option<JoinHandle<bool>> {
     if running || controller.status().state != State::Connected {
         return None;
     }
+    let video = if controller.negotiated_video() {
+        video
+    } else {
+        None
+    };
     let peer = controller.active_peer()?;
     let call_id = controller.active_call_id()?;
     let roots = controller.take_media_roots()?;
     Some(tokio::spawn(async move {
+        let _camera_guard = CameraGuard(stats.camera_in_use.clone());
         let Some(link) = provider.open(peer, roots.direction).await else {
             return false;
         };
+        // When video was negotiated, drive audio and video together in one tick
+        // loop over the pseudo audio devices. Audio-only calls (no video parts)
+        // go through `run_media`, which opens the real capture/playback devices
+        // on desktop and falls back to the pseudo devices elsewhere and in
+        // tests. Mute applies on both paths through `stats.muted`.
+        if let Some(parts) = video {
+            let mut driver =
+                VideoDriver::new(parts.source, parts.sink, parts.encoder, parts.decoder, 20);
+            let Ok(mut session) = MediaSession::with_roots(
+                &roots.send,
+                &roots.recv,
+                *call_id,
+                roots.direction,
+                crate::chat::engine::now_ms(),
+                MutedSource {
+                    source: ToneSource::new(),
+                    muted: stats.muted.clone(),
+                },
+                RecordingSink::new(),
+                link,
+            ) else {
+                return false;
+            };
+            drop(roots);
+            let mut interval = tokio::time::interval(Duration::from_millis(20));
+            loop {
+                interval.tick().await;
+                session
+                    .source_mut()
+                    .set_muted(stats.muted.load(Ordering::Relaxed));
+                let now = crate::chat::engine::now_ms();
+                stats
+                    .camera_in_use
+                    .store(driver.source_is_open(), Ordering::Relaxed);
+                let packets = driver.tick(now);
+                let status =
+                    session.tick_with_video(now, &packets, |body, time| driver.receive(body, time));
+                stats
+                    .video_frames_sent
+                    .store(driver.frames_sent, Ordering::Relaxed);
+                stats
+                    .video_frames_played
+                    .store(driver.frames_played, Ordering::Relaxed);
+                stats
+                    .frames_sent
+                    .store(session.stats().sent, Ordering::Relaxed);
+                stats
+                    .frames_played
+                    .store(session.stats().played, Ordering::Relaxed);
+                if status == TickStatus::Fatal {
+                    return false;
+                }
+            }
+        }
         run_media(roots, *call_id, link, stats).await
     }))
 }

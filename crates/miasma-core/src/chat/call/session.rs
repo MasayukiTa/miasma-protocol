@@ -9,6 +9,9 @@ use super::receiver::{MediaReceiver, RecvOutcome};
 use super::sender::MediaSender;
 use zeroize::Zeroizing;
 
+// Bound receive work per tick across all media types, including malformed packets.
+const MAX_RECEIVE_PACKETS_PER_TICK: usize = 64;
+
 pub trait DatagramLink: Send {
     fn max_len(&self) -> usize;
     fn send(&mut self, packet: &[u8]) -> bool;
@@ -53,6 +56,10 @@ pub struct SessionStats {
     pub dropped: u64,
     pub played: u64,
     pub late_dropped: u64,
+    /// Whole video frames fully fragmented and handed to the sender.
+    pub video_frames_sent: u64,
+    /// Whole video frames reassembled and handed to the sink.
+    pub video_frames_played: u64,
 }
 
 pub struct MediaSession<S: AudioSource, K: AudioSink, L: DatagramLink> {
@@ -115,6 +122,14 @@ impl<S: AudioSource, K: AudioSink, L: DatagramLink> MediaSession<S, K, L> {
         TickStatus::Fatal
     }
     pub fn tick(&mut self, now_ms: u64) -> TickStatus {
+        self.tick_with_video(now_ms, &[], |_, _| {})
+    }
+    pub fn tick_with_video(
+        &mut self,
+        now_ms: u64,
+        video: &[[u8; super::media::FRAME_PLAINTEXT_LEN]],
+        mut receive_video: impl FnMut(&[u8], u64),
+    ) -> TickStatus {
         let sender = match self.sender.as_mut() {
             Some(sender) => sender,
             None => return TickStatus::Fatal,
@@ -129,7 +144,19 @@ impl<S: AudioSource, K: AudioSink, L: DatagramLink> MediaSession<S, K, L> {
         } else {
             self.stats.send_failed = self.stats.send_failed.saturating_add(1);
         }
-        for _ in 0..64 {
+        for body in video
+            .iter()
+            .take(super::video::MAX_VIDEO_FRAGMENTS_PER_TICK)
+        {
+            let packet = match sender.next_packet_type(now_ms, Some(body), 1) {
+                Ok(packet) => packet,
+                Err(_) => return self.fatal(),
+            };
+            if !self.link.send(&packet) {
+                self.stats.send_failed = self.stats.send_failed.saturating_add(1);
+            }
+        }
+        for _ in 0..MAX_RECEIVE_PACKETS_PER_TICK {
             let packet = match self.link.try_recv() {
                 Some(packet) => packet,
                 None => break,
@@ -145,6 +172,7 @@ impl<S: AudioSource, K: AudioSink, L: DatagramLink> MediaSession<S, K, L> {
                         self.jitter.push(header.packet_seq, frame);
                     }
                 }
+                RecvOutcome::Video(body) => receive_video(&body[..], now_ms),
                 RecvOutcome::Dropped(_) => {
                     self.stats.dropped = self.stats.dropped.saturating_add(1)
                 }
@@ -174,6 +202,19 @@ impl<S: AudioSource, K: AudioSink, L: DatagramLink> MediaSession<S, K, L> {
     pub fn sink(&self) -> &K {
         &self.sink
     }
+    /// Record that one whole video frame was fragmented and handed to the
+    /// sender. The video fragments ride in the same fixed-size packets as
+    /// audio (media_type 0x01); a video driver built on
+    /// [`super::video::SendScheduler`] calls this once per source frame.
+    pub fn note_video_frame_sent(&mut self) {
+        self.stats.video_frames_sent = self.stats.video_frames_sent.saturating_add(1);
+    }
+    /// Record that one whole video frame was reassembled and handed to the
+    /// sink. A video driver built on [`super::video::ReassemblyBuffer`] calls
+    /// this once per completed frame.
+    pub fn note_video_frame_played(&mut self) {
+        self.stats.video_frames_played = self.stats.video_frames_played.saturating_add(1);
+    }
     /// Access the source between ticks, for example to apply a mute change.
     pub fn source_mut(&mut self) -> &mut S {
         &mut self.source
@@ -187,6 +228,57 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
+    // The video counters start at zero and advance only when a video driver
+    // reports a whole frame sent or played; audio ticks never touch them.
+    #[test]
+    fn video_counters_advance_independently() {
+        let root = root();
+        let id = id();
+        let (link, _) = LoopLink::pair();
+        let mut session = make(&root, id, Direction::Caller, link);
+        assert_eq!(session.stats().video_frames_sent, 0);
+        assert_eq!(session.stats().video_frames_played, 0);
+        session.tick(0);
+        assert_eq!(session.stats().video_frames_sent, 0);
+        assert_eq!(session.stats().video_frames_played, 0);
+        session.note_video_frame_sent();
+        session.note_video_frame_sent();
+        session.note_video_frame_played();
+        assert_eq!(session.stats().video_frames_sent, 2);
+        assert_eq!(session.stats().video_frames_played, 1);
+    }
+
+    #[test]
+    fn video_drivers_exchange_over_link() {
+        use super::super::video::{
+            PassthroughCodec, RecordingVideoSink, TestPatternSource, VideoDriver,
+        };
+        let root = root();
+        let id = id();
+        let (left, right) = LoopLink::pair();
+        let mut a = make(&root, id, Direction::Caller, left);
+        let mut b = make(&root, id, Direction::Callee, right);
+        let driver = || {
+            VideoDriver::new(
+                TestPatternSource::new(8, 8, 100),
+                RecordingVideoSink::new(),
+                PassthroughCodec::new(),
+                PassthroughCodec::new(),
+                20,
+            )
+        };
+        let mut av = driver();
+        let mut bv = driver();
+        for n in 0..5 {
+            let now = n * 20;
+            let packets = av.tick(now);
+            a.tick_with_video(now, &packets, |body, time| av.receive(body, time));
+            let packets = bv.tick(now);
+            b.tick_with_video(now, &packets, |body, time| bv.receive(body, time));
+        }
+        assert!(av.frames_sent >= 3 && bv.frames_sent >= 3);
+        assert!(av.frames_played >= 3 && bv.frames_played >= 3);
+    }
     struct LoopLink {
         incoming: Arc<Mutex<VecDeque<Vec<u8>>>>,
         outgoing: Arc<Mutex<VecDeque<Vec<u8>>>>,
@@ -399,6 +491,27 @@ mod tests {
         assert_eq!(session.tick(0), TickStatus::Running);
         assert_eq!(session.stats().dropped, 64);
         assert_eq!(session.link.flood, 99_936);
+    }
+    #[test]
+    fn mixed_media_flood_shares_receive_budget() {
+        let root = root();
+        let id = id();
+        let (link, _) = LoopLink::pair();
+        let incoming = link.incoming.clone();
+        let mut sender = MediaSender::new(&root, id, Direction::Callee, 0).unwrap();
+        for i in 0..80 {
+            let packet = sender.next_packet_type(0, None, (i % 2) as u8).unwrap();
+            incoming.lock().unwrap().push_back(packet);
+        }
+        let mut session = make(&root, id, Direction::Caller, link);
+        let mut videos = 0;
+        assert_eq!(
+            session.tick_with_video(0, &[], |_, _| videos += 1),
+            TickStatus::Running
+        );
+        assert_eq!(session.stats().received_ok, 32);
+        assert_eq!(videos, 32);
+        assert_eq!(incoming.lock().unwrap().len(), 16);
     }
     #[test]
     fn authentication_failure_stops_and_drops_chains() {

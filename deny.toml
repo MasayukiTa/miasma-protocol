@@ -58,6 +58,9 @@ allow = [
     "Unicode-3.0",
     "Unlicense",
     "Zlib",
+    # The Independent JPEG Group licence (permissive, BSD-like): the JPEG codec and
+    # the camera decoder of the call feature (jpeg-encoder, mozjpeg via nokhwa).
+    "IJG",
     # Default fonts bundled by egui (miasma-desktop only).
     "OFL-1.1",
     "LicenseRef-UFL-1.0",
