@@ -15,7 +15,7 @@
 //! and the peer field therefore get a hand-written `Debug` that prints a fixed
 //! string only.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::OnceLock};
 use zeroize::Zeroizing;
 
 use super::caps::{self, Capabilities};
@@ -63,6 +63,19 @@ struct CallKeys {
     offer_hash: Option<Zeroizing<[u8; 32]>>,
 }
 
+pub struct SasInputs {
+    pub local_identity: [u8; 32],
+    pub peer_identity: [u8; 32],
+    pub confirm_tag: Zeroizing<[u8; 32]>,
+}
+
+struct CallSasContext {
+    call_id: Zeroizing<[u8; 16]>,
+    caller_nonce: Zeroizing<[u8; 16]>,
+    callee_nonce: Zeroizing<[u8; 16]>,
+    offer_hash: Zeroizing<[u8; 32]>,
+}
+
 pub struct MediaRoots {
     pub send: Zeroizing<[u8; 32]>,
     pub recv: Zeroizing<[u8; 32]>,
@@ -97,6 +110,7 @@ pub trait CallPorts {
     /// Whether `peer` (a 32-byte identity) is a known, allowed contact.
     fn is_contact_allowed(&self, peer: &[u8; 32]) -> bool;
     fn media_gate(&self, peer: &[u8; 32]) -> MediaGate;
+    fn sas_inputs(&self, peer: PeerId) -> Option<SasInputs>;
 }
 
 struct OfferPeer {
@@ -169,6 +183,9 @@ mod inbound_tests {
         }
         fn media_gate(&self, _: &[u8; 32]) -> MediaGate {
             self.gate
+        }
+        fn sas_inputs(&self, _: PeerId) -> Option<SasInputs> {
+            None
         }
     }
     fn controller() -> CallController<Ports> {
@@ -696,6 +713,8 @@ pub struct CallController<P: CallPorts> {
     pending_sends: VecDeque<PendingSend>,
     next_send_id: u64,
     call_keys: Option<CallKeys>,
+    sas_context: Option<CallSasContext>,
+    safety_code: OnceLock<String>,
     entered_at_ms: Option<u64>,
     offer_limiter: OfferLimiter,
     dropped_offers: u64,
@@ -720,6 +739,8 @@ impl<P: CallPorts> CallController<P> {
             pending_sends: VecDeque::with_capacity(16),
             next_send_id: 0,
             call_keys: None,
+            sas_context: None,
+            safety_code: OnceLock::new(),
             entered_at_ms: None,
             offer_limiter: OfferLimiter::new(),
             dropped_offers: 0,
@@ -768,7 +789,11 @@ impl<P: CallPorts> CallController<P> {
                     peer_id: PeerId(peer),
                     from_contact,
                     expired: expires_at_ms < now,
-                    other_call_active: old_state != State::Idle,
+                    other_call_active: match old_state {
+                        State::Idle => false,
+                        State::Calling => self.peer != Some(peer),
+                        _ => true,
+                    },
                 })
             }
             Record::Answer {
@@ -1093,7 +1118,20 @@ impl<P: CallPorts> CallController<P> {
             };
         }
         let send_id = self.apply_effects(transition.effects, offer_sender, expected);
+        if transition.next == State::Connected && old_state != State::Connected {
+            self.sas_context = self.call_keys.as_ref().and_then(|keys| {
+                Some(CallSasContext {
+                    call_id: keys.call_id.clone(),
+                    caller_nonce: keys.caller_nonce.clone(),
+                    callee_nonce: keys.callee_nonce.as_ref()?.clone(),
+                    offer_hash: keys.offer_hash.as_ref()?.clone(),
+                })
+            });
+            let _ = self.safety_code();
+        }
         if transition.next == State::Idle {
+            self.sas_context = None;
+            self.safety_code = OnceLock::new();
             self.call_keys = None;
             self.pending_sends.retain(|send| send.encoded.is_none());
             self.peer = None;
@@ -1138,10 +1176,43 @@ impl<P: CallPorts> CallController<P> {
                     self.call_keys = None;
                     self.pending_sends.retain(|send| send.encoded.is_none());
                 }
-                Effect::ReplaceSasInput { .. } => {}
+                Effect::ReplaceSasInput { .. } => {
+                    // The adopted offer context is installed after the transition.
+                    self.sas_context = None;
+                    self.safety_code = OnceLock::new();
+                }
             }
         }
         send_id
+    }
+
+    pub fn safety_code(&self) -> Option<String> {
+        if self.machine.state() != State::Connected {
+            return None;
+        }
+        if let Some(code) = self.safety_code.get() {
+            return Some(code.clone());
+        }
+        let context = self.sas_context.as_ref()?;
+        let inputs = self.ports.sas_inputs(PeerId(self.peer?))?;
+        let bits = super::sas::sas_bits(
+            &inputs.local_identity,
+            &inputs.peer_identity,
+            &inputs.confirm_tag,
+            &context.call_id,
+            &context.caller_nonce,
+            &context.callee_nonce,
+            &context.offer_hash,
+        );
+        let digits = format!("{:020}", u64::from_be_bytes(bits));
+        let code = format!(
+            "{} {} {} {}",
+            &digits[0..5],
+            &digits[5..10],
+            &digits[10..15],
+            &digits[15..20]
+        );
+        Some(self.safety_code.get_or_init(|| code).clone())
     }
 
     pub fn active_peer(&self) -> Option<[u8; 32]> {
@@ -1255,6 +1326,7 @@ mod tests {
     /// A fake [`CallPorts`] with a fixed clock that allows every contact.
     struct FakePorts {
         now: u64,
+        identity: [u8; 32],
     }
 
     impl CallPorts for FakePorts {
@@ -1267,10 +1339,20 @@ mod tests {
         fn media_gate(&self, _: &[u8; 32]) -> MediaGate {
             MediaGate::Ready
         }
+        fn sas_inputs(&self, peer: PeerId) -> Option<SasInputs> {
+            Some(SasInputs {
+                local_identity: self.identity,
+                peer_identity: peer.0,
+                confirm_tag: Zeroizing::new([3; 32]),
+            })
+        }
     }
 
     fn controller() -> CallController<FakePorts> {
-        CallController::new(FakePorts { now: 1_000 })
+        CallController::new(FakePorts {
+            now: 1_000,
+            identity: [1; 32],
+        })
     }
 
     fn deliver(target: &mut CallController<FakePorts>, peer: [u8; 32], bytes: &[u8]) {
@@ -1279,6 +1361,121 @@ mod tests {
             signal: Record::decode(bytes).unwrap(),
             received_at_ms: 1_000,
         });
+    }
+
+    #[test]
+    fn safety_code_round_trip_and_lifetime() {
+        let mut a = controller();
+        let mut b = controller();
+        b.ports.identity = [2; 32];
+        assert!(a.safety_code().is_none());
+        a.dial([2; 32]).unwrap();
+        assert!(a.safety_code().is_none());
+        let offer = a.drain_encoded().remove(0).1;
+        deliver(&mut b, [1; 32], &offer);
+        assert!(b.safety_code().is_none());
+        assert!(b.accept(b.status().pending_token.unwrap()));
+        let answer = b.drain_encoded().remove(0).1;
+        deliver(&mut a, [2; 32], &answer);
+        let code = a.safety_code().unwrap();
+        assert_eq!(Some(code.clone()), b.safety_code());
+        assert_eq!(code.len(), 23);
+        assert_eq!(
+            code.as_bytes()
+                .iter()
+                .enumerate()
+                .filter_map(|(i, b)| if *b == b' ' { Some(i) } else { None })
+                .collect::<Vec<_>>(),
+            vec![5, 11, 17]
+        );
+        assert!(code.bytes().all(|b| b == b' ' || b.is_ascii_digit()));
+        assert!(a.take_media_roots().is_some());
+        assert_eq!(Some(code), a.safety_code());
+        a.hang_up();
+        assert!(a.safety_code().is_none());
+    }
+
+    #[test]
+    fn safety_code_changes_with_altered_offer() {
+        let mut a = controller();
+        let mut b = controller();
+        b.ports.identity = [2; 32];
+        a.dial([2; 32]).unwrap();
+        let mut offer = a.drain_encoded().remove(0).1;
+        offer[1 + 16 + 16] ^= 1;
+        deliver(&mut b, [1; 32], &offer);
+        assert!(b.accept(b.status().pending_token.unwrap()));
+        let answer = b.drain_encoded().remove(0).1;
+        deliver(&mut a, [2; 32], &answer);
+        assert!(a.safety_code().is_some());
+        assert!(b.safety_code().is_some());
+        assert_ne!(a.safety_code(), b.safety_code());
+    }
+
+    #[test]
+    fn safety_code_uses_adopted_collision_offer() {
+        let mut a = controller();
+        let mut b = controller();
+        b.ports.identity = [2; 32];
+        a.dial([2; 32]).unwrap();
+        b.dial([1; 32]).unwrap();
+        let a_offer = a.drain_encoded().remove(0).1;
+        let b_offer = b.drain_encoded().remove(0).1;
+        deliver(&mut a, [2; 32], &b_offer);
+        deliver(&mut b, [1; 32], &a_offer);
+        let (caller, callee, callee_id) = if a.status().state == State::Ringing {
+            (&mut b, &mut a, [1; 32])
+        } else {
+            (&mut a, &mut b, [2; 32])
+        };
+        assert_eq!(caller.status().state, State::Calling);
+        assert_eq!(callee.status().state, State::Ringing);
+        assert_eq!(callee.call_keys.as_ref().unwrap().role, Role::Callee);
+        assert!(callee.call_keys.as_ref().unwrap().callee_share.is_none());
+        assert!(*caller.active_call_id().unwrap() == *callee.active_call_id().unwrap());
+        assert!(callee.accept(callee.status().pending_token.unwrap()));
+        let answer = callee
+            .drain_encoded()
+            .into_iter()
+            .find_map(|(_, bytes, _)| {
+                if matches!(Record::decode(&bytes), Ok(Record::Answer { .. })) {
+                    Some(bytes)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        deliver(caller, callee_id, &answer);
+        assert_eq!(caller.status().state, State::Connected);
+        assert_eq!(callee.status().state, State::Connected);
+        assert!(caller.safety_code().is_some());
+        assert_eq!(caller.safety_code(), callee.safety_code());
+        let caller_roots = caller.take_media_roots().unwrap();
+        let callee_roots = callee.take_media_roots().unwrap();
+        assert!(*caller_roots.send == *callee_roots.recv);
+        assert!(*caller_roots.recv == *callee_roots.send);
+    }
+
+    #[test]
+    fn crossed_offer_from_different_peer_is_busy() {
+        let mut a = controller();
+        let mut c = controller();
+        a.dial([2; 32]).unwrap();
+        a.drain_encoded();
+        c.dial([1; 32]).unwrap();
+        let offer = c.drain_encoded().remove(0).1;
+        let offered_id = match Record::decode(&offer).unwrap() {
+            Record::Offer { call_id, .. } => call_id,
+            _ => panic!("expected offer"),
+        };
+        deliver(&mut a, [3; 32], &offer);
+        assert_eq!(a.status().state, State::Calling);
+        let sends = a.drain_encoded();
+        assert_eq!(sends.len(), 1);
+        assert_eq!(sends[0].0, [3; 32]);
+        assert!(
+            matches!(Record::decode(&sends[0].1), Ok(Record::Busy { call_id, .. }) if call_id == offered_id)
+        );
     }
 
     #[test]
