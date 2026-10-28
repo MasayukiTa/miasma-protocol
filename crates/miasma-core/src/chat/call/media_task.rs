@@ -1,8 +1,9 @@
 //! Transport and task for call media. The audio devices are placeholders.
 use super::{
     controller::{CallController, CallPorts},
-    device::{RecordingSink, ToneSource},
+    device::{AudioSource, RecordingSink, ToneSource},
     media::Direction,
+    media::FRAME_PLAINTEXT_LEN,
     session::{DatagramLink, MediaSession, TickStatus},
     state::State,
 };
@@ -16,7 +17,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock, Weak,
     },
     time::{Duration, Instant},
@@ -29,6 +30,19 @@ pub struct MediaStats {
     pub frames_played: Arc<AtomicU64>,
 }
 
+struct MutedSource<S> {
+    source: S,
+    muted: Arc<AtomicBool>,
+}
+impl<S: AudioSource> AudioSource for MutedSource<S> {
+    fn next_frame(&mut self) -> Option<[u8; FRAME_PLAINTEXT_LEN]> {
+        if self.muted.load(Ordering::SeqCst) {
+            Some([0; FRAME_PLAINTEXT_LEN])
+        } else {
+            self.source.next_frame()
+        }
+    }
+}
 pub trait MediaLinkProvider: Send + Sync {
     fn open(
         &self,
@@ -159,6 +173,7 @@ pub(super) fn maybe_start_media<P: CallPorts>(
     provider: Arc<dyn MediaLinkProvider>,
     running: bool,
     stats: MediaStats,
+    muted: Arc<AtomicBool>,
 ) -> Option<JoinHandle<bool>> {
     if running || controller.status().state != State::Connected {
         return None;
@@ -177,7 +192,10 @@ pub(super) fn maybe_start_media<P: CallPorts>(
             *call_id,
             roots.direction,
             crate::chat::engine::now_ms(),
-            ToneSource::new(),
+            MutedSource {
+                source: ToneSource::new(),
+                muted,
+            },
             RecordingSink::with_counter(stats.frames_played.clone()),
             link,
         ) else {
@@ -196,4 +214,22 @@ pub(super) fn maybe_start_media<P: CallPorts>(
             }
         }
     }))
+}
+
+#[cfg(test)]
+mod mute_tests {
+    use super::*;
+    #[test]
+    fn muted_source_sends_silence_and_resumes_source() {
+        let muted = Arc::new(AtomicBool::new(false));
+        let mut source = MutedSource {
+            source: ToneSource::new(),
+            muted: muted.clone(),
+        };
+        assert_eq!(source.next_frame(), Some([0; FRAME_PLAINTEXT_LEN]));
+        muted.store(true, Ordering::SeqCst);
+        assert_eq!(source.next_frame(), Some([0; FRAME_PLAINTEXT_LEN]));
+        muted.store(false, Ordering::SeqCst);
+        assert_eq!(source.next_frame(), Some([1; FRAME_PLAINTEXT_LEN]));
+    }
 }

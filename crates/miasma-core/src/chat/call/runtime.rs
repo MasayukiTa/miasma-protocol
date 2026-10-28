@@ -10,7 +10,10 @@ use crate::chat::{
 use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
-    sync::{atomic::Ordering, Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
 };
 use tokio::{
     sync::{mpsc, Notify},
@@ -72,6 +75,7 @@ struct Inner {
     controller: CallController<RuntimePorts>,
     notices: NoticeRing,
     media_stats: Option<MediaStats>,
+    muted: Arc<AtomicBool>,
 }
 impl Inner {
     fn collect(&mut self) {
@@ -91,15 +95,19 @@ fn sync_media<P: CallPorts>(
     provider: Arc<dyn MediaLinkProvider>,
     media: &mut Option<JoinHandle<bool>>,
     stats: &mut Option<MediaStats>,
+    muted: Arc<AtomicBool>,
 ) {
     if controller.status().state != State::Connected {
         *stats = None;
+        if controller.status().state == State::Idle {
+            muted.store(false, Ordering::SeqCst);
+        }
         if let Some(task) = media.take() {
             task.abort();
         }
     } else if media.is_none() {
         let new_stats = MediaStats::default();
-        *media = maybe_start_media(controller, provider, false, new_stats.clone());
+        *media = maybe_start_media(controller, provider, false, new_stats.clone(), muted);
         *stats = media.as_ref().map(|_| new_stats);
     }
 }
@@ -125,6 +133,7 @@ impl CallRuntime {
             controller: CallController::new(RuntimePorts(svc.clone())),
             notices: NoticeRing::default(),
             media_stats: None,
+            muted: Arc::new(AtomicBool::new(false)),
         }));
         let wake = Arc::new(Notify::new());
         let stop_task = Arc::new(Notify::new());
@@ -170,9 +179,16 @@ impl CallRuntime {
                     let Inner {
                         controller,
                         media_stats,
+                        muted,
                         ..
                     } = &mut *state;
-                    sync_media(controller, provider.clone(), &mut media, media_stats);
+                    sync_media(
+                        controller,
+                        provider.clone(),
+                        &mut media,
+                        media_stats,
+                        muted.clone(),
+                    );
                     let sends = state.controller.drain_encoded();
                     state.collect();
                     sends
@@ -245,8 +261,18 @@ impl CallRuntime {
                     CallResponse::Ok
                 }
             }
+            CallRequest::SetMuted { muted } => {
+                if state.controller.status().state == State::Idle {
+                    CallResponse::Error("stale".into())
+                } else {
+                    state.muted.store(muted, Ordering::SeqCst);
+                    CallResponse::Ok
+                }
+            }
             CallRequest::Status => {
-                CallResponse::Status(status_dto(&state.controller, state.media_stats.as_ref()))
+                let mut dto = status_dto(&state.controller, state.media_stats.as_ref());
+                dto.muted = state.muted.load(Ordering::SeqCst);
+                CallResponse::Status(dto)
             }
             CallRequest::Events { since } => state.notices.events(since),
         };
@@ -271,6 +297,9 @@ fn status_dto<P: CallPorts>(
         pending_token: status.pending_token,
         signalling_connected: status.signalling_connected,
         safety_code: controller.safety_code(),
+        muted: false,
+        camera_in_use: false,
+        screen_sharing: false,
         media_frames_sent: stats.map_or(0, |s| s.frames_sent.load(Ordering::Relaxed)),
         media_frames_played: stats.map_or(0, |s| s.frames_played.load(Ordering::Relaxed)),
     }
@@ -436,9 +465,27 @@ mod tests {
         let mut bm = None;
         let mut a_stats = None;
         let mut b_stats = None;
-        sync_media(&mut a, provider.clone(), &mut am, &mut a_stats);
-        sync_media(&mut b, provider.clone(), &mut bm, &mut b_stats);
-        sync_media(&mut a, provider.clone(), &mut am, &mut a_stats);
+        sync_media(
+            &mut a,
+            provider.clone(),
+            &mut am,
+            &mut a_stats,
+            Arc::new(AtomicBool::new(false)),
+        );
+        sync_media(
+            &mut b,
+            provider.clone(),
+            &mut bm,
+            &mut b_stats,
+            Arc::new(AtomicBool::new(false)),
+        );
+        sync_media(
+            &mut a,
+            provider.clone(),
+            &mut am,
+            &mut a_stats,
+            Arc::new(AtomicBool::new(false)),
+        );
         tokio::task::yield_now().await;
         assert_eq!(provider.opens.load(Ordering::SeqCst), 2);
         assert_eq!(a.status().state, State::Connected);
@@ -461,8 +508,20 @@ mod tests {
         .expect("media did not flow in time");
         a.hang_up();
         b.hang_up();
-        sync_media(&mut a, provider.clone(), &mut am, &mut a_stats);
-        sync_media(&mut b, provider, &mut bm, &mut b_stats);
+        sync_media(
+            &mut a,
+            provider.clone(),
+            &mut am,
+            &mut a_stats,
+            Arc::new(AtomicBool::new(false)),
+        );
+        sync_media(
+            &mut b,
+            provider,
+            &mut bm,
+            &mut b_stats,
+            Arc::new(AtomicBool::new(false)),
+        );
         assert!(am.is_none() && bm.is_none());
         for status in [
             status_dto(&a, a_stats.as_ref()),
@@ -481,7 +540,13 @@ mod tests {
         });
         let mut media = None;
         let mut stats = None;
-        sync_media(&mut a, provider, &mut media, &mut stats);
+        sync_media(
+            &mut a,
+            provider,
+            &mut media,
+            &mut stats,
+            Arc::new(AtomicBool::new(false)),
+        );
         assert!(!media.take().unwrap().await.unwrap());
         let mut notices = NoticeRing::default();
         media_failed(&mut a, &mut notices);
