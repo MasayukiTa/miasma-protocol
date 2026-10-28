@@ -90,6 +90,14 @@ A browser client lives in `web/`. With the desktop app or the CLI running, `mias
 4. Press **Send files** next to the contact, or use **Send a file** on **Home**, and choose the file.
 5. The recipient finds it under **Files**. For large files, **Files** also shows progress and lets you stop and resume.
 
+## Calls
+
+Contacts can make voice calls, with video and screen sharing when available. Calls ring only for contacts and are on by default. To turn them off, put `enabled = false` under `[call]` in `config.toml`.
+
+Calls are end-to-end protected with keys exchanged inside the chat channel. During a call, compare the 20-digit safety code by reading it to each other; a mismatch may indicate an attacker. An indicator stays visible while the microphone, camera or screen is in use.
+
+Calls are beta and have not been independently audited. Do not use them for material whose exposure would be serious. Voice uses Opus on Windows and macOS; other platforms use test devices only. Mobile apps cannot make calls yet. Video is 160x120 in this release. See [troubleshooting](docs/TROUBLESHOOTING.md#calls).
+
 ## How it is different
 
 - **No server holds your files.** There is no account and no central storage. A file goes from your computer to your contact's computer.
