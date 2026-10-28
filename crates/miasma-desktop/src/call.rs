@@ -222,17 +222,14 @@ mod tests {
     use crate::locale::{call_strings, Locale};
 
     fn status(state: &str, pending: Option<u64>) -> CallStatusDto {
-        CallStatusDto {
-            state: state.to_owned(),
-            pending_token: pending,
-            signalling_connected: state == "connected",
-            safety_code: None,
-            muted: false,
-            camera_in_use: false,
-            screen_sharing: false,
-            media_frames_sent: 0,
-            media_frames_played: 0,
-        }
+        // Built through serde so that a new defaulted field in the status never breaks this
+        // helper again (the struct grows with every call feature).
+        serde_json::from_value(serde_json::json!({
+            "state": state,
+            "pending_token": pending,
+            "signalling_connected": state == "connected",
+        }))
+        .expect("a status with only the required fields")
     }
 
     #[test]
