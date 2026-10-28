@@ -77,6 +77,8 @@ mod tests {
         check_group!(caller);
         check_group!(callee);
         check_group!(offer);
+        // The macro restores each byte; read the last one so that restore is not a dead store.
+        assert_eq!(offer, [7; 32]);
     }
 
     #[test]
