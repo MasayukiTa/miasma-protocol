@@ -44,7 +44,7 @@ pub struct MediaStats {
     pub video_frames_played: Arc<AtomicU64>,
     pub camera_in_use: Arc<AtomicBool>,
     pub screen_sharing: Arc<AtomicBool>,
-    pub(super) control: Arc<Mutex<Option<mpsc::UnboundedSender<MediaControl>>>>,
+    pub(super) control: Arc<Mutex<Option<mpsc::Sender<MediaControl>>>>,
     /// Set true to mute the local microphone mid-call. The media task reads it
     /// each tick and tells the capture source; with no input device it has no
     /// effect.
@@ -64,10 +64,11 @@ pub struct VideoParts {
     pub encoder: Box<dyn VideoEncoder + Send>,
     pub decoder: Box<dyn VideoDecoder + Send>,
 }
-struct CameraGuard(Arc<AtomicBool>);
+struct CameraGuard(Arc<AtomicBool>, Arc<AtomicBool>);
 impl Drop for CameraGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Relaxed);
+        self.1.store(false, Ordering::Relaxed);
     }
 }
 
@@ -272,10 +273,10 @@ pub(super) fn maybe_start_media<P: CallPorts>(
     let peer = controller.active_peer()?;
     let call_id = controller.active_call_id()?;
     let roots = controller.take_media_roots()?;
-    let (control_tx, control_rx) = mpsc::unbounded_channel();
+    let (control_tx, control_rx) = mpsc::channel(32);
     *stats.control.lock().unwrap_or_else(|e| e.into_inner()) = Some(control_tx);
     Some(tokio::spawn(async move {
-        let _camera_guard = CameraGuard(stats.camera_in_use.clone());
+        let _camera_guard = CameraGuard(stats.camera_in_use.clone(), stats.screen_sharing.clone());
         let Some(link) = provider.open(peer, roots.direction).await else {
             return false;
         };
@@ -308,7 +309,7 @@ async fn run_media(
     video: Option<VideoParts>,
     screen_source: Option<Box<dyn VideoSource + Send>>,
     remote_frames: RemoteFrameStore,
-    control_rx: mpsc::UnboundedReceiver<MediaControl>,
+    control_rx: mpsc::Receiver<MediaControl>,
 ) -> bool {
     #[cfg(all(feature = "call-audio", any(windows, target_os = "macos"), not(test)))]
     {
@@ -384,7 +385,7 @@ async fn drive_session<S, K>(
     video: Option<VideoParts>,
     screen_source: Option<Box<dyn VideoSource + Send>>,
     remote_frames: RemoteFrameStore,
-    mut control_rx: mpsc::UnboundedReceiver<MediaControl>,
+    mut control_rx: mpsc::Receiver<MediaControl>,
 ) -> bool
 where
     S: AudioSource + MuteControl,
@@ -473,7 +474,10 @@ where
         };
         // Screen fragments for this tick (empty when not sharing).
         let screen_packets = match screen.as_mut() {
-            Some(driver) => driver.tick(now),
+            Some(driver) => driver.tick_with_budget(
+                now,
+                super::video::MAX_VIDEO_FRAGMENTS_PER_TICK.saturating_sub(camera_packets.len()),
+            ),
             None => Vec::new(),
         };
         let camera_slice: &[[u8; super::media::FRAME_PLAINTEXT_LEN]] = if video.is_some() {

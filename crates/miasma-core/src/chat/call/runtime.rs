@@ -371,7 +371,7 @@ impl CallRuntime {
                     result = async { match media.as_mut() { Some(task) => Some(task.await), None => None } }, if media.is_some() => {
                         media = None;
                         task_inner.lock().unwrap_or_else(|e| e.into_inner()).media_stats = None;
-                        if matches!(result, Some(Ok(false))) {
+                        if !matches!(result, Some(Ok(true))) {
                             let mut state = task_inner.lock().unwrap_or_else(|e| e.into_inner());
                             let Inner { controller, notices, .. } = &mut *state;
                             media_failed(controller, notices);
@@ -514,9 +514,13 @@ impl CallRuntime {
                 }
             }
             CallRequest::StopScreenShare => {
-                send_media_control(&state.media_stats, MediaControl::DetachScreen);
-                state.screen_sharing = false;
-                CallResponse::Ok
+                let sent = send_media_control(&state.media_stats, MediaControl::DetachScreen);
+                if state.screen_sharing && !sent {
+                    CallResponse::Error("not_ready".into())
+                } else {
+                    state.screen_sharing = false;
+                    CallResponse::Ok
+                }
             }
             CallRequest::StartCamera => {
                 let (response, source) = decide_start_camera(
@@ -536,9 +540,13 @@ impl CallRuntime {
                 }
             }
             CallRequest::StopCamera => {
-                send_media_control(&state.media_stats, MediaControl::DetachCamera);
-                state.camera_requested = false;
-                CallResponse::Ok
+                let sent = send_media_control(&state.media_stats, MediaControl::DetachCamera);
+                if state.camera_requested && !sent {
+                    CallResponse::Error("not_ready".into())
+                } else {
+                    state.camera_requested = false;
+                    CallResponse::Ok
+                }
             }
             CallRequest::Events { since } => state.notices.events(since),
             CallRequest::ListAudioDevices => CallResponse::AudioDevices(host_device_list()),
@@ -577,7 +585,7 @@ fn send_media_control(stats: &Option<MediaStats>, control: MediaControl) -> bool
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .as_ref()
-                .map(|tx| tx.send(control).is_ok())
+                .map(|tx| tx.try_send(control).is_ok())
         })
         .unwrap_or(false)
 }
@@ -1251,5 +1259,131 @@ mod tests {
         let (response, source) = decide_start_camera(a.negotiated_video(), true, &factory);
         assert!(matches!(response, CallResponse::Ok));
         assert!(source.is_none());
+    }
+    struct CountedSource(Arc<AtomicUsize>);
+    impl Drop for CountedSource {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    impl super::super::video::VideoSource for CountedSource {
+        fn is_open(&self) -> bool {
+            true
+        }
+        fn next_picture(&mut self) -> Option<super::super::video::RawPicture> {
+            Some(super::super::video::RawPicture {
+                width: 2,
+                height: 2,
+                pixels: vec![1; 4],
+            })
+        }
+    }
+    struct CountedFactory(Arc<AtomicUsize>);
+    impl ScreenSourceFactory for CountedFactory {
+        fn create(&self) -> Option<Box<dyn super::super::video::VideoSource + Send>> {
+            Some(Box::new(CountedSource(self.0.clone())))
+        }
+    }
+    fn packet_counts(queue: &Arc<Mutex<VecDeque<Vec<u8>>>>) -> [usize; 3] {
+        let mut counts = [0; 3];
+        for packet in queue.lock().unwrap().drain(..) {
+            counts[packet[13] as usize] += 1;
+        }
+        counts
+    }
+    #[tokio::test]
+    async fn dynamic_sources_detach_and_release_while_audio_continues() {
+        use std::time::Duration;
+        let (mut call, _) = connected();
+        let outgoing = Arc::new(Mutex::new(VecDeque::new()));
+        let provider = Arc::new(Provider {
+            links: Mutex::new(VecDeque::from([Box::new(Link {
+                incoming: Arc::new(Mutex::new(VecDeque::new())),
+                outgoing: outgoing.clone(),
+            }) as Box<dyn DatagramLink>])),
+            opens: AtomicUsize::new(0),
+        });
+        let mut media = None;
+        let mut stats = None;
+        sync_media(
+            &mut call,
+            provider.clone(),
+            &mut media,
+            &mut stats,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            AudioChoice::default(),
+            None,
+            None,
+            false,
+            Arc::new(Mutex::new(None)),
+        );
+        let camera_drops = Arc::new(AtomicUsize::new(0));
+        let screen_drops = Arc::new(AtomicUsize::new(0));
+        let camera = CountedFactory(camera_drops.clone());
+        let screen = CountedFactory(screen_drops.clone());
+        assert!(send_media_control(
+            &stats,
+            MediaControl::AttachCamera(camera.create().unwrap())
+        ));
+        assert!(send_media_control(
+            &stats,
+            MediaControl::AttachScreen(screen.create().unwrap())
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let sent = packet_counts(&outgoing);
+        assert!(sent[0] > 0 && sent[1] > 0 && sent[2] > 0);
+        assert!(stats.as_ref().unwrap().camera_in_use.load(Ordering::SeqCst));
+        assert!(stats
+            .as_ref()
+            .unwrap()
+            .screen_sharing
+            .load(Ordering::SeqCst));
+        assert!(send_media_control(&stats, MediaControl::DetachCamera));
+        assert!(send_media_control(&stats, MediaControl::DetachScreen));
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        packet_counts(&outgoing);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let sent = packet_counts(&outgoing);
+        assert!(sent[0] > 0);
+        assert_eq!((sent[1], sent[2]), (0, 0));
+        assert_eq!(camera_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(screen_drops.load(Ordering::SeqCst), 1);
+        assert!(!stats.as_ref().unwrap().camera_in_use.load(Ordering::SeqCst));
+        assert!(!stats
+            .as_ref()
+            .unwrap()
+            .screen_sharing
+            .load(Ordering::SeqCst));
+        assert!(send_media_control(
+            &stats,
+            MediaControl::AttachCamera(camera.create().unwrap())
+        ));
+        assert!(send_media_control(
+            &stats,
+            MediaControl::AttachScreen(screen.create().unwrap())
+        ));
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        let saved_stats = stats.clone().unwrap();
+        call.hang_up();
+        sync_media(
+            &mut call,
+            provider,
+            &mut media,
+            &mut stats,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            AudioChoice::default(),
+            None,
+            None,
+            false,
+            Arc::new(Mutex::new(None)),
+        );
+        assert!(media.is_none());
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(camera_drops.load(Ordering::SeqCst), 2);
+        assert_eq!(screen_drops.load(Ordering::SeqCst), 2);
+        assert!(!saved_stats.camera_in_use.load(Ordering::SeqCst));
+        assert!(!saved_stats.screen_sharing.load(Ordering::SeqCst));
     }
 }

@@ -605,6 +605,14 @@ impl<S: VideoSource, K: VideoSink, E: VideoEncoder, D: VideoDecoder> VideoDriver
     }
 
     pub fn tick(&mut self, now_ms: u64) -> Vec<[u8; FRAME_PLAINTEXT_LEN]> {
+        self.tick_with_budget(now_ms, MAX_VIDEO_FRAGMENTS_PER_TICK)
+    }
+
+    pub fn tick_with_budget(
+        &mut self,
+        now_ms: u64,
+        budget: usize,
+    ) -> Vec<[u8; FRAME_PLAINTEXT_LEN]> {
         self.reassembly.expire(now_ms);
         let request = self.reassembly.take_keyframe_request() || self.gap_request_pending;
         self.gap_request_pending = false;
@@ -631,7 +639,10 @@ impl<S: VideoSource, K: VideoSink, E: VideoEncoder, D: VideoDecoder> VideoDriver
             control[6] = 1;
             self.scheduler.pending.push_front(control);
         }
-        self.scheduler.tick([0; FRAME_PLAINTEXT_LEN]).video
+        let take = budget
+            .min(self.scheduler.max_video_per_tick)
+            .min(self.scheduler.pending.len());
+        self.scheduler.pending.drain(..take).collect()
     }
 
     pub fn receive(&mut self, body: &[u8], now_ms: u64) {
