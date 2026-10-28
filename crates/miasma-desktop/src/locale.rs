@@ -3388,6 +3388,136 @@ static CH_ZH_CN: ChatStrings = ChatStrings {
     old_daemon_easy: "当前版本的 Miasma 无法使用聊天。请完全关闭 Miasma 后重新打开。若仍然无法解决，请更新 Miasma。",
 };
 
+// ─── Calls (voice calls between registered contacts) ────────────────────────
+
+/// Declares `CallStrings` and a field listing for the completeness test from one field list.
+macro_rules! call_strings {
+    ($($f:ident),* $(,)?) => {
+        /// Strings of the call screen (`call.rs` / `call_ui.rs`). Plain words only, as in the
+        /// rest of the Chat area; no technical terms a person cannot act on.
+        pub struct CallStrings { $(pub $f: &'static str),* }
+        impl CallStrings {
+            /// Every field with its name, for the completeness test.
+            #[cfg(test)]
+            fn all(&self) -> Vec<(&'static str, &'static str)> {
+                vec![$((stringify!($f), self.$f)),*]
+            }
+        }
+    };
+}
+
+call_strings! {
+    // Header button that starts a call, and its screen-reader name.
+    call, a11y_call,
+    // Incoming-call banner, shown over whatever screen is open. `caller_unknown` stands in for
+    // the caller's name: the call IPC does not carry a display name, and a peer id must never be
+    // shown, so a neutral word is used in the banner body.
+    incoming_title, incoming_body, caller_unknown, accept, reject, a11y_accept, a11y_reject,
+    // The state line of the in-call panel.
+    state_calling, state_ringing, state_connecting, state_connected,
+    // The in-call panel itself.
+    panel_title, duration_label, mute, unmute, a11y_mute, hang_up, a11y_hang_up,
+    // The safety-code area (the code itself is not ready yet, so a neutral line stands in).
+    safety_heading, safety_pending,
+    // The always-on line shown while the microphone is in use during a call.
+    mic_in_use,
+    // Short notices.
+    ended, unavailable,
+}
+
+pub fn call_strings(locale: Locale) -> &'static CallStrings {
+    match locale {
+        Locale::En => &CALL_EN,
+        Locale::Ja => &CALL_JA,
+        Locale::ZhCn => &CALL_ZH_CN,
+    }
+}
+
+static CALL_EN: CallStrings = CallStrings {
+    call: "Call",
+    a11y_call: "Call this contact",
+    incoming_title: "Incoming call",
+    incoming_body: "{name} is calling.",
+    caller_unknown: "Someone",
+    accept: "Answer",
+    reject: "Decline",
+    a11y_accept: "Answer the call",
+    a11y_reject: "Decline the call",
+    state_calling: "Calling...",
+    state_ringing: "Ringing...",
+    state_connecting: "Connecting...",
+    state_connected: "Connected",
+    panel_title: "Call",
+    duration_label: "Duration",
+    mute: "Mute",
+    unmute: "Unmute",
+    a11y_mute: "Mute your microphone",
+    hang_up: "Hang up",
+    a11y_hang_up: "Hang up the call",
+    safety_heading: "Safety code",
+    safety_pending: "The safety code is not ready yet.",
+    mic_in_use: "Microphone in use",
+    ended: "Call ended",
+    unavailable: "Calls are not available right now.",
+};
+
+static CALL_JA: CallStrings = CallStrings {
+    call: "通話",
+    a11y_call: "この相手に通話を発信する",
+    incoming_title: "着信中",
+    incoming_body: "{name}から着信があります。",
+    caller_unknown: "お相手",
+    accept: "応答",
+    reject: "拒否",
+    a11y_accept: "通話に応答する",
+    a11y_reject: "通話を拒否する",
+    state_calling: "発信中...",
+    state_ringing: "呼び出し中...",
+    state_connecting: "接続中...",
+    state_connected: "通話中",
+    panel_title: "通話",
+    duration_label: "通話時間",
+    mute: "ミュート",
+    unmute: "ミュート解除",
+    a11y_mute: "マイクをミュートする",
+    hang_up: "通話を終了",
+    a11y_hang_up: "通話を終了する",
+    safety_heading: "安全確認コード",
+    safety_pending: "安全確認コードはまだ準備できていません。",
+    mic_in_use: "マイク使用中",
+    ended: "通話を終了しました",
+    unavailable: "通話はいま使えない状態です。",
+};
+
+// zh-CN: a first translation; to be reviewed by a native speaker before it is called finished.
+static CALL_ZH_CN: CallStrings = CallStrings {
+    call: "通话",
+    a11y_call: "向此联系人发起通话",
+    incoming_title: "来电",
+    incoming_body: "{name} 正在呼叫。",
+    caller_unknown: "对方",
+    accept: "接听",
+    reject: "拒绝",
+    a11y_accept: "接听通话",
+    a11y_reject: "拒绝通话",
+    state_calling: "正在呼叫...",
+    state_ringing: "正在响铃...",
+    state_connecting: "正在连接...",
+    state_connected: "已接通",
+    panel_title: "通话",
+    duration_label: "通话时长",
+    mute: "静音",
+    unmute: "取消静音",
+    a11y_mute: "将你的麦克风静音",
+    hang_up: "挂断",
+    a11y_hang_up: "挂断通话",
+    safety_heading: "安全码",
+    safety_pending: "安全码尚未就绪。",
+    mic_in_use: "麦克风使用中",
+    ended: "通话已结束",
+    unavailable: "通话目前不可用。",
+};
+
 // ─── Logs (memory-only logging, opt-in diagnostic logging) ──────────────────
 
 /// Declares `LogStrings` and a field listing for the completeness test from one field list.
@@ -4419,6 +4549,59 @@ mod tests {
             update_strings(zh).all(),
         );
         assert_translation_parity("speed", speed_strings(en).all(), speed_strings(zh).all());
+        assert_translation_parity("call", call_strings(en).all(), call_strings(zh).all());
+    }
+
+    #[test]
+    fn every_call_string_exists_in_every_locale() {
+        for lang in Locale::ALL {
+            for (name, value) in call_strings(lang).all() {
+                assert!(!value.trim().is_empty(), "{lang:?} call.{name} is empty");
+            }
+        }
+    }
+
+    #[test]
+    fn call_placeholders_survive_translation() {
+        // The incoming banner names the caller; a translation that dropped the hole would show a
+        // blank where the name belongs.
+        for lang in Locale::ALL {
+            let c = call_strings(lang);
+            assert!(
+                c.incoming_body.contains("{name}"),
+                "{lang:?} incoming_body lost {{name}}"
+            );
+        }
+    }
+
+    #[test]
+    fn japanese_call_texts_read_naturally() {
+        // Plain Japanese for the call screen: the words a phone app uses, not a word-for-word
+        // rendering of the English, and none of the technical terms the Chat tab also avoids.
+        let ja = call_strings(Locale::Ja);
+        for (name, value) in ja.all() {
+            assert!(!value.trim().is_empty(), "ja call.{name} is empty");
+            for bad in [
+                "指紋",
+                "カード",
+                "デーモン",
+                "iroh",
+                "フィンガープリント",
+                "トークン",
+            ] {
+                assert!(!value.contains(bad), "ja call.{name} says {bad}");
+            }
+        }
+        // The states read as a phone app would say them.
+        assert_eq!(ja.state_calling, "発信中...");
+        assert_eq!(ja.state_ringing, "呼び出し中...");
+        assert_eq!(ja.state_connecting, "接続中...");
+        assert_eq!(ja.state_connected, "通話中");
+        // Answer / Decline are the everyday words, not a literal "受け入れる / 却下".
+        assert_eq!(ja.accept, "応答");
+        assert_eq!(ja.reject, "拒否");
+        assert_eq!(ja.hang_up, "通話を終了");
+        assert_eq!(ja.mic_in_use, "マイク使用中");
     }
 
     #[test]

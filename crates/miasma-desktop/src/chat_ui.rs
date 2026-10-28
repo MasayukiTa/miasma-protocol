@@ -24,6 +24,8 @@ use crate::transfers::fill;
 use crate::ui_kit::{self as kit, Level};
 use crate::ux::{confirm, Answer};
 use crate::worker::ChatFail;
+#[cfg(feature = "pqc")]
+use crate::{call::CallUi, call_ui::CallAction};
 
 fn pal() -> Palette {
     theme::palette()
@@ -310,6 +312,10 @@ pub struct ChatUi {
     wide: bool,
     /// Group conversations (`group_ui.rs`): listed with the conversations above.
     group: GroupUi,
+    /// The call screen state (pure part in `call.rs`, widgets in `call_ui.rs`). Holds the
+    /// pending-call token, so it does not derive `Debug`.
+    #[cfg(feature = "pqc")]
+    call: CallUi,
 }
 
 /// Width of the Chat area (the page column) from which the conversation list sits beside the
@@ -399,6 +405,8 @@ impl Default for ChatUi {
             frozen: false,
             wide: false,
             group: GroupUi::default(),
+            #[cfg(feature = "pqc")]
+            call: CallUi::default(),
         }
     }
 }
@@ -594,6 +602,21 @@ impl ChatUi {
             self.ask_events(now);
         }
         self.group.tick(area_open);
+        // While a call exists, poll its Status and Events at a modest interval (no busy loop).
+        // This runs whether or not the Chat area is open, so an incoming call can ring over any
+        // screen; `should_poll` returns false when no call exists, so there is no idle polling.
+        #[cfg(feature = "pqc")]
+        {
+            let call_now = self.clock().now_ms;
+            if self.call.should_poll(call_now) {
+                use miasma_core::chat::ipc::CallRequest;
+                self.call.mark_polled(call_now);
+                self.out.push_back(ChatRequest::Call(CallRequest::Status));
+                self.out.push_back(ChatRequest::Call(CallRequest::Events {
+                    since: self.call.events_since(),
+                }));
+            }
+        }
         if !area_open {
             return;
         }
@@ -911,9 +934,36 @@ impl ChatUi {
             }
             // Group answers go to the group screen (see `on_reply`).
             ChatResponse::Group(_) => {}
+            // Call answers update the call screen state. `now_ms` starts the duration clock.
+            #[cfg(feature = "pqc")]
+            ChatResponse::Call(resp) => self.on_call_answer(resp),
             // Other responses are not handled by the chat screen.
             #[allow(unreachable_patterns)]
             _ => {}
+        }
+    }
+
+    /// Apply one call answer to the call screen state.
+    ///
+    /// `Status` carries the state word and any ringing token, and (once connected) starts the
+    /// duration clock. `Events` advances the poll cursor and ends the call on a `call_ended`
+    /// notice. `Ok`, `Unavailable` and `Error` change nothing here: the next `Status` reports
+    /// the real state (an ended call shows as `idle`, which resets the screen).
+    #[cfg(feature = "pqc")]
+    fn on_call_answer(&mut self, resp: miasma_core::chat::ipc::CallResponse) {
+        use miasma_core::chat::ipc::CallResponse;
+        match resp {
+            CallResponse::Status(dto) => {
+                let now = self.clock().now_ms;
+                self.call.on_status(&dto, now);
+            }
+            CallResponse::Events { next, notices, .. } => {
+                self.call.set_events_since(next);
+                if notices.iter().any(|n| n.code == "call_ended") {
+                    self.call.end();
+                }
+            }
+            CallResponse::Ok | CallResponse::Unavailable | CallResponse::Error(_) => {}
         }
     }
 
@@ -1212,6 +1262,54 @@ impl ChatUi {
             action = self.file_action.take();
         }
         action
+    }
+
+    /// Draw the call screens above the chat and act on a press.
+    ///
+    /// A ringing incoming call shows the banner (Answer / Decline); a call of ours shows the
+    /// in-call panel (state, duration, mute, hang up, safety-code area). The caller's name is not
+    /// carried by the call IPC and a peer id must never be shown, so a neutral word stands in for
+    /// it. Each press is turned into the matching `CallRequest` on the worker queue and the call
+    /// state is updated; the token in Accept / Reject is carried in the action, never drawn.
+    #[cfg(feature = "pqc")]
+    fn call_screens(&mut self, ui: &mut egui::Ui) {
+        use miasma_core::chat::ipc::CallRequest;
+        let cc = crate::locale::call_strings(self.locale);
+        let now = self.clock().now_ms;
+        let mut pressed: Option<CallAction> = None;
+        if let Some(token) = self.call.pending_token() {
+            if let Some(a) = crate::call_ui::incoming_banner(ui, cc, cc.caller_unknown, token) {
+                pressed = Some(a);
+            }
+        }
+        if self.call.exists() && self.call.pending_token().is_none() {
+            if let Some(a) = crate::call_ui::in_call_panel(ui, cc, &self.call, None, now) {
+                pressed = Some(a);
+            }
+        }
+        match pressed {
+            Some(CallAction::Dial) => {
+                // Dialing starts from the conversation header, not from these screens.
+            }
+            Some(CallAction::Accept(token)) => {
+                self.out
+                    .push_back(ChatRequest::Call(crate::call::accept(token)));
+            }
+            Some(CallAction::Reject(token)) => {
+                self.out
+                    .push_back(ChatRequest::Call(crate::call::reject(token)));
+                self.call.end();
+            }
+            Some(CallAction::HangUp) => {
+                self.out.push_back(ChatRequest::Call(CallRequest::HangUp));
+                self.call.end();
+            }
+            Some(CallAction::ToggleMute) => {
+                let muted = self.call.is_muted();
+                self.call.set_muted(!muted);
+            }
+            None => {}
+        }
     }
 
     /// A dialog of this screen is open (the app switches the page behind it off).
@@ -1598,6 +1696,18 @@ impl ChatUi {
         if back {
             self.close_conversation();
             return;
+        }
+
+        // The Call button for this conversation: a press dials the open contact. The call then
+        // shows in the screens drawn above (banner for the other side, panel for ours).
+        #[cfg(feature = "pqc")]
+        {
+            let cc = crate::locale::call_strings(self.locale);
+            if crate::call_ui::call_button(ui, cc) {
+                self.out
+                    .push_back(ChatRequest::Call(crate::call::dial(&o.endpoint_id)));
+                self.call.on_dial();
+            }
         }
 
         self.thread_view(ui, c, o);
