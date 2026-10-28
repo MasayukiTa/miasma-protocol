@@ -273,6 +273,9 @@ fn status_dto<P: CallPorts>(
         safety_code: controller.safety_code(),
         media_frames_sent: stats.map_or(0, |s| s.frames_sent.load(Ordering::Relaxed)),
         media_frames_played: stats.map_or(0, |s| s.frames_played.load(Ordering::Relaxed)),
+        media_video_frames_sent: stats.map_or(0, |s| s.video_frames_sent.load(Ordering::Relaxed)),
+        media_video_frames_played: stats
+            .map_or(0, |s| s.video_frames_played.load(Ordering::Relaxed)),
     }
 }
 fn dial_result(result: Result<(), CallError>) -> CallResponse {
