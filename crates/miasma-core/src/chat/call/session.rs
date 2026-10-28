@@ -155,7 +155,14 @@ impl<S: AudioSource, K: AudioSink, L: DatagramLink> MediaSession<S, K, L> {
             }
         }
         self.stats.late_dropped = self.jitter.late_dropped;
-        if let Some(frame) = self.jitter.pop_ready() {
+        if let Some((gap, frame)) = self.jitter.pop_ready_gap() {
+            // Each skipped sequence is a lost frame; let the sink conceal it
+            // before the next real frame. A byte-level sink ignores this; a
+            // decoding sink runs packet-loss concealment. Bound the run so a
+            // huge gap cannot stall the tick.
+            for _ in 0..gap.min(8) {
+                self.sink.conceal();
+            }
             self.sink.play(&frame);
             self.stats.played = self.stats.played.saturating_add(1);
         }
@@ -166,6 +173,10 @@ impl<S: AudioSource, K: AudioSink, L: DatagramLink> MediaSession<S, K, L> {
     }
     pub fn sink(&self) -> &K {
         &self.sink
+    }
+    /// Access the source between ticks, for example to apply a mute change.
+    pub fn source_mut(&mut self) -> &mut S {
+        &mut self.source
     }
 }
 

@@ -1,7 +1,9 @@
 //! Transport and task for call media. The audio devices are placeholders.
+#[cfg(all(feature = "call-audio", not(test)))]
+use super::audio_bridge::{build_real_audio, DeviceSelection};
 use super::{
     controller::{CallController, CallPorts},
-    device::{RecordingSink, ToneSource},
+    device::{AudioSink, AudioSource, RecordingSink, ToneSource},
     media::Direction,
     session::{DatagramLink, MediaSession, TickStatus},
     state::State,
@@ -27,6 +29,10 @@ use tokio::{sync::Notify, task::JoinHandle};
 pub struct MediaStats {
     pub frames_sent: Arc<AtomicU64>,
     pub frames_played: Arc<AtomicU64>,
+    /// Set true to mute the local microphone mid-call. The media task reads it
+    /// each tick and tells the capture source; with no input device it has no
+    /// effect.
+    pub muted: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub trait MediaLinkProvider: Send + Sync {
@@ -170,30 +176,100 @@ pub(super) fn maybe_start_media<P: CallPorts>(
         let Some(link) = provider.open(peer, roots.direction).await else {
             return false;
         };
-        // These pseudo devices generate and record frames; no real audio device exists yet.
-        let Ok(mut session) = MediaSession::with_roots(
-            &roots.send,
-            &roots.recv,
-            *call_id,
-            roots.direction,
-            crate::chat::engine::now_ms(),
-            ToneSource::new(),
-            RecordingSink::with_counter(stats.frames_played.clone()),
-            link,
-        ) else {
-            return false;
-        };
-        drop(roots);
-        let mut interval = tokio::time::interval(Duration::from_millis(20));
-        loop {
-            interval.tick().await;
-            let status = session.tick(crate::chat::engine::now_ms());
-            stats
-                .frames_sent
-                .store(session.stats().sent, Ordering::Relaxed);
-            if status == TickStatus::Fatal {
-                return false;
+        run_media(roots, *call_id, link, stats).await
+    }))
+}
+
+/// Drive one call's media to completion. Uses the real audio devices when the
+/// `call-audio` feature is on and a device can be opened; otherwise, and in
+/// tests, the pseudo devices. A missing or refused device is absorbed by the
+/// real source/sink into receive-only operation, so this returns `false` only
+/// on a fatal session error.
+async fn run_media(
+    roots: super::controller::MediaRoots,
+    call_id: [u8; 16],
+    link: Box<dyn DatagramLink>,
+    stats: MediaStats,
+) -> bool {
+    #[cfg(all(feature = "call-audio", not(test)))]
+    {
+        match build_real_audio(&DeviceSelection::default()) {
+            Ok((source, sink)) => {
+                return drive_session(roots, call_id, source, sink, link, stats).await;
+            }
+            Err(_) => {
+                // A fatal audio-stack error (for example the codec could not be
+                // built): fall back to the pseudo devices so the secured link
+                // still runs and the controller can post a notice.
             }
         }
-    }))
+    }
+    // `frames_played` is driven from `session.stats().played` in the tick loop
+    // below, so both the real sink and the pseudo sink report the same way;
+    // the pseudo sink needs no counter of its own.
+    let source = ToneSource::new();
+    let sink = RecordingSink::new();
+    drive_session(roots, call_id, source, sink, link, stats).await
+}
+
+/// The shared 20 ms tick loop, generic over the source and sink so the real
+/// and pseudo devices share one code path and the `MediaStats` counters work
+/// the same way for both.
+async fn drive_session<S, K>(
+    roots: super::controller::MediaRoots,
+    call_id: [u8; 16],
+    source: S,
+    sink: K,
+    link: Box<dyn DatagramLink>,
+    stats: MediaStats,
+) -> bool
+where
+    S: AudioSource + MuteControl,
+    K: AudioSink,
+{
+    let Ok(mut session) = MediaSession::with_roots(
+        &roots.send,
+        &roots.recv,
+        call_id,
+        roots.direction,
+        crate::chat::engine::now_ms(),
+        source,
+        sink,
+        link,
+    ) else {
+        return false;
+    };
+    drop(roots);
+    let mut interval = tokio::time::interval(Duration::from_millis(20));
+    loop {
+        interval.tick().await;
+        session
+            .source_mut()
+            .set_muted(stats.muted.load(Ordering::Relaxed));
+        let status = session.tick(crate::chat::engine::now_ms());
+        stats
+            .frames_sent
+            .store(session.stats().sent, Ordering::Relaxed);
+        stats
+            .frames_played
+            .store(session.stats().played, Ordering::Relaxed);
+        if status == TickStatus::Fatal {
+            return false;
+        }
+    }
+}
+
+/// A source that may be muted mid-call. The pseudo source ignores it; the real
+/// capture source forwards it to the device.
+pub trait MuteControl {
+    fn set_muted(&self, muted: bool);
+}
+impl MuteControl for ToneSource {
+    fn set_muted(&self, _muted: bool) {}
+}
+#[cfg(all(feature = "call-audio", not(test)))]
+impl MuteControl for super::audio_bridge::EncodingSource {
+    fn set_muted(&self, muted: bool) {
+        super::audio_bridge::EncodingSource::set_muted(self, muted);
+    }
 }

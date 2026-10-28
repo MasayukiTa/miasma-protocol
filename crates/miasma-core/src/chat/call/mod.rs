@@ -9,7 +9,13 @@
 //! buffers live in `Zeroizing`, and no key, nonce, call id, peer id or media
 //! sample ever reaches a log, an error message or a `Debug` output.
 
+#[cfg(feature = "call-audio")]
+pub mod audio_bridge;
+#[cfg(feature = "call-audio")]
+pub mod audio_device;
 pub mod caps;
+#[cfg(feature = "call-audio")]
+pub mod codec;
 pub mod controller;
 pub mod device;
 pub mod frame;
