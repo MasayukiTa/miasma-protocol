@@ -1,6 +1,6 @@
 use super::{
     controller::{CallController, CallError, CallNotice, CallPorts, MediaGate, SasInputs},
-    media_task::{maybe_start_media, IrohLinkProvider, MediaLinkProvider, MediaStats},
+    media_task::{maybe_start_media, IrohLinkProvider, MediaLinkProvider, MediaStats, VideoParts},
     state::State,
 };
 use crate::chat::{
@@ -90,12 +90,18 @@ fn media_failed<P: CallPorts>(controller: &mut CallController<P>, notices: &mut 
         controller.hang_up();
     }
 }
+/// Builds the pseudo video parts (source, sink, encoder, decoder) for one
+/// media task. Returns `None` when this endpoint runs audio only. Each media
+/// task gets a fresh set, so the factory is called once per task start.
+type VideoPartsFactory = dyn Fn() -> Option<VideoParts> + Send + Sync;
+
 fn sync_media<P: CallPorts>(
     controller: &mut CallController<P>,
     provider: Arc<dyn MediaLinkProvider>,
     media: &mut Option<JoinHandle<bool>>,
     stats: &mut Option<MediaStats>,
     muted: Arc<AtomicBool>,
+    video_factory: Option<&Arc<VideoPartsFactory>>,
 ) {
     if controller.status().state != State::Connected {
         *stats = None;
@@ -111,7 +117,10 @@ fn sync_media<P: CallPorts>(
         // so a mid-call SetMuted reaches the tick loop; the media task reads
         // the flag through the stats it was handed.
         new_stats.muted = muted.clone();
-        *media = maybe_start_media(controller, provider, false, new_stats.clone(), None, muted);
+        // When this endpoint injects pseudo video parts, build a fresh set for
+        // this media task; audio-only endpoints pass no factory and get `None`.
+        let video = video_factory.and_then(|factory| factory());
+        *media = maybe_start_media(controller, provider, false, new_stats.clone(), video, muted);
         *stats = media.as_ref().map(|_| new_stats);
     }
 }
@@ -131,10 +140,39 @@ impl CallRuntime {
         svc: Arc<ChatService>,
         provider: Arc<dyn MediaLinkProvider>,
     ) -> Arc<Self> {
+        Self::start_full(svc, provider, true, None)
+    }
+    /// Test hook: start a runtime that injects pseudo video parts into each
+    /// media task. `offers_video` controls whether this endpoint advertises
+    /// video in its own capabilities; when false the call negotiates audio
+    /// only and `parts_factory` is never consulted. When true, `parts_factory`
+    /// builds a fresh set of pseudo parts (source, sink, encoder, decoder) for
+    /// each media task. Production uses [`start`] / [`start_with_provider`],
+    /// which leave video on and inject no parts, so this hook does not change
+    /// the shipped behaviour.
+    #[doc(hidden)]
+    pub fn start_with_video(
+        svc: Arc<ChatService>,
+        provider: Arc<dyn MediaLinkProvider>,
+        offers_video: bool,
+        parts_factory: Arc<VideoPartsFactory>,
+    ) -> Arc<Self> {
+        Self::start_full(svc, provider, offers_video, Some(parts_factory))
+    }
+    fn start_full(
+        svc: Arc<ChatService>,
+        provider: Arc<dyn MediaLinkProvider>,
+        offers_video: bool,
+        video_factory: Option<Arc<VideoPartsFactory>>,
+    ) -> Arc<Self> {
         let (tx, mut rx) = mpsc::channel(32);
         svc.set_call_sink(tx);
+        let mut controller = CallController::new(RuntimePorts(svc.clone()));
+        if !offers_video {
+            controller.set_local_offers_video(false);
+        }
         let inner = Arc::new(Mutex::new(Inner {
-            controller: CallController::new(RuntimePorts(svc.clone())),
+            controller,
             notices: NoticeRing::default(),
             media_stats: None,
             muted: Arc::new(AtomicBool::new(false)),
@@ -145,6 +183,7 @@ impl CallRuntime {
         let task_svc = svc.clone();
         let task_wake = wake.clone();
         let task_stop = stop_task.clone();
+        let task_video = video_factory;
         let mut stop = svc.call_shutdown();
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -192,6 +231,7 @@ impl CallRuntime {
                         &mut media,
                         media_stats,
                         muted.clone(),
+                        task_video.as_ref(),
                     );
                     let sends = state.controller.drain_encoded();
                     state.collect();
@@ -300,6 +340,7 @@ fn status_dto<P: CallPorts>(
         state: state_word(status.state).into(),
         pending_token: status.pending_token,
         signalling_connected: status.signalling_connected,
+        negotiated_video: status.negotiated_video,
         safety_code: controller.safety_code(),
         muted: false,
         screen_sharing: false,
@@ -478,6 +519,7 @@ mod tests {
             &mut am,
             &mut a_stats,
             Arc::new(AtomicBool::new(false)),
+            None,
         );
         sync_media(
             &mut b,
@@ -485,6 +527,7 @@ mod tests {
             &mut bm,
             &mut b_stats,
             Arc::new(AtomicBool::new(false)),
+            None,
         );
         sync_media(
             &mut a,
@@ -492,6 +535,7 @@ mod tests {
             &mut am,
             &mut a_stats,
             Arc::new(AtomicBool::new(false)),
+            None,
         );
         tokio::task::yield_now().await;
         assert_eq!(provider.opens.load(Ordering::SeqCst), 2);
@@ -521,6 +565,7 @@ mod tests {
             &mut am,
             &mut a_stats,
             Arc::new(AtomicBool::new(false)),
+            None,
         );
         sync_media(
             &mut b,
@@ -528,6 +573,7 @@ mod tests {
             &mut bm,
             &mut b_stats,
             Arc::new(AtomicBool::new(false)),
+            None,
         );
         assert!(am.is_none() && bm.is_none());
         for status in [
@@ -553,6 +599,7 @@ mod tests {
             &mut media,
             &mut stats,
             Arc::new(AtomicBool::new(false)),
+            None,
         );
         assert!(!media.take().unwrap().await.unwrap());
         let mut notices = NoticeRing::default();

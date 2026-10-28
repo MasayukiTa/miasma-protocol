@@ -90,6 +90,8 @@ pub struct CallStatusDto {
     pub pending_token: Option<u64>,
     pub signalling_connected: bool,
     #[serde(default)]
+    pub negotiated_video: bool,
+    #[serde(default)]
     pub safety_code: Option<String>,
     #[serde(default)]
     pub muted: bool,
@@ -659,6 +661,7 @@ mod tests {
                 state: "ringing".into(),
                 pending_token: Some(1),
                 signalling_connected: true,
+                negotiated_video: false,
                 safety_code: None,
                 muted: false,
                 camera_in_use: false,
