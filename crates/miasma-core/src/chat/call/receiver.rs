@@ -23,6 +23,7 @@ pub enum DropReason {
 }
 pub enum RecvOutcome {
     Audio(Zeroizing<[u8; FRAME_PLAINTEXT_LEN]>),
+    Video(Zeroizing<[u8; FRAME_PLAINTEXT_LEN]>),
     Dropped(DropReason),
     Fatal,
 }
@@ -78,7 +79,7 @@ impl MediaReceiver {
         if header.direction != self.direction {
             return RecvOutcome::Dropped(DropReason::WrongDirection);
         }
-        if header.media_type != 0 {
+        if header.media_type > 1 {
             return RecvOutcome::Dropped(DropReason::Malformed);
         }
         if header.key_epoch > self.current.number.saturating_add(MAX_EPOCH_JUMP) {
@@ -176,7 +177,11 @@ impl MediaReceiver {
                 let mut audio = Zeroizing::new([0u8; FRAME_PLAINTEXT_LEN]);
                 audio.copy_from_slice(&plain);
                 self.failures = 0;
-                RecvOutcome::Audio(audio)
+                if header.media_type == 1 {
+                    RecvOutcome::Video(audio)
+                } else {
+                    RecvOutcome::Audio(audio)
+                }
             }
             Err(MediaError::Authentication) => {
                 self.failures = self.failures.saturating_add(1);

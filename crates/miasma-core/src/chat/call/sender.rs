@@ -35,6 +35,15 @@ impl MediaSender {
         now_ms: u64,
         plain: Option<&[u8]>,
     ) -> Result<Vec<u8>, MediaError> {
+        self.next_packet_type(now_ms, plain, 0)
+    }
+
+    pub fn next_packet_type(
+        &mut self,
+        now_ms: u64,
+        plain: Option<&[u8]>,
+        media_type: u8,
+    ) -> Result<Vec<u8>, MediaError> {
         let seq = self.next_seq.ok_or(MediaError::EpochExhausted)?;
         // Consume the sequence even if sealing fails; it must never be reused.
         self.next_seq = seq.checked_add(1);
@@ -48,12 +57,12 @@ impl MediaSender {
         }
         let (key_epoch, sealed) =
             self.chain
-                .seal_packet(&self.call_id, seq, 0, &frame[..], now_ms)?;
+                .seal_packet(&self.call_id, seq, media_type, &frame[..], now_ms)?;
         let header = MediaHeader {
             direction: self.direction,
             key_epoch,
             packet_seq: seq,
-            media_type: 0,
+            media_type,
         };
         build_packet(&header, &sealed).map_err(|_| MediaError::Malformed)
     }

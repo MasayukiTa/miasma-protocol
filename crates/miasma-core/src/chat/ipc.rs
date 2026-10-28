@@ -98,6 +98,8 @@ pub struct CallStatusDto {
     pub media_video_frames_sent: u64,
     #[serde(default)]
     pub media_video_frames_played: u64,
+    #[serde(default)]
+    pub camera_in_use: bool,
 }
 
 #[cfg(feature = "pqc")]
@@ -656,6 +658,7 @@ mod tests {
                 media_frames_played: 0,
                 media_video_frames_sent: 0,
                 media_video_frames_played: 0,
+                camera_in_use: false,
             }),
             CallResponse::Events {
                 next: 4,

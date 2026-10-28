@@ -2,7 +2,7 @@
 //! reassembly buffer, and an audio+video pacing scheduler.
 //!
 //! Design: design-call-security-v7e.md chapter 4 (the media_type 0x01 video
-//! path) and the constant-bit-rate pacing of §4.4. This is pure library code:
+//! path) and the constant-bit-rate pacing of 繝ｻ繧托ｽｽ・ｧ4.4. This is pure library code:
 //! it holds no socket, no device and no key material. It turns encoded video
 //! frames into fixed 60-byte plaintext bodies (see [`super::video_frame`]) and
 //! back, and decides how many video fragments ride alongside each audio packet
@@ -39,6 +39,10 @@ pub struct RawPicture {
 /// Captures raw pictures. A real implementation wraps a camera; the test
 /// implementation is a moving pattern.
 pub trait VideoSource {
+    fn is_open(&self) -> bool {
+        false
+    }
+
     fn next_picture(&mut self) -> Option<RawPicture>;
 }
 
@@ -63,12 +67,38 @@ pub trait VideoDecoder {
     fn decode(&mut self, frame: &EncodedVideoFrame) -> Option<RawPicture>;
 }
 
+impl<T: VideoSource + ?Sized> VideoSource for Box<T> {
+    fn is_open(&self) -> bool {
+        (**self).is_open()
+    }
+    fn next_picture(&mut self) -> Option<RawPicture> {
+        (**self).next_picture()
+    }
+}
+impl<T: VideoSink + ?Sized> VideoSink for Box<T> {
+    fn put_picture(&mut self, picture: &RawPicture) {
+        (**self).put_picture(picture)
+    }
+}
+impl<T: VideoEncoder + ?Sized> VideoEncoder for Box<T> {
+    fn encode(&mut self, picture: &RawPicture) -> Option<EncodedVideoFrame> {
+        (**self).encode(picture)
+    }
+    fn request_keyframe(&mut self) {
+        (**self).request_keyframe()
+    }
+}
+impl<T: VideoDecoder + ?Sized> VideoDecoder for Box<T> {
+    fn decode(&mut self, frame: &EncodedVideoFrame) -> Option<RawPicture> {
+        (**self).decode(frame)
+    }
+}
 /// At most this many video fragments ride alongside one audio packet per tick.
 ///
 /// Derivation: audio paces one 90-byte packet per 20 ms tick (50 packets/s).
 /// A reasonable call video target is about 1.5 Mbps peak. At 50 ticks/s that
 /// is 1_500_000 / 8 / 50 = 3750 bytes per tick of video; each fragment carries
-/// `FRAGMENT_PAYLOAD_LEN` (53) bitstream bytes, so 3750 / 53 ≈ 70 fragments.
+/// `FRAGMENT_PAYLOAD_LEN` (51) bitstream bytes, so 3750 / 51 驕ｶ霈斐・70 fragments.
 /// We round to a named ceiling that keeps the combined rate bounded and
 /// constant: audio (1) + video (`MAX_VIDEO_FRAGMENTS_PER_TICK`) packets per
 /// tick, never more. Raising it raises the peak bit-rate linearly.
@@ -100,6 +130,7 @@ struct PartialFrame {
     fragment_count: u16,
     keyframe: bool,
     first_seen_ms: u64,
+    encoded_length: Option<usize>,
     fragments: BTreeMap<u16, [u8; FRAGMENT_PAYLOAD_LEN]>,
 }
 
@@ -212,6 +243,10 @@ impl ReassemblyBuffer {
         let mut chunk = [0u8; FRAGMENT_PAYLOAD_LEN];
         chunk.copy_from_slice(payload);
 
+        if self.budget_bytes < FRAGMENT_PAYLOAD_LEN {
+            self.keyframe_requested = true;
+            return Reassembled::Dropped;
+        }
         // Ensure room for one more fragment before inserting.
         let is_new_fragment = match self.partials.get(&header.frame_number) {
             Some(p) => !p.fragments.contains_key(&header.fragment_index),
@@ -230,13 +265,24 @@ impl ReassemblyBuffer {
                 fragment_count: header.fragment_count,
                 keyframe: header.keyframe,
                 first_seen_ms: now_ms,
+                encoded_length: None,
                 fragments: BTreeMap::new(),
             });
         // A fragment_count that disagrees with the frame we are building is
         // hostile or corrupt: drop the whole frame.
-        if entry.fragment_count != header.fragment_count {
+        if entry.fragment_count != header.fragment_count || entry.keyframe != header.keyframe {
             self.evict(header.frame_number);
             return Reassembled::Dropped;
+        }
+        if header.fragment_index == 0 {
+            if entry
+                .encoded_length
+                .is_some_and(|length| length != header.encoded_length as usize)
+            {
+                self.evict(header.frame_number);
+                return Reassembled::Dropped;
+            }
+            entry.encoded_length = Some(header.encoded_length as usize);
         }
         if entry
             .fragments
@@ -254,13 +300,17 @@ impl ReassemblyBuffer {
             return Reassembled::Pending;
         }
 
-        // Assemble in index order; trailing zero padding of the final fragment
-        // stays in the bitstream (the codec slice carries explicit sizes).
+        // Assemble in index order and remove the final fragment padding.
         let partial = self.partials.remove(&header.frame_number).unwrap();
         self.held_bytes -= partial.bytes_held();
         let mut data = Vec::with_capacity(partial.fragments.len() * FRAGMENT_PAYLOAD_LEN);
         for (_, chunk) in partial.fragments.iter() {
             data.extend_from_slice(chunk);
+        }
+        if let Some(length) = partial.encoded_length {
+            data.truncate(length);
+        } else {
+            return Reassembled::Dropped;
         }
         Reassembled::Complete(EncodedVideoFrame {
             keyframe: partial.keyframe,
@@ -464,10 +514,222 @@ impl VideoDecoder for PassthroughCodec {
     }
 }
 
+/// Drives pseudo or injected video components once per media tick.
+/// Control packets use fragment_count zero and body byte 6 equal to 1 to
+/// request a keyframe; all remaining bytes in the fixed body are zero.
+pub struct VideoDriver<S, K, E, D> {
+    source: S,
+    sink: K,
+    encoder: E,
+    decoder: D,
+    scheduler: SendScheduler,
+    reassembly: ReassemblyBuffer,
+    frame_interval_ms: u64,
+    next_frame_ms: u64,
+    frame_number: u16,
+    last_completed: Option<u16>,
+    last_gap_request_ms: Option<u64>,
+    gap_request_pending: bool,
+    pub frames_sent: u64,
+    pub frames_played: u64,
+}
+
+impl<S: VideoSource, K: VideoSink, E: VideoEncoder, D: VideoDecoder> VideoDriver<S, K, E, D> {
+    pub fn new(source: S, sink: K, encoder: E, decoder: D, frame_interval_ms: u64) -> Self {
+        Self {
+            source,
+            sink,
+            encoder,
+            decoder,
+            scheduler: SendScheduler::new(),
+            reassembly: ReassemblyBuffer::new(DEFAULT_REASSEMBLY_BUDGET_BYTES, 500),
+            frame_interval_ms: frame_interval_ms.max(20),
+            next_frame_ms: 0,
+            frame_number: 0,
+            last_completed: None,
+            last_gap_request_ms: None,
+            gap_request_pending: false,
+            frames_sent: 0,
+            frames_played: 0,
+        }
+    }
+
+    pub fn tick(&mut self, now_ms: u64) -> Vec<[u8; FRAME_PLAINTEXT_LEN]> {
+        self.reassembly.expire(now_ms);
+        let request = self.reassembly.take_keyframe_request() || self.gap_request_pending;
+        self.gap_request_pending = false;
+        if now_ms >= self.next_frame_ms && self.scheduler.pending_fragments() == 0 {
+            self.next_frame_ms = now_ms.saturating_add(self.frame_interval_ms);
+            if let Some(frame) = self
+                .source
+                .next_picture()
+                .and_then(|picture| self.encoder.encode(&picture))
+            {
+                if self
+                    .scheduler
+                    .enqueue_frame(self.frame_number, &frame)
+                    .is_ok()
+                {
+                    self.frame_number = self.frame_number.wrapping_add(1);
+                    self.frames_sent = self.frames_sent.saturating_add(1);
+                }
+            }
+        }
+
+        if request {
+            let mut control = [0; FRAME_PLAINTEXT_LEN];
+            control[6] = 1;
+            self.scheduler.pending.push_front(control);
+        }
+        self.scheduler.tick([0; FRAME_PLAINTEXT_LEN]).video
+    }
+
+    pub fn receive(&mut self, body: &[u8], now_ms: u64) {
+        if body.len() != FRAME_PLAINTEXT_LEN {
+            return;
+        }
+        if body[4] == 0 && body[5] == 0 {
+            if body[6] == 1
+                && body[..6].iter().all(|&b| b == 0)
+                && body[7..].iter().all(|&b| b == 0)
+            {
+                self.encoder.request_keyframe();
+            }
+            return;
+        }
+        if let Reassembled::Complete(frame) = self.reassembly.offer(body, now_ms) {
+            if let Ok((header, _)) = parse_fragment(body) {
+                let number = header.frame_number;
+                if let Some(previous) = self.last_completed {
+                    let distance = number.wrapping_sub(previous);
+                    if distance > 0 && distance < 0x8000 {
+                        if distance > 1
+                            && self
+                                .last_gap_request_ms
+                                .map_or(true, |last| now_ms >= last && now_ms - last >= 1_000)
+                        {
+                            self.gap_request_pending = true;
+                            self.last_gap_request_ms = Some(now_ms);
+                        }
+                        self.last_completed = Some(number);
+                    }
+                } else {
+                    self.last_completed = Some(number);
+                }
+            }
+            if let Some(picture) = self.decoder.decode(&frame) {
+                self.sink.put_picture(&picture);
+                self.frames_played = self.frames_played.saturating_add(1);
+            }
+        }
+    }
+
+    pub fn source_is_open(&self) -> bool {
+        self.source.is_open()
+    }
+
+    pub fn sink(&self) -> &K {
+        &self.sink
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn drivers_exchange_frames_over_memory_link() {
+        let driver = || {
+            VideoDriver::new(
+                TestPatternSource::new(8, 8, 100),
+                RecordingVideoSink::new(),
+                PassthroughCodec::new(),
+                PassthroughCodec::new(),
+                20,
+            )
+        };
+        let mut a = driver();
+        let mut b = driver();
+        let mut a_to_b = std::collections::VecDeque::new();
+        let mut b_to_a = std::collections::VecDeque::new();
+        for time in (0..100).step_by(20) {
+            a_to_b.extend(a.tick(time));
+            b_to_a.extend(b.tick(time));
+            while let Some(packet) = a_to_b.pop_front() {
+                b.receive(&packet, time);
+            }
+            while let Some(packet) = b_to_a.pop_front() {
+                a.receive(&packet, time);
+            }
+        }
+        assert!(a.frames_sent >= 3 && b.frames_sent >= 3);
+        assert!(a.frames_played >= 3 && b.frames_played >= 3);
+        assert!(a.sink().pictures().len() >= 3 && b.sink().pictures().len() >= 3);
+    }
+    #[test]
+    fn drivers_exchange_and_request_keyframe_after_loss() {
+        fn driver(
+        ) -> VideoDriver<TestPatternSource, RecordingVideoSink, PassthroughCodec, PassthroughCodec>
+        {
+            VideoDriver::new(
+                TestPatternSource::new(8, 8, 100),
+                RecordingVideoSink::new(),
+                PassthroughCodec::new(),
+                PassthroughCodec::new(),
+                20,
+            )
+        }
+        let mut a = driver();
+        let mut b = driver();
+        let a_first = a.tick(0);
+        let b_first = b.tick(0);
+        for packet in &a_first {
+            b.receive(packet, 0);
+        }
+        for packet in &b_first {
+            a.receive(packet, 0);
+        }
+        assert_eq!(a.frames_played, 1);
+        assert_eq!(b.frames_played, 1);
+        assert_eq!(a.sink().pictures()[0].pixels.len(), 100);
+        let lost = a.tick(20);
+        for packet in lost.iter().skip(1) {
+            b.receive(packet, 20);
+        }
+        for packet in b.tick(520) {
+            a.receive(&packet, 520);
+        }
+        let next = a.tick(520);
+        assert!(!next.is_empty());
+        assert!(parse_fragment(&next[0]).unwrap().0.keyframe);
+        for packet in &next {
+            b.receive(packet, 520);
+        }
+        assert_eq!(a.frames_sent, 3);
+        assert_eq!(b.frames_played, 2);
+    }
+    #[test]
+    fn whole_frame_loss_requests_keyframe_with_rate_limit() {
+        let mut receiver = VideoDriver::new(
+            TestPatternSource::new(8, 8, 100),
+            RecordingVideoSink::new(),
+            PassthroughCodec::new(),
+            PassthroughCodec::new(),
+            20,
+        );
+        let frame = encoded(100, false);
+        for (number, time) in [(0, 0), (2, 20), (4, 40), (6, 1020)] {
+            for body in fragment_frame(number, false, &frame.data).unwrap() {
+                receiver.receive(&body, time);
+            }
+            let packets = receiver.tick(time);
+            let requests = packets
+                .iter()
+                .filter(|body| body[4] == 0 && body[5] == 0 && body[6] == 1)
+                .count();
+            assert_eq!(requests, usize::from(number == 2 || number == 6));
+        }
+    }
     fn encoded(len: usize, keyframe: bool) -> EncodedVideoFrame {
         EncodedVideoFrame {
             keyframe,
@@ -496,7 +758,7 @@ mod tests {
             let got = done.expect("frame should complete");
             // The reassembled bitstream is the fragments concatenated, with the
             // final fragment zero-padded; the original is its prefix.
-            assert!(got.data.len() >= frame.data.len());
+            assert_eq!(got.data.len(), frame.data.len());
             assert_eq!(&got.data[..frame.data.len()], &frame.data[..]);
             assert!(got.keyframe);
             assert_eq!(buf.held_bytes(), 0);

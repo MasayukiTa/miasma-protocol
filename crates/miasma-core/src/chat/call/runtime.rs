@@ -99,7 +99,7 @@ fn sync_media<P: CallPorts>(
         }
     } else if media.is_none() {
         let new_stats = MediaStats::default();
-        *media = maybe_start_media(controller, provider, false, new_stats.clone());
+        *media = maybe_start_media(controller, provider, false, new_stats.clone(), None);
         *stats = media.as_ref().map(|_| new_stats);
     }
 }
@@ -273,6 +273,7 @@ fn status_dto<P: CallPorts>(
         safety_code: controller.safety_code(),
         media_frames_sent: stats.map_or(0, |s| s.frames_sent.load(Ordering::Relaxed)),
         media_frames_played: stats.map_or(0, |s| s.frames_played.load(Ordering::Relaxed)),
+        camera_in_use: stats.map_or(false, |s| s.camera_in_use.load(Ordering::Relaxed)),
         media_video_frames_sent: stats.map_or(0, |s| s.video_frames_sent.load(Ordering::Relaxed)),
         media_video_frames_played: stats
             .map_or(0, |s| s.video_frames_played.load(Ordering::Relaxed)),
