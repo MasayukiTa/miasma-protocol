@@ -20,6 +20,14 @@
 mod a11y;
 mod app;
 mod buildinfo;
+// The call screen: headless logic (`call`) and its egui widgets (`call_ui`). Built only with the
+// `pqc` feature, because the call IPC surface lives there. The app-side wiring lives in
+// `chat_ui.rs`: the header Call button dials, the incoming banner and in-call panel are drawn
+// above the chat, and the call Status/Events are polled through the worker while a call exists.
+#[cfg(feature = "pqc")]
+mod call;
+#[cfg(feature = "pqc")]
+mod call_ui;
 mod chat;
 mod chat_ui;
 mod contacts;
