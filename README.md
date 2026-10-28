@@ -48,12 +48,12 @@ Both people need Miasma. Download the build for your computer from the [Releases
 
 You do not need Rust, Visual Studio or any other tool.
 
-1. On the [Releases page](https://github.com/MasayukiTa/miasma-protocol/releases), download `Miasma-Setup-<version>-x64.exe` (for example `Miasma-Setup-0.3.2-beta.12-x64.exe`) from the release you want. It is a 64-bit Windows installer.
+1. On the [Releases page](https://github.com/MasayukiTa/miasma-protocol/releases), download `Miasma-Setup-<version>-x64.exe` (for example `Miasma-Setup-0.3.2-beta.13-x64.exe`) from the release you want. It is a 64-bit Windows installer.
 2. Run it and follow the prompts. It installs Miasma Desktop, the background service and the command-line tool together under `C:\Program Files\Miasma Protocol`, and installs the Microsoft Visual C++ runtime if your computer lacks it. Administrator approval is asked once.
 3. The installer is not code-signed yet, so Windows SmartScreen may warn you ("Windows protected your PC"). Choose **More info**, then **Run anyway**. To check that your download is the file we published, compare its SHA-256 with `SHA256SUMS-windows.txt` from the same release:
 
    ```powershell
-   Get-FileHash .\Miasma-Setup-0.3.2-beta.12-x64.exe -Algorithm SHA256
+   Get-FileHash .\Miasma-Setup-0.3.2-beta.13-x64.exe -Algorithm SHA256
    ```
 
    The hash shown must be the one listed next to the same file name.

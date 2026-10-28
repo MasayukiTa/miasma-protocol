@@ -7,7 +7,7 @@ attaches the installer files to the Release; it never edits the release text.
 ## Release notes snippet
 
 Replace `<version>` with the release version without the leading `v`
-(for example `0.3.2-beta.12`).
+(for example `0.3.2-beta.13`).
 
 ```markdown
 ### Windows

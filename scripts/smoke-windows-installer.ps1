@@ -52,11 +52,11 @@
     normal graphics driver.
 
 .PARAMETER ExpectedVersion
-    Release version the programs were built with (for example 0.3.2-beta.12).
+    Release version the programs were built with (for example 0.3.2-beta.13).
     When given, `miasma.exe --version` must contain it.
 
 .EXAMPLE
-    .\scripts\smoke-windows-installer.ps1 -SetupExe .\dist\Miasma-Setup-0.3.2-beta.12-x64.exe
+    .\scripts\smoke-windows-installer.ps1 -SetupExe .\dist\Miasma-Setup-0.3.2-beta.13-x64.exe
 #>
 
 param(

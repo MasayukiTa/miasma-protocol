@@ -26,7 +26,7 @@
       Miasma-Setup-<version>-x64.exe            (the file users download)
       SHA256SUMS-windows.txt                    (lines for the two files above)
     where <version> is the release version without the leading v, for example
-    0.3.2-beta.12.
+    0.3.2-beta.13.
 
 .PARAMETER InputDir
     Directory containing release binaries. Default: .\dist
@@ -35,7 +35,7 @@
     Directory for the installers. Default: the same as InputDir.
 
 .PARAMETER Version
-    Release version, for example 0.3.2-beta.12 or 0.3.2 (a leading v is ignored).
+    Release version, for example 0.3.2-beta.13 or 0.3.2 (a leading v is ignored).
     Default: the miasma-cli crate version, plus the pre-release label in the
     MIASMA_PRERELEASE environment variable when it is set.
 
@@ -56,9 +56,9 @@
     downloaded from Microsoft and its signature is checked.
 
 .EXAMPLE
-    .\scripts\build-installer.ps1 -Version 0.3.2-beta.12
+    .\scripts\build-installer.ps1 -Version 0.3.2-beta.13
     .\scripts\build-installer.ps1 -Version 0.3.2 -SkipBundle
-    .\scripts\build-installer.ps1 -Version 0.3.2-beta.12 -CertThumbprint "A1B2..."
+    .\scripts\build-installer.ps1 -Version 0.3.2-beta.13 -CertThumbprint "A1B2..."
 #>
 
 param(
