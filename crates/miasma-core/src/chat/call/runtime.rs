@@ -1,6 +1,6 @@
 use super::{
     controller::{CallController, CallError, CallNotice, CallPorts, MediaGate},
-    media_task::{maybe_start_media, IrohLinkProvider, MediaLinkProvider},
+    media_task::{maybe_start_media, IrohLinkProvider, MediaLinkProvider, MediaStats},
     state::State,
 };
 use crate::chat::{
@@ -10,7 +10,7 @@ use crate::chat::{
 use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{atomic::Ordering, Arc, Mutex, OnceLock},
 };
 use tokio::{
     sync::{mpsc, Notify},
@@ -68,6 +68,7 @@ impl NoticeRing {
 struct Inner {
     controller: CallController<RuntimePorts>,
     notices: NoticeRing,
+    media_stats: Option<MediaStats>,
 }
 impl Inner {
     fn collect(&mut self) {
@@ -86,13 +87,17 @@ fn sync_media<P: CallPorts>(
     controller: &mut CallController<P>,
     provider: Arc<dyn MediaLinkProvider>,
     media: &mut Option<JoinHandle<bool>>,
+    stats: &mut Option<MediaStats>,
 ) {
     if controller.status().state != State::Connected {
+        *stats = None;
         if let Some(task) = media.take() {
             task.abort();
         }
     } else if media.is_none() {
-        *media = maybe_start_media(controller, provider, false);
+        let new_stats = MediaStats::default();
+        *media = maybe_start_media(controller, provider, false, new_stats.clone());
+        *stats = media.as_ref().map(|_| new_stats);
     }
 }
 pub struct CallRuntime {
@@ -116,6 +121,7 @@ impl CallRuntime {
         let inner = Arc::new(Mutex::new(Inner {
             controller: CallController::new(RuntimePorts(svc.clone())),
             notices: NoticeRing::default(),
+            media_stats: None,
         }));
         let wake = Arc::new(Notify::new());
         let stop_task = Arc::new(Notify::new());
@@ -145,9 +151,10 @@ impl CallRuntime {
                     },
                     result = async { match media.as_mut() { Some(task) => Some(task.await), None => None } }, if media.is_some() => {
                         media = None;
+                        task_inner.lock().unwrap_or_else(|e| e.into_inner()).media_stats = None;
                         if matches!(result, Some(Ok(false))) {
                             let mut state = task_inner.lock().unwrap_or_else(|e| e.into_inner());
-                            let Inner { controller, notices } = &mut *state;
+                            let Inner { controller, notices, .. } = &mut *state;
                             media_failed(controller, notices);
                             state.collect();
                         }
@@ -157,7 +164,12 @@ impl CallRuntime {
                 }
                 let sends = {
                     let mut state = task_inner.lock().unwrap_or_else(|e| e.into_inner());
-                    sync_media(&mut state.controller, provider.clone(), &mut media);
+                    let Inner {
+                        controller,
+                        media_stats,
+                        ..
+                    } = &mut *state;
+                    sync_media(controller, provider.clone(), &mut media, media_stats);
                     let sends = state.controller.drain_encoded();
                     state.collect();
                     sends
@@ -176,6 +188,10 @@ impl CallRuntime {
                     });
                 }
             }
+            task_inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .media_stats = None;
             if let Some(task) = media {
                 task.abort();
                 let _ = task.await;
@@ -227,12 +243,7 @@ impl CallRuntime {
                 }
             }
             CallRequest::Status => {
-                let s = state.controller.status();
-                CallResponse::Status(CallStatusDto {
-                    state: state_word(s.state).into(),
-                    pending_token: s.pending_token,
-                    signalling_connected: s.signalling_connected,
-                })
+                CallResponse::Status(status_dto(&state.controller, state.media_stats.as_ref()))
             }
             CallRequest::Events { since } => state.notices.events(since),
         };
@@ -240,6 +251,24 @@ impl CallRuntime {
         drop(state);
         self.wake.notify_one();
         response
+    }
+}
+fn status_dto<P: CallPorts>(
+    controller: &CallController<P>,
+    stats: Option<&MediaStats>,
+) -> CallStatusDto {
+    let status = controller.status();
+    let stats = if status.state == State::Connected {
+        stats
+    } else {
+        None
+    };
+    CallStatusDto {
+        state: state_word(status.state).into(),
+        pending_token: status.pending_token,
+        signalling_connected: status.signalling_connected,
+        media_frames_sent: stats.map_or(0, |s| s.frames_sent.load(Ordering::Relaxed)),
+        media_frames_played: stats.map_or(0, |s| s.frames_played.load(Ordering::Relaxed)),
     }
 }
 fn dial_result(result: Result<(), CallError>) -> CallResponse {
@@ -398,16 +427,43 @@ mod tests {
         });
         let mut am = None;
         let mut bm = None;
-        sync_media(&mut a, provider.clone(), &mut am);
-        sync_media(&mut b, provider.clone(), &mut bm);
-        sync_media(&mut a, provider.clone(), &mut am);
+        let mut a_stats = None;
+        let mut b_stats = None;
+        sync_media(&mut a, provider.clone(), &mut am, &mut a_stats);
+        sync_media(&mut b, provider.clone(), &mut bm, &mut b_stats);
+        sync_media(&mut a, provider.clone(), &mut am, &mut a_stats);
         tokio::task::yield_now().await;
         assert_eq!(provider.opens.load(Ordering::SeqCst), 2);
+        assert_eq!(a.status().state, State::Connected);
+        assert_eq!(b.status().state, State::Connected);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let a_status = status_dto(&a, a_stats.as_ref());
+                let b_status = status_dto(&b, b_stats.as_ref());
+                if a_status.media_frames_sent > 0
+                    && a_status.media_frames_played > 0
+                    && b_status.media_frames_sent > 0
+                    && b_status.media_frames_played > 0
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("media did not flow in time");
         a.hang_up();
         b.hang_up();
-        sync_media(&mut a, provider.clone(), &mut am);
-        sync_media(&mut b, provider, &mut bm);
+        sync_media(&mut a, provider.clone(), &mut am, &mut a_stats);
+        sync_media(&mut b, provider, &mut bm, &mut b_stats);
         assert!(am.is_none() && bm.is_none());
+        for status in [
+            status_dto(&a, a_stats.as_ref()),
+            status_dto(&b, b_stats.as_ref()),
+        ] {
+            assert_eq!(status.media_frames_sent, 0);
+            assert_eq!(status.media_frames_played, 0);
+        }
     }
     #[tokio::test]
     async fn unreachable_link_reports_failure_and_hangs_up() {
@@ -417,7 +473,8 @@ mod tests {
             opens: AtomicUsize::new(0),
         });
         let mut media = None;
-        sync_media(&mut a, provider, &mut media);
+        let mut stats = None;
+        sync_media(&mut a, provider, &mut media, &mut stats);
         assert!(!media.take().unwrap().await.unwrap());
         let mut notices = NoticeRing::default();
         media_failed(&mut a, &mut notices);

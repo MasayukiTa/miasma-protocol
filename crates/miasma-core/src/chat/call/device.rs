@@ -1,6 +1,10 @@
 //! Audio device ports and deterministic fakes used by CI. A future audio device
 //! only needs to implement these traits; no real device is used here.
 use super::media::FRAME_PLAINTEXT_LEN;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 
 pub trait AudioSource: Send {
     /// None means no frame is ready for this tick.
@@ -33,10 +37,17 @@ impl AudioSource for ToneSource {
 pub struct RecordingSink {
     frames: Vec<[u8; FRAME_PLAINTEXT_LEN]>,
     overflow: u64,
+    played_counter: Option<Arc<AtomicU64>>,
 }
 impl RecordingSink {
     pub fn new() -> Self {
         Self::default()
+    }
+    pub fn with_counter(counter: Arc<AtomicU64>) -> Self {
+        Self {
+            played_counter: Some(counter),
+            ..Self::default()
+        }
     }
     pub fn frames(&self) -> &[[u8; FRAME_PLAINTEXT_LEN]] {
         &self.frames
@@ -47,6 +58,9 @@ impl RecordingSink {
 }
 impl AudioSink for RecordingSink {
     fn play(&mut self, frame: &[u8; FRAME_PLAINTEXT_LEN]) {
+        if let Some(counter) = &self.played_counter {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
         if self.frames.len() < 4096 {
             self.frames.push(*frame);
         } else {

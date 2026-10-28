@@ -88,6 +88,10 @@ pub struct CallStatusDto {
     pub state: String,
     pub pending_token: Option<u64>,
     pub signalling_connected: bool,
+    #[serde(default)]
+    pub media_frames_sent: u64,
+    #[serde(default)]
+    pub media_frames_played: u64,
 }
 
 #[cfg(feature = "pqc")]
@@ -641,6 +645,8 @@ mod tests {
                 state: "ringing".into(),
                 pending_token: Some(1),
                 signalling_connected: true,
+                media_frames_sent: 0,
+                media_frames_played: 0,
             }),
             CallResponse::Events {
                 next: 4,
@@ -656,6 +662,12 @@ mod tests {
             let decoded: ChatResponse = serde_json::from_value(value.clone()).unwrap();
             assert_eq!(serde_json::to_value(decoded).unwrap(), value);
         }
+        let old_status: CallStatusDto = serde_json::from_str(
+            r#"{"state":"idle","pending_token":null,"signalling_connected":false}"#,
+        )
+        .unwrap();
+        assert_eq!(old_status.media_frames_sent, 0);
+        assert_eq!(old_status.media_frames_played, 0);
         let old: ChatRequest = serde_json::from_str(r#"{"Conversations":{}}"#).unwrap();
         assert!(matches!(old, ChatRequest::Conversations {}));
     }
