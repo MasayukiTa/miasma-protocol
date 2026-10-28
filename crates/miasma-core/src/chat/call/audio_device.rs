@@ -115,6 +115,72 @@ impl AudioDeviceList {
     }
 }
 
+/// The audio devices the host reports, by name, plus the host default of each
+/// direction. This is the plain data a UI or a config file chooses from; it
+/// holds only device names (no handles), so it is `Send` and crosses between
+/// the enumeration thread and the caller freely.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct DeviceList {
+    /// Names of the available input (capture) devices.
+    pub inputs: Vec<String>,
+    /// Names of the available output (playback) devices.
+    pub outputs: Vec<String>,
+    /// The host's default input device name, if there is one.
+    pub default_input: Option<String>,
+    /// The host's default output device name, if there is one.
+    pub default_output: Option<String>,
+}
+
+/// Enumerate the host's audio devices and return their names and the default of
+/// each direction.
+///
+/// The cpal host and device handles are not guaranteed to be `Send`, so the
+/// enumeration runs on a short-lived thread and only plain `String`s come back.
+/// Any failure (the host cannot be queried, the thread cannot be joined) yields
+/// empty lists and `None` defaults rather than a panic, so a caller can always
+/// show what it got.
+pub fn list_devices() -> DeviceList {
+    thread::Builder::new()
+        .spawn(enumerate_devices)
+        .ok()
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default()
+}
+
+/// The host enumeration proper, run on the short-lived thread. Every step is
+/// fallible-tolerant: a device whose name cannot be read is skipped and a
+/// missing default is simply `None`.
+fn enumerate_devices() -> DeviceList {
+    let host = cpal::default_host();
+    let default_name = |device: Option<cpal::Device>| device.and_then(|d| d.name().ok());
+    DeviceList {
+        inputs: collect_names(host.input_devices()),
+        outputs: collect_names(host.output_devices()),
+        default_input: default_name(host.default_input_device()),
+        default_output: default_name(host.default_output_device()),
+    }
+}
+
+/// Collect the names of an iterator of devices, tolerant of failure: an error
+/// enumerating the devices yields an empty list, and a device whose name
+/// cannot be read is skipped. Generic over the iterator type so it accepts
+/// whatever concrete iterator `host.input_devices()` / `host.output_devices()`
+/// return on the current platform.
+fn collect_names<I>(devices: Result<I, cpal::DevicesError>) -> Vec<String>
+where
+    I: Iterator<Item = cpal::Device>,
+{
+    let mut names = Vec::new();
+    if let Ok(devices) = devices {
+        for device in devices {
+            if let Ok(name) = device.name() {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
 fn pick_input(host: &cpal::Host, choice: &DeviceChoice) -> Result<cpal::Device, AudioDeviceError> {
     match choice {
         DeviceChoice::Default => host

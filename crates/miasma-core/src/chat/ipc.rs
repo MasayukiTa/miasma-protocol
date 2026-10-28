@@ -59,13 +59,51 @@ pub enum ChatRequest {
 #[cfg(feature = "pqc")]
 #[derive(Clone, Serialize, Deserialize)]
 pub enum CallRequest {
-    Dial { contact: String },
-    Accept { token: u64 },
-    Reject { token: u64 },
+    Dial {
+        contact: String,
+    },
+    Accept {
+        token: u64,
+    },
+    Reject {
+        token: u64,
+    },
     HangUp,
-    SetMuted { muted: bool },
+    SetMuted {
+        muted: bool,
+    },
     Status,
-    Events { since: u64 },
+    Events {
+        since: u64,
+    },
+    /// List the audio input and output devices the host reports, so a client
+    /// can show them. The answer is [`CallResponse::AudioDevices`].
+    ListAudioDevices,
+    /// Choose the input and/or output device by name (or `None` for the host
+    /// default). The runtime records the choice; a running call keeps the
+    /// devices it already opened and the choice takes effect for the next call.
+    /// The answer is [`CallResponse::AudioDevicesSelected`].
+    SelectAudioDevices {
+        #[serde(default)]
+        input: Option<String>,
+        #[serde(default)]
+        output: Option<String>,
+    },
+}
+
+/// The audio devices the host reports, carried in an IPC response. Plain names
+/// only; it holds no device handle and no secret.
+#[cfg(feature = "pqc")]
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct AudioDeviceListDto {
+    #[serde(default)]
+    pub inputs: Vec<String>,
+    #[serde(default)]
+    pub outputs: Vec<String>,
+    #[serde(default)]
+    pub default_input: Option<String>,
+    #[serde(default)]
+    pub default_output: Option<String>,
 }
 
 #[cfg(feature = "pqc")]
@@ -80,6 +118,17 @@ pub enum CallResponse {
         notices: Vec<CallNoticeDto>,
     },
     Error(String),
+    /// Answer to [`CallRequest::ListAudioDevices`]: the devices the host
+    /// reports. On a platform without the audio backend the lists are empty.
+    AudioDevices(AudioDeviceListDto),
+    /// Answer to [`CallRequest::SelectAudioDevices`]: the choice the runtime
+    /// now holds (echoed back so a client can confirm what was stored).
+    AudioDevicesSelected {
+        #[serde(default)]
+        input: Option<String>,
+        #[serde(default)]
+        output: Option<String>,
+    },
 }
 
 #[cfg(feature = "pqc")]
@@ -129,7 +178,13 @@ macro_rules! redacted_debug {
 }
 
 #[cfg(feature = "pqc")]
-redacted_debug!(CallRequest, CallResponse, CallStatusDto, CallNoticeDto);
+redacted_debug!(
+    CallRequest,
+    CallResponse,
+    CallStatusDto,
+    CallNoticeDto,
+    AudioDeviceListDto,
+);
 
 fn default_true() -> bool {
     true
@@ -648,6 +703,15 @@ mod tests {
             CallRequest::SetMuted { muted: true },
             CallRequest::Status,
             CallRequest::Events { since: 3 },
+            CallRequest::ListAudioDevices,
+            CallRequest::SelectAudioDevices {
+                input: None,
+                output: None,
+            },
+            CallRequest::SelectAudioDevices {
+                input: Some("Mic A".into()),
+                output: Some("Speaker B".into()),
+            },
         ];
         for request in requests {
             let value = serde_json::to_value(ChatRequest::Call(request)).unwrap();
@@ -679,12 +743,42 @@ mod tests {
                 }],
             },
             CallResponse::Error("unavailable".into()),
+            CallResponse::AudioDevices(AudioDeviceListDto {
+                inputs: vec!["Mic A".into(), "Mic B".into()],
+                outputs: vec!["Speaker B".into()],
+                default_input: Some("Mic A".into()),
+                default_output: None,
+            }),
+            CallResponse::AudioDevices(AudioDeviceListDto::default()),
+            CallResponse::AudioDevicesSelected {
+                input: Some("Mic A".into()),
+                output: None,
+            },
         ];
         for response in responses {
             let value = serde_json::to_value(ChatResponse::Call(response)).unwrap();
             let decoded: ChatResponse = serde_json::from_value(value.clone()).unwrap();
             assert_eq!(serde_json::to_value(decoded).unwrap(), value);
         }
+        // An older client that never sent the new keys still parses: a device
+        // list DTO from such a client, with only `inputs`, reads with empty
+        // defaults for the rest.
+        let partial: AudioDeviceListDto = serde_json::from_str(r#"{"inputs":["Mic A"]}"#).unwrap();
+        assert_eq!(partial.inputs, vec!["Mic A".to_owned()]);
+        assert!(partial.outputs.is_empty());
+        assert!(partial.default_input.is_none());
+        assert!(partial.default_output.is_none());
+        // A select request from an older client that omits a field reads it as
+        // `None` (the host default) rather than failing.
+        let select: ChatRequest =
+            serde_json::from_str(r#"{"Call":{"SelectAudioDevices":{"input":"Mic A"}}}"#).unwrap();
+        assert!(matches!(
+            select,
+            ChatRequest::Call(CallRequest::SelectAudioDevices {
+                input: Some(_),
+                output: None,
+            })
+        ));
         let old_status: CallStatusDto = serde_json::from_str(
             r#"{"state":"idle","pending_token":null,"signalling_connected":false}"#,
         )

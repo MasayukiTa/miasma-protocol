@@ -3421,6 +3421,9 @@ call_strings! {
     safety_heading, safety_pending, safety_explain,
     // The always-on line shown while the microphone is in use during a call.
     mic_in_use, camera_in_use, screen_sharing,
+    // The audio-device picker: a heading, the two drop-down labels, and the word for the entry
+    // that stands for the host's own default device.
+    device_heading, device_input_label, device_output_label, device_default,
     // Short notices.
     ended, unavailable,
 }
@@ -3461,6 +3464,10 @@ static CALL_EN: CallStrings = CallStrings {
     mic_in_use: "Microphone in use",
     camera_in_use: "Camera in use",
     screen_sharing: "Screen sharing",
+    device_heading: "Audio devices",
+    device_input_label: "Microphone",
+    device_output_label: "Speaker",
+    device_default: "Default device",
     ended: "Call ended",
     unavailable: "Calls are not available right now.",
 };
@@ -3493,6 +3500,10 @@ static CALL_JA: CallStrings = CallStrings {
     mic_in_use: "マイク使用中",
     camera_in_use: "カメラ使用中",
     screen_sharing: "画面共有中",
+    device_heading: "音声デバイス",
+    device_input_label: "マイク",
+    device_output_label: "スピーカー",
+    device_default: "既定のデバイス",
     ended: "通話を終了しました",
     unavailable: "通話はいま使えない状態です。",
 };
@@ -3525,6 +3536,10 @@ static CALL_ZH_CN: CallStrings = CallStrings {
     mic_in_use: "麦克风使用中",
     camera_in_use: "摄像头使用中",
     screen_sharing: "正在共享屏幕",
+    device_heading: "音频设备",
+    device_input_label: "麦克风",
+    device_output_label: "扬声器",
+    device_default: "默认设备",
     ended: "通话已结束",
     unavailable: "通话目前不可用。",
 };

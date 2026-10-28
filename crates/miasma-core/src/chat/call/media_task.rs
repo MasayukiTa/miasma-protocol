@@ -1,6 +1,8 @@
 //! Transport and task for call media.
 #[cfg(all(feature = "call-audio", any(windows, target_os = "macos"), not(test)))]
 use super::audio_bridge::{build_real_audio, DeviceSelection};
+#[cfg(all(feature = "call-audio", any(windows, target_os = "macos"), not(test)))]
+use super::audio_device::DeviceChoice;
 use super::{
     controller::{CallController, CallPorts},
     device::{AudioSink, AudioSource, RecordingSink, ToneSource},
@@ -196,6 +198,16 @@ impl MediaLinkProvider for IrohLinkProvider {
         })
     }
 }
+/// The audio devices chosen for a call: each name, or `None` for the host
+/// default. Plain `String`s only, so this crosses into the media task freely
+/// and needs none of the platform audio types; the desktop media path turns it
+/// into the backend's own selection, and every other platform ignores it.
+#[derive(Clone, Default)]
+pub(super) struct AudioChoice {
+    pub input: Option<String>,
+    pub output: Option<String>,
+}
+
 pub(super) fn maybe_start_media<P: CallPorts>(
     controller: &mut CallController<P>,
     provider: Arc<dyn MediaLinkProvider>,
@@ -203,6 +215,7 @@ pub(super) fn maybe_start_media<P: CallPorts>(
     stats: MediaStats,
     video: Option<VideoParts>,
     _muted: Arc<AtomicBool>,
+    devices: AudioChoice,
 ) -> Option<JoinHandle<bool>> {
     if running || controller.status().state != State::Connected {
         return None;
@@ -274,7 +287,7 @@ pub(super) fn maybe_start_media<P: CallPorts>(
                 }
             }
         }
-        run_media(roots, *call_id, link, stats).await
+        run_media(roots, *call_id, link, stats, devices).await
     }))
 }
 
@@ -288,10 +301,17 @@ async fn run_media(
     call_id: [u8; 16],
     link: Box<dyn DatagramLink>,
     stats: MediaStats,
+    devices: AudioChoice,
 ) -> bool {
     #[cfg(all(feature = "call-audio", any(windows, target_os = "macos"), not(test)))]
     {
-        match build_real_audio(&DeviceSelection::default()) {
+        // Turn the chosen names into the backend's selection: a name picks that
+        // device, and `None` leaves the host default in place.
+        let selection = DeviceSelection {
+            input: device_choice(devices.input),
+            output: device_choice(devices.output),
+        };
+        match build_real_audio(&selection) {
             Ok((source, sink)) => {
                 return drive_session(roots, call_id, source, sink, link, stats).await;
             }
@@ -302,6 +322,10 @@ async fn run_media(
             }
         }
     }
+    // On a platform without the audio backend, and in tests, the chosen devices
+    // are accepted but unused: the pseudo devices below carry the call.
+    #[cfg(not(all(feature = "call-audio", any(windows, target_os = "macos"), not(test))))]
+    let _ = devices;
     // `frames_played` is driven from `session.stats().played` in the tick loop
     // below, so both the real sink and the pseudo sink report the same way;
     // the pseudo sink needs no counter of its own.
@@ -360,6 +384,17 @@ where
         if status == TickStatus::Fatal {
             return false;
         }
+    }
+}
+
+/// Turn a chosen device name into the backend's [`DeviceChoice`]: a name picks
+/// that device and `None` leaves the host default. Only built on the desktop
+/// audio path.
+#[cfg(all(feature = "call-audio", any(windows, target_os = "macos"), not(test)))]
+fn device_choice(name: Option<String>) -> DeviceChoice {
+    match name {
+        Some(name) => DeviceChoice::ByName(name),
+        None => DeviceChoice::Default,
     }
 }
 

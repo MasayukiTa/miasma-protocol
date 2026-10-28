@@ -43,15 +43,35 @@ pub struct NodeConfig {
 /// `config.toml` written by an older version (without the `[call]` section, or
 /// without the `enabled` key) both read as enabled. Set `enabled = false`
 /// explicitly to keep the runtime off.
+///
+/// `input_device` and `output_device` name the audio devices to use; each is
+/// optional and absent by default, so an older file without them reads as the
+/// host default on both. A running call keeps the devices it opened; a change
+/// takes effect for the next call.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CallConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Name of the input (microphone) device to use, or `None` for the host
+    /// default. Matched against the names [`crate::chat::call`] reports; a name
+    /// that no longer matches a present device falls back to the host default.
+    /// Optional with a serde default, so a `config.toml` written before this
+    /// key existed reads as `None` (the host default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_device: Option<String>,
+    /// Name of the output (speaker) device to use, or `None` for the host
+    /// default. Same matching and compatibility rules as `input_device`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_device: Option<String>,
 }
 
 impl Default for CallConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            input_device: None,
+            output_device: None,
+        }
     }
 }
 
@@ -1773,6 +1793,69 @@ mod call_config_tests {
                 enabled
             );
         }
+    }
+
+    #[test]
+    fn the_audio_device_names_default_to_none() {
+        let cfg = CallConfig::default();
+        assert_eq!(cfg.input_device, None);
+        assert_eq!(cfg.output_device, None);
+        let node = NodeConfig::default();
+        assert_eq!(node.call.input_device, None);
+        assert_eq!(node.call.output_device, None);
+    }
+
+    #[test]
+    fn an_old_call_section_without_the_device_keys_reads_as_none() {
+        // A [call] table written before the device keys existed keeps the host
+        // default (None) on both rather than failing to parse.
+        let c: NodeConfig = toml::from_str("[call]\nenabled = true\n").unwrap();
+        assert_eq!(c.call.input_device, None);
+        assert_eq!(c.call.output_device, None);
+        // A whole file with no [call] section at all reads the same way.
+        let none: NodeConfig = toml::from_str("[chat]\nenabled = true\n").unwrap();
+        assert_eq!(none.call.input_device, None);
+        assert_eq!(none.call.output_device, None);
+    }
+
+    #[test]
+    fn the_audio_device_names_read_from_toml() {
+        let c: NodeConfig =
+            toml::from_str("[call]\ninput_device = \"Mic A\"\noutput_device = \"Speaker B\"\n")
+                .unwrap();
+        assert_eq!(c.call.input_device.as_deref(), Some("Mic A"));
+        assert_eq!(c.call.output_device.as_deref(), Some("Speaker B"));
+    }
+
+    #[test]
+    fn the_audio_device_names_round_trip_through_save_and_load() {
+        let cases = [
+            (None, None),
+            (Some("Mic A".to_owned()), None),
+            (None, Some("Speaker B".to_owned())),
+            (Some("Mic A".to_owned()), Some("Speaker B".to_owned())),
+        ];
+        for (input, output) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let mut cfg = NodeConfig::default();
+            cfg.call.input_device = input.clone();
+            cfg.call.output_device = output.clone();
+            cfg.save(dir.path()).unwrap();
+            let back = NodeConfig::load(dir.path()).unwrap();
+            assert_eq!(back.call.input_device, input);
+            assert_eq!(back.call.output_device, output);
+        }
+    }
+
+    #[test]
+    fn an_absent_device_name_is_not_written_to_the_file() {
+        // `skip_serializing_if` keeps a None out of the file, so a fresh config
+        // writes no device keys and an older reader sees nothing new.
+        let dir = tempfile::tempdir().unwrap();
+        NodeConfig::default().save(dir.path()).unwrap();
+        let text = std::fs::read_to_string(crate::paths::config_file(dir.path())).unwrap();
+        assert!(!text.contains("input_device"), "{text}");
+        assert!(!text.contains("output_device"), "{text}");
     }
 }
 

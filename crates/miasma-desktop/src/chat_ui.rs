@@ -973,6 +973,12 @@ impl ChatUi {
                     self.call.end();
                 }
             }
+            CallResponse::AudioDevices(devices) => {
+                self.call.on_audio_devices(devices);
+            }
+            CallResponse::AudioDevicesSelected { input, output } => {
+                self.call.on_audio_devices_selected(input, output);
+            }
             CallResponse::Ok | CallResponse::Unavailable | CallResponse::Error(_) => {}
         }
     }
@@ -1320,6 +1326,17 @@ impl ChatUi {
                 let muted = !self.call.is_muted();
                 self.out
                     .push_back(ChatRequest::Call(CallRequest::SetMuted { muted }));
+            }
+            Some(CallAction::ListDevices) => {
+                self.out
+                    .push_back(ChatRequest::Call(crate::call::list_audio_devices()));
+            }
+            Some(CallAction::SelectDevices { input, output }) => {
+                self.out
+                    .push_back(ChatRequest::Call(crate::call::select_audio_devices(
+                        input, output,
+                    )));
+                self.call.mark_device_select_pending();
             }
             None => {}
         }
