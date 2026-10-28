@@ -15,10 +15,19 @@ use std::{
     collections::VecDeque,
     future::Future,
     pin::Pin,
-    sync::{Arc, Mutex, OnceLock, Weak},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, OnceLock, Weak,
+    },
     time::{Duration, Instant},
 };
 use tokio::{sync::Notify, task::JoinHandle};
+
+#[derive(Clone, Default)]
+pub struct MediaStats {
+    pub frames_sent: Arc<AtomicU64>,
+    pub frames_played: Arc<AtomicU64>,
+}
 
 pub trait MediaLinkProvider: Send + Sync {
     fn open(
@@ -149,6 +158,7 @@ pub(super) fn maybe_start_media<P: CallPorts>(
     controller: &mut CallController<P>,
     provider: Arc<dyn MediaLinkProvider>,
     running: bool,
+    stats: MediaStats,
 ) -> Option<JoinHandle<bool>> {
     if running || controller.status().state != State::Connected {
         return None;
@@ -168,7 +178,7 @@ pub(super) fn maybe_start_media<P: CallPorts>(
             roots.direction,
             crate::chat::engine::now_ms(),
             ToneSource::new(),
-            RecordingSink::new(),
+            RecordingSink::with_counter(stats.frames_played.clone()),
             link,
         ) else {
             return false;
@@ -177,7 +187,11 @@ pub(super) fn maybe_start_media<P: CallPorts>(
         let mut interval = tokio::time::interval(Duration::from_millis(20));
         loop {
             interval.tick().await;
-            if session.tick(crate::chat::engine::now_ms()) == TickStatus::Fatal {
+            let status = session.tick(crate::chat::engine::now_ms());
+            stats
+                .frames_sent
+                .store(session.stats().sent, Ordering::Relaxed);
+            if status == TickStatus::Fatal {
                 return false;
             }
         }
