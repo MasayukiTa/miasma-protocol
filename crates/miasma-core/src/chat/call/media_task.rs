@@ -212,6 +212,22 @@ pub(super) struct AudioChoice {
     pub output: Option<String>,
 }
 
+/// Build the camera's video parts from an opened camera source: the source
+/// drives capture, the sink discards any decoded loopback (the remote picture
+/// is published through `take_decoded_picture`, not this sink), and the codec
+/// pair carries the raw pictures through fragmentation. The passthrough codec
+/// embeds each picture's geometry, so the camera's own capture size is
+/// reproduced on the far side without a fixed-size codec. Holds no key, nonce,
+/// call id or peer id.
+fn camera_parts(source: Box<dyn VideoSource + Send>) -> VideoParts {
+    VideoParts {
+        source,
+        sink: Box::new(DiscardVideoSink),
+        encoder: Box::new(PassthroughCodec::new()),
+        decoder: Box::new(PassthroughCodec::new()),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn maybe_start_media<P: CallPorts>(
     controller: &mut CallController<P>,
@@ -221,6 +237,7 @@ pub(super) fn maybe_start_media<P: CallPorts>(
     video: Option<VideoParts>,
     _muted: Arc<AtomicBool>,
     devices: AudioChoice,
+    camera_source: Option<Box<dyn VideoSource + Send>>,
     screen_source: Option<Box<dyn VideoSource + Send>>,
     remote_frames: RemoteFrameStore,
 ) -> Option<JoinHandle<bool>> {
@@ -228,7 +245,15 @@ pub(super) fn maybe_start_media<P: CallPorts>(
         return None;
     }
     let negotiated = controller.negotiated_video();
-    let video = if negotiated { video } else { None };
+    // The camera rides the negotiated-video gate. A test may inject pseudo
+    // `video` parts directly; otherwise an opened camera source builds the
+    // production parts here. The injected parts win when both are present, so
+    // the existing test hooks keep their exact behaviour.
+    let video = if negotiated {
+        video.or_else(|| camera_source.map(camera_parts))
+    } else {
+        None
+    };
     // The screen stream is a second video-like stream (media_type 0x02); it
     // rides the same negotiated-video gate as the camera.
     let screen_source = if negotiated { screen_source } else { None };

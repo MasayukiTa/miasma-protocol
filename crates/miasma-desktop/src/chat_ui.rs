@@ -1039,6 +1039,12 @@ impl ChatUi {
             CallResponse::AudioDevicesSelected { input, output } => {
                 self.call.on_audio_devices_selected(input, output);
             }
+            // The camera-start answer `no_camera` shows the "camera unavailable" notice in the
+            // panel; `not_ready` (video not negotiated) does nothing visible. Every other `Ok`,
+            // `Unavailable` or `Error` changes nothing: the next `Status` reports the real state.
+            CallResponse::Error(code) if code == "no_camera" => {
+                self.call.set_camera_unavailable();
+            }
             CallResponse::Ok | CallResponse::Unavailable | CallResponse::Error(_) => {}
         }
     }
@@ -1449,6 +1455,18 @@ impl ChatUi {
                     CallRequest::StopScreenShare
                 } else {
                     CallRequest::StartScreenShare
+                };
+                self.out.push_back(ChatRequest::Call(request));
+            }
+            Some(CallAction::ToggleCamera) => {
+                // Toggle against the last status flag: the camera in use now means stop,
+                // otherwise start. The daemon honours a start only while connected with video
+                // negotiated; its answer (`no_camera` / `not_ready`) is handled in on_call_answer.
+                let in_use = self.call.status().map_or(false, |s| s.camera_in_use);
+                let request = if in_use {
+                    crate::call::stop_camera()
+                } else {
+                    crate::call::start_camera()
                 };
                 self.out.push_back(ChatRequest::Call(request));
             }

@@ -171,6 +171,23 @@ impl VideoSource for CameraSource {
     }
 }
 
+/// The default camera factory: opens the default camera on demand. Held by the
+/// call runtime in real desktop builds with the `call-camera` feature; the
+/// runtime asks it for a source only when the user starts the camera inside a
+/// connected, video-negotiated call, so the device is opened lazily and never
+/// at startup. Returns `None` when no camera can be opened (no device, denied,
+/// or the backend is unavailable), and the runtime then simply does not start
+/// the camera stream, which a client reads from the status.
+pub struct CameraFactory;
+
+impl super::video::ScreenSourceFactory for CameraFactory {
+    fn create(&self) -> Option<Box<dyn VideoSource + Send>> {
+        CameraSource::new()
+            .ok()
+            .map(|source| Box::new(source) as Box<dyn VideoSource + Send>)
+    }
+}
+
 // Decode the camera format to RGB, then nearest-neighbour sample and convert.
 // Bound dimensions before calling the backend decoder, and contain decoder panics.
 fn convert(frame: &Buffer, width: usize, height: usize) -> Option<Vec<u8>> {

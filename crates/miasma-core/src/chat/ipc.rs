@@ -94,6 +94,17 @@ pub enum CallRequest {
     StartScreenShare,
     /// Stop sharing the screen. The camera stream, if any, is unaffected.
     StopScreenShare,
+    /// Begin sending the local camera as the video stream. Honoured only while
+    /// the call is connected and video was negotiated; never automatic. The
+    /// camera device is opened lazily on this request, so nothing captures
+    /// before the user presses the button. The screen stream, if any, is
+    /// unaffected. Answered with [`CallResponse::Ok`], or
+    /// [`CallResponse::Error`] with `not_ready` when video was not negotiated
+    /// and `no_camera` when no camera could be opened.
+    StartCamera,
+    /// Stop sending the local camera and release the device. The screen stream,
+    /// if any, is unaffected. Stopping is idempotent.
+    StopCamera,
     /// Ask for the latest decoded remote video frame, but only when its frame
     /// counter is above `last_seen`. The caller passes the counter it last
     /// received (0 to always get the current frame); the handler answers with
@@ -792,6 +803,8 @@ mod tests {
             },
             CallRequest::StartScreenShare,
             CallRequest::StopScreenShare,
+            CallRequest::StartCamera,
+            CallRequest::StopCamera,
             CallRequest::RemoteFrame { last_seen: 5 },
         ];
         for request in requests {

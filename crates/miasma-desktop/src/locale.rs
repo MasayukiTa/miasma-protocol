@@ -3417,9 +3417,9 @@ call_strings! {
     state_calling, state_ringing, state_connecting, state_connected,
     // The in-call panel itself.
     panel_title, duration_label, mute, unmute, a11y_mute, hang_up, a11y_hang_up,
-    // Camera on/off toggle, next to mute. The label follows the current state; the camera
-    // control is not wired to a core request in this build, so the button is shown but inert,
-    // with a neutral tooltip saying so.
+    // Camera on/off toggle, next to mute. The label follows the current state and the button
+    // drives the real start/stop camera request; `a11y_camera` is its screen-reader name and
+    // `camera_unavailable` is the notice shown when the daemon answers `no_camera`.
     camera_on, camera_off, a11y_camera, camera_unavailable,
     // Screen-share on/off toggle, next to the camera. The label follows the current state and
     // the button drives the real start/stop screen-share request; `a11y_screen_share` is its
@@ -3468,7 +3468,7 @@ static CALL_EN: CallStrings = CallStrings {
     camera_on: "Camera on",
     camera_off: "Camera off",
     a11y_camera: "Turn your camera on or off",
-    camera_unavailable: "The camera cannot be turned on in this build yet.",
+    camera_unavailable: "The camera could not be turned on.",
     screen_on: "Screen on",
     screen_off: "Screen off",
     a11y_screen_share: "Share your screen",
@@ -3511,7 +3511,7 @@ static CALL_JA: CallStrings = CallStrings {
     camera_on: "カメラをオン",
     camera_off: "カメラをオフ",
     a11y_camera: "カメラのオン・オフを切り替える",
-    camera_unavailable: "このビルドではまだカメラをオンにできません。",
+    camera_unavailable: "カメラをオンにできませんでした。",
     screen_on: "画面共有をオン",
     screen_off: "画面共有をオフ",
     a11y_screen_share: "画面を共有する",
@@ -3555,7 +3555,7 @@ static CALL_ZH_CN: CallStrings = CallStrings {
     camera_on: "打开摄像头",
     camera_off: "关闭摄像头",
     a11y_camera: "打开或关闭摄像头",
-    camera_unavailable: "此版本尚无法打开摄像头。",
+    camera_unavailable: "无法打开摄像头。",
     screen_on: "开启共享屏幕",
     screen_off: "关闭共享屏幕",
     a11y_screen_share: "共享你的屏幕",
