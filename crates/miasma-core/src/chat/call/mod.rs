@@ -55,3 +55,6 @@ pub use video_frame::{
     fragment_frame, parse_fragment, FragmentHeader, VideoFrameError, FLAG_KEYFRAME,
     FRAGMENT_HEADER_LEN, FRAGMENT_PAYLOAD_LEN, MAX_FRAGMENTS_PER_FRAME,
 };
+
+#[cfg(all(feature = "call-camera", any(windows, target_os = "macos")))]
+pub mod video_camera;
