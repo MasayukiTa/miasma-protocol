@@ -31,7 +31,10 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tokio::{sync::Notify, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, Notify},
+    task::JoinHandle,
+};
 
 #[derive(Clone, Default)]
 pub struct MediaStats {
@@ -40,10 +43,19 @@ pub struct MediaStats {
     pub video_frames_sent: Arc<AtomicU64>,
     pub video_frames_played: Arc<AtomicU64>,
     pub camera_in_use: Arc<AtomicBool>,
+    pub screen_sharing: Arc<AtomicBool>,
+    pub(super) control: Arc<Mutex<Option<mpsc::UnboundedSender<MediaControl>>>>,
     /// Set true to mute the local microphone mid-call. The media task reads it
     /// each tick and tells the capture source; with no input device it has no
     /// effect.
     pub muted: Arc<std::sync::atomic::AtomicBool>,
+}
+
+pub(super) enum MediaControl {
+    AttachCamera(Box<dyn VideoSource + Send>),
+    DetachCamera,
+    AttachScreen(Box<dyn VideoSource + Send>),
+    DetachScreen,
 }
 
 pub struct VideoParts {
@@ -260,6 +272,8 @@ pub(super) fn maybe_start_media<P: CallPorts>(
     let peer = controller.active_peer()?;
     let call_id = controller.active_call_id()?;
     let roots = controller.take_media_roots()?;
+    let (control_tx, control_rx) = mpsc::unbounded_channel();
+    *stats.control.lock().unwrap_or_else(|e| e.into_inner()) = Some(control_tx);
     Some(tokio::spawn(async move {
         let _camera_guard = CameraGuard(stats.camera_in_use.clone());
         let Some(link) = provider.open(peer, roots.direction).await else {
@@ -274,6 +288,7 @@ pub(super) fn maybe_start_media<P: CallPorts>(
             video,
             screen_source,
             remote_frames,
+            control_rx,
         )
         .await
     }))
@@ -293,6 +308,7 @@ async fn run_media(
     video: Option<VideoParts>,
     screen_source: Option<Box<dyn VideoSource + Send>>,
     remote_frames: RemoteFrameStore,
+    control_rx: mpsc::UnboundedReceiver<MediaControl>,
 ) -> bool {
     #[cfg(all(feature = "call-audio", any(windows, target_os = "macos"), not(test)))]
     {
@@ -314,6 +330,7 @@ async fn run_media(
                     video,
                     screen_source,
                     remote_frames,
+                    control_rx,
                 )
                 .await;
             }
@@ -349,6 +366,7 @@ async fn run_media(
         video,
         screen_source,
         remote_frames,
+        control_rx,
     )
     .await
 }
@@ -366,6 +384,7 @@ async fn drive_session<S, K>(
     video: Option<VideoParts>,
     screen_source: Option<Box<dyn VideoSource + Send>>,
     remote_frames: RemoteFrameStore,
+    mut control_rx: mpsc::UnboundedReceiver<MediaControl>,
 ) -> bool
 where
     S: AudioSource + MuteControl,
@@ -408,6 +427,33 @@ where
     let empty: [[u8; super::media::FRAME_PLAINTEXT_LEN]; 0] = [];
     loop {
         interval.tick().await;
+        while let Ok(control) = control_rx.try_recv() {
+            match control {
+                MediaControl::AttachCamera(source) => {
+                    let p = camera_parts(source);
+                    video = Some(VideoDriver::new(p.source, p.sink, p.encoder, p.decoder, 20));
+                    stats.camera_in_use.store(true, Ordering::SeqCst);
+                }
+                MediaControl::DetachCamera => {
+                    video = None;
+                    stats.camera_in_use.store(false, Ordering::SeqCst);
+                }
+                MediaControl::AttachScreen(source) => {
+                    screen = Some(VideoDriver::new(
+                        source,
+                        DiscardVideoSink,
+                        PassthroughCodec::new(),
+                        PassthroughCodec::new(),
+                        SCREEN_FRAME_INTERVAL_MS,
+                    ));
+                    stats.screen_sharing.store(true, Ordering::SeqCst);
+                }
+                MediaControl::DetachScreen => {
+                    screen = None;
+                    stats.screen_sharing.store(false, Ordering::SeqCst);
+                }
+            }
+        }
         session
             .source_mut()
             .set_muted(stats.muted.load(Ordering::Relaxed));
