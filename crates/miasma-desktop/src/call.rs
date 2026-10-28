@@ -1,9 +1,9 @@
 //! The call screen, pure part: everything that can be decided without a window.
 //!
 //! The state word to show, the duration text, whether the microphone counts as in use, the
-//! safety-code line (not ready yet), and the small amount of screen state a call needs. The
-//! window in `call_ui.rs` holds an instance of [`CallUi`] and draws it; this file is unit-tested
-//! headless, the way `chat.rs` is.
+//! safety-code line, the camera and video state, and the small amount of screen state a call
+//! needs. The window in `call_ui.rs` holds an instance of [`CallUi`] and draws it; this file is
+//! unit-tested headless, the way `chat.rs` is.
 //!
 //! Only built with the `pqc` feature, because the call IPC surface
 //! (`miasma_core::chat::ipc::CallRequest` and friends) is defined only there.
@@ -47,12 +47,14 @@ pub fn duration_text(secs: u64) -> String {
 
 /// The safety code to show for a call, or `None` when there is none to show.
 ///
-/// It is `None` for now: the short authentication string is not derived yet. The panel calls
-/// this and, while it is `None`, shows a neutral "pending" line instead. Kept as a function so
-/// the panel does not change when a real code lands here.
+/// The daemon reports the short authentication string once both ends have confirmed the call;
+/// until then the field is empty and this returns `None`, so the panel shows a neutral "pending"
+/// line in its place. An empty string is treated the same as absent.
 pub fn safety_code_text(status: &CallStatusDto) -> Option<String> {
-    let _ = status;
-    None
+    match &status.safety_code {
+        Some(code) if !code.is_empty() => Some(code.clone()),
+        _ => None,
+    }
 }
 
 /// Whether the microphone must be shown as in use: true for a connected call. The indicator this
@@ -75,6 +77,15 @@ pub struct CallUi {
     /// read by [`CallUi::is_muted`] and changed by [`CallUi::set_muted`], the named hook the
     /// audio layer will drive later.
     muted: bool,
+    /// Whether the local camera is on. A UI intent flag set by [`CallUi::set_camera`]; the
+    /// daemon's own view of the camera is read from the status (see [`CallUi::camera_in_use`]).
+    camera_on: bool,
+    /// Whether both ends agreed to carry video for this call, from the last status.
+    negotiated_video: bool,
+    /// Whether the daemon reports a screen as being shared, from the last status.
+    screen_sharing: bool,
+    /// The last safety code the daemon reported, if any. Shown by the panel; never logged.
+    safety_code: Option<String>,
     /// When the call connected (ms since the epoch), for the duration. `None` until connected.
     connected_ms: Option<u64>,
     /// The next `since` for call `Events` polling.
@@ -90,6 +101,10 @@ impl Default for CallUi {
             active: false,
             state: String::new(),
             muted: false,
+            camera_on: false,
+            negotiated_video: false,
+            screen_sharing: false,
+            safety_code: None,
             connected_ms: None,
             events_since: 0,
             last_poll_ms: 0,
@@ -124,12 +139,50 @@ impl CallUi {
         self.muted = muted;
     }
 
+    /// Whether the camera button shows the local camera as on. This is the UI intent; the panel
+    /// uses it to label the button. The daemon's own view is [`CallUi::camera_in_use`].
+    pub fn camera_on(&self) -> bool {
+        self.camera_on
+    }
+
+    /// Record the camera intent after the app sends [`set_camera`]. The matching request is built
+    /// by the [`set_camera`] builder; this only keeps the UI label in step.
+    pub fn set_camera(&mut self, on: bool) {
+        self.camera_on = on;
+    }
+
+    /// Whether the daemon reports the local camera as in use, from the last status. False until a
+    /// status says otherwise, so audio-only calls never show it.
+    pub fn camera_in_use(&self) -> bool {
+        self.camera_on && self.active
+    }
+
+    /// Whether both ends agreed to carry video for this call, from the last status.
+    pub fn negotiated_video(&self) -> bool {
+        self.negotiated_video
+    }
+
+    /// Whether a screen is being shared, from the last status. Always false until screen capture
+    /// is available in the daemon.
+    pub fn screen_sharing(&self) -> bool {
+        self.screen_sharing
+    }
+
+    /// The safety code the daemon last reported, or `None` when none is ready yet.
+    pub fn safety_code(&self) -> Option<&str> {
+        self.safety_code.as_deref()
+    }
+
     /// Record that we started dialing a contact: a call of ours now exists.
     pub fn on_dial(&mut self) {
         self.active = true;
         self.state = "calling".to_owned();
         self.connected_ms = None;
         self.muted = false;
+        self.camera_on = false;
+        self.negotiated_video = false;
+        self.screen_sharing = false;
+        self.safety_code = None;
     }
 
     /// Apply a fresh `Status` from the daemon at time `now_ms`.
@@ -147,6 +200,10 @@ impl CallUi {
             self.connected_ms = Some(now_ms);
         }
         self.state = status.state.clone();
+        self.camera_on = status.camera_in_use;
+        self.negotiated_video = status.negotiated_video;
+        self.screen_sharing = status.screen_sharing;
+        self.safety_code = safety_code_text(status);
     }
 
     /// End the call and forget its state. Called when the daemon reports `idle`, or after we hang
@@ -157,6 +214,10 @@ impl CallUi {
         self.state = String::new();
         self.connected_ms = None;
         self.muted = false;
+        self.camera_on = false;
+        self.negotiated_video = false;
+        self.screen_sharing = false;
+        self.safety_code = None;
     }
 
     /// The elapsed seconds of a connected call at `now_ms`, or `None` when not connected yet.
@@ -209,6 +270,33 @@ pub fn reject(token: u64) -> CallRequest {
     CallRequest::Reject { token }
 }
 
+/// Build the `HangUp` request that ends the current call.
+pub fn hang_up() -> CallRequest {
+    CallRequest::HangUp
+}
+
+/// Build the `SetCamera` request that turns the local camera on or off during a connected call.
+pub fn set_camera(on: bool) -> CallRequest {
+    CallRequest::SetCamera { on }
+}
+
+/// Build the `VideoFrame` request that asks for the most recent decoded picture from the peer.
+/// The panel polls this while a call carries video; the answer is handled where the request is
+/// sent, so no picture bytes are kept here.
+pub fn video_frame() -> CallRequest {
+    CallRequest::VideoFrame
+}
+
+/// Build the `Status` request used to poll the call state.
+pub fn status_request() -> CallRequest {
+    CallRequest::Status
+}
+
+/// Build the `Events` request for call notices after event number `since`.
+pub fn events(since: u64) -> CallRequest {
+    CallRequest::Events { since }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,8 +307,14 @@ mod tests {
             state: state.to_owned(),
             pending_token: pending,
             signalling_connected: state == "connected",
+            safety_code: None,
             media_frames_sent: 0,
             media_frames_played: 0,
+            media_video_frames_sent: 0,
+            media_video_frames_played: 0,
+            camera_in_use: false,
+            negotiated_video: false,
+            screen_sharing: false,
         }
     }
 
@@ -251,11 +345,20 @@ mod tests {
     }
 
     #[test]
-    fn the_safety_code_is_not_ready_yet() {
-        // The real short authentication string is not derived yet, so the function returns None
-        // for every status and the panel shows its neutral pending line.
+    fn the_safety_code_shows_only_once_the_daemon_reports_one() {
+        // No code yet: a status without one gives None, so the panel shows its pending line.
         assert!(safety_code_text(&status("connected", None)).is_none());
-        assert!(safety_code_text(&status("ringing", Some(7))).is_none());
+        // An empty string counts as none, never as a blank code.
+        let mut empty = status("connected", None);
+        empty.safety_code = Some(String::new());
+        assert!(safety_code_text(&empty).is_none());
+        // Once the daemon reports a code it is shown verbatim.
+        let mut ready = status("connected", None);
+        ready.safety_code = Some("12345 67890 13579 24680".to_owned());
+        assert_eq!(
+            safety_code_text(&ready).as_deref(),
+            Some("12345 67890 13579 24680")
+        );
     }
 
     #[test]
@@ -354,5 +457,75 @@ mod tests {
         assert!(matches!(dial("alice"), CallRequest::Dial { contact } if contact == "alice"));
         assert!(matches!(accept(3), CallRequest::Accept { token: 3 }));
         assert!(matches!(reject(4), CallRequest::Reject { token: 4 }));
+        assert!(matches!(hang_up(), CallRequest::HangUp));
+        assert!(matches!(
+            set_camera(true),
+            CallRequest::SetCamera { on: true }
+        ));
+        assert!(matches!(
+            set_camera(false),
+            CallRequest::SetCamera { on: false }
+        ));
+        assert!(matches!(video_frame(), CallRequest::VideoFrame));
+        assert!(matches!(status_request(), CallRequest::Status));
+        assert!(matches!(events(5), CallRequest::Events { since: 5 }));
+    }
+
+    #[test]
+    fn an_audio_only_status_leaves_every_video_flag_off() {
+        // A plain connected call (no camera, no video negotiated, no screen share) must look
+        // exactly as before: all the video-related state stays off.
+        let mut ui = CallUi::default();
+        ui.on_status(&status("connected", None), 1_000);
+        assert!(!ui.camera_on());
+        assert!(!ui.camera_in_use());
+        assert!(!ui.negotiated_video());
+        assert!(!ui.screen_sharing());
+        assert!(ui.safety_code().is_none());
+    }
+
+    #[test]
+    fn a_status_carries_the_camera_video_and_safety_code_through() {
+        let mut ui = CallUi::default();
+        let mut st = status("connected", None);
+        st.camera_in_use = true;
+        st.negotiated_video = true;
+        st.screen_sharing = true;
+        st.safety_code = Some("12345 67890 13579 24680".to_owned());
+        ui.on_status(&st, 1_000);
+        assert!(ui.camera_on());
+        assert!(ui.camera_in_use());
+        assert!(ui.negotiated_video());
+        assert!(ui.screen_sharing());
+        assert_eq!(ui.safety_code(), Some("12345 67890 13579 24680"));
+        // An idle status clears all of it, like the rest of the call state.
+        ui.on_status(&status("idle", None), 2_000);
+        assert!(!ui.camera_on());
+        assert!(!ui.camera_in_use());
+        assert!(!ui.negotiated_video());
+        assert!(!ui.screen_sharing());
+        assert!(ui.safety_code().is_none());
+    }
+
+    #[test]
+    fn the_camera_hook_only_records_the_intent() {
+        let mut ui = CallUi::default();
+        ui.on_dial();
+        assert!(!ui.camera_on());
+        ui.set_camera(true);
+        assert!(ui.camera_on());
+        assert!(ui.camera_in_use());
+        ui.set_camera(false);
+        assert!(!ui.camera_on());
+        assert!(!ui.camera_in_use());
+    }
+
+    #[test]
+    fn the_camera_is_not_in_use_without_an_active_call() {
+        // The intent flag alone never shows the camera as in use: a call must exist.
+        let mut ui = CallUi::default();
+        ui.set_camera(true);
+        assert!(ui.camera_on());
+        assert!(!ui.camera_in_use());
     }
 }
