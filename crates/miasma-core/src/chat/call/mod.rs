@@ -20,6 +20,7 @@ pub mod media;
 pub mod media_task;
 pub mod packet;
 pub mod receiver;
+pub mod sas;
 #[cfg(feature = "iroh")]
 pub mod runtime;
 pub mod sender;
