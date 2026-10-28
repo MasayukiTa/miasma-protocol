@@ -602,19 +602,20 @@ impl ChatUi {
             self.ask_events(now);
         }
         self.group.tick(area_open);
-        // While a call exists, poll its Status and Events at a modest interval (no busy loop).
-        // This runs whether or not the Chat area is open, so an incoming call can ring over any
-        // screen; `should_poll` returns false when no call exists, so there is no idle polling.
+        // Poll calls independently of chat, including idle discovery while the tab is closed.
         #[cfg(feature = "pqc")]
         {
             let call_now = self.clock().now_ms;
-            if self.call.should_poll(call_now) || self.call.discovery_due(call_now) {
+            let active_poll = self.call.should_poll(call_now);
+            if active_poll || self.call.discovery_due(call_now) {
                 use miasma_core::chat::ipc::CallRequest;
                 self.call.mark_polled(call_now);
                 self.out.push_back(ChatRequest::Call(CallRequest::Status));
-                self.out.push_back(ChatRequest::Call(CallRequest::Events {
-                    since: self.call.events_since(),
-                }));
+                if active_poll {
+                    self.out.push_back(ChatRequest::Call(CallRequest::Events {
+                        since: self.call.events_since(),
+                    }));
+                }
             }
         }
         if !area_open {
@@ -2740,6 +2741,18 @@ mod tests {
         v
     }
 
+    fn chat_requests(ui: &mut ChatUi) -> Vec<ChatRequest> {
+        requests(ui)
+            .into_iter()
+            .filter(|r| {
+                #[cfg(feature = "pqc")]
+                if matches!(r, ChatRequest::Call(_)) {
+                    return false;
+                }
+                true
+            })
+            .collect()
+    }
     /// Draw the chat area once with AccessKit on and collect every node name, so a
     /// test can check whether a given line of text is shown.
     fn drawn_names(chat: &mut ChatUi, connected: bool) -> Vec<String> {
@@ -3035,10 +3048,10 @@ mod tests {
         let mut ui = ready();
         ui.last_events = Instant::now();
         ui.tick(false, true);
-        assert!(requests(&mut ui).is_empty(), "not due yet");
+        assert!(chat_requests(&mut ui).is_empty(), "not due yet");
         ui.last_events = Instant::now() - Duration::from_secs(6);
         ui.tick(false, true);
-        let r = requests(&mut ui);
+        let r = chat_requests(&mut ui);
         assert_eq!(r.len(), 1);
         assert!(matches!(r[0], ChatRequest::Events { since: 0 }));
         // Never the list or a history while the tab is closed.
@@ -3046,7 +3059,7 @@ mod tests {
         ui.list_dirty = true;
         ui.last_events = Instant::now() - Duration::from_secs(6);
         ui.tick(false, true);
-        assert!(requests(&mut ui)
+        assert!(chat_requests(&mut ui)
             .iter()
             .all(|r| matches!(r, ChatRequest::Events { .. })));
     }
@@ -3058,18 +3071,44 @@ mod tests {
         ui.last_events = Instant::now();
         ui.last_list = Instant::now();
         ui.tick(true, true);
-        assert!(requests(&mut ui).is_empty());
+        assert!(chat_requests(&mut ui).is_empty());
         ui.last_list = Instant::now() - Duration::from_secs(4);
         ui.tick(true, true);
-        assert!(requests(&mut ui)
+        assert!(chat_requests(&mut ui)
             .iter()
             .any(|r| matches!(r, ChatRequest::Conversations {})));
         // Not again while that one is out.
         ui.last_list = Instant::now() - Duration::from_secs(4);
         ui.tick(true, true);
-        assert!(!requests(&mut ui)
+        assert!(!chat_requests(&mut ui)
             .iter()
             .any(|r| matches!(r, ChatRequest::Conversations {})));
+    }
+
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn idle_call_status_is_polled_every_five_seconds() {
+        use miasma_core::chat::ipc::CallRequest;
+
+        let mut ui = ready();
+        ui.last_events = Instant::now();
+        for (now_ms, expected) in [(5_000, true), (9_999, false), (10_000, true)] {
+            ui.clock_override = Some(Clock {
+                now_ms,
+                utc_offset_secs: 0,
+            });
+            ui.tick(false, true);
+            let calls: Vec<_> = requests(&mut ui)
+                .into_iter()
+                .filter(|r| matches!(r, ChatRequest::Call(_)))
+                .collect();
+            if expected {
+                assert_eq!(calls.len(), 1);
+                assert!(matches!(calls[0], ChatRequest::Call(CallRequest::Status)));
+            } else {
+                assert!(calls.is_empty());
+            }
+        }
     }
 
     #[test]
