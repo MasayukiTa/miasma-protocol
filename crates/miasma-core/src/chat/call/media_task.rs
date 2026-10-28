@@ -27,6 +27,8 @@ use tokio::{sync::Notify, task::JoinHandle};
 pub struct MediaStats {
     pub frames_sent: Arc<AtomicU64>,
     pub frames_played: Arc<AtomicU64>,
+    pub video_frames_sent: Arc<AtomicU64>,
+    pub video_frames_played: Arc<AtomicU64>,
 }
 
 pub trait MediaLinkProvider: Send + Sync {
