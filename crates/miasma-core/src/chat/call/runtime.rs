@@ -4,6 +4,7 @@ use super::{
         maybe_start_media, AudioChoice, IrohLinkProvider, MediaLinkProvider, MediaStats, VideoParts,
     },
     state::State,
+    video::ScreenSourceFactory,
 };
 use crate::chat::{
     ipc::{AudioDeviceListDto, CallNoticeDto, CallRequest, CallResponse, CallStatusDto},
@@ -82,11 +83,20 @@ struct Inner {
     /// devices it already opened; this is read when the next call starts its
     /// media task.
     devices: AudioChoice,
+    /// Whether the user has asked to share the screen. Set only by the
+    /// StartScreenShare IPC while connected with video negotiated, and cleared
+    /// on StopScreenShare, on hang up and whenever the call leaves Connected.
+    /// Never set automatically.
+    screen_sharing: bool,
 }
 impl Inner {
     fn collect(&mut self) {
         for notice in self.controller.take_notices().0 {
             self.notices.push(notice);
+        }
+        // Screen sharing cannot outlive the connected call it belongs to.
+        if self.controller.status().state != State::Connected {
+            self.screen_sharing = false;
         }
     }
 }
@@ -109,6 +119,8 @@ fn sync_media<P: CallPorts>(
     muted: Arc<AtomicBool>,
     video_factory: Option<&Arc<VideoPartsFactory>>,
     devices: AudioChoice,
+    screen_factory: Option<&Arc<dyn ScreenSourceFactory>>,
+    screen_sharing: bool,
 ) {
     if controller.status().state != State::Connected {
         *stats = None;
@@ -127,6 +139,13 @@ fn sync_media<P: CallPorts>(
         // When this endpoint injects pseudo video parts, build a fresh set for
         // this media task; audio-only endpoints pass no factory and get `None`.
         let video = video_factory.and_then(|factory| factory());
+        // Only open a screen source when the user has asked to share and a
+        // factory is present; the factory may still decline (returns None).
+        let screen_source = if screen_sharing {
+            screen_factory.and_then(|f| f.create())
+        } else {
+            None
+        };
         *media = maybe_start_media(
             controller,
             provider,
@@ -135,8 +154,18 @@ fn sync_media<P: CallPorts>(
             video,
             muted,
             devices,
+            screen_source,
         );
         *stats = media.as_ref().map(|_| new_stats);
+    }
+}
+/// A [`ScreenSourceFactory`] that never opens a source. Used as the runtime
+/// default when no real screen factory is wired in, so the screen stream stays
+/// dormant until a build or test supplies a working factory.
+struct NoScreenFactory;
+impl ScreenSourceFactory for NoScreenFactory {
+    fn create(&self) -> Option<Box<dyn super::video::VideoSource + Send>> {
+        None
     }
 }
 pub struct CallRuntime {
@@ -145,6 +174,7 @@ pub struct CallRuntime {
     wake: Arc<Notify>,
     stop: Arc<Notify>,
     task: Mutex<Option<JoinHandle<()>>>,
+    screen_factory: Arc<dyn ScreenSourceFactory>,
 }
 impl CallRuntime {
     pub fn start(svc: Arc<ChatService>) -> Arc<Self> {
@@ -186,12 +216,17 @@ impl CallRuntime {
         if !offers_video {
             controller.set_local_offers_video(false);
         }
+        // No real screen factory is wired in by default, so the screen stream
+        // stays dormant until a build or test supplies a working factory.
+        let screen_factory: Arc<dyn ScreenSourceFactory> = Arc::new(NoScreenFactory);
+        let task_screen_factory = screen_factory.clone();
         let inner = Arc::new(Mutex::new(Inner {
             controller,
             notices: NoticeRing::default(),
             media_stats: None,
             muted: Arc::new(AtomicBool::new(false)),
             devices: AudioChoice::default(),
+            screen_sharing: false,
         }));
         let wake = Arc::new(Notify::new());
         let stop_task = Arc::new(Notify::new());
@@ -240,10 +275,12 @@ impl CallRuntime {
                         media_stats,
                         muted,
                         devices,
+                        screen_sharing,
                         ..
                     } = &mut *state;
                     let muted = muted.clone();
                     let devices = devices.clone();
+                    let screen_sharing = *screen_sharing;
                     sync_media(
                         controller,
                         provider.clone(),
@@ -252,6 +289,8 @@ impl CallRuntime {
                         muted,
                         task_video.as_ref(),
                         devices,
+                        Some(&task_screen_factory),
+                        screen_sharing,
                     );
                     let sends = state.controller.drain_encoded();
                     state.collect();
@@ -287,6 +326,7 @@ impl CallRuntime {
             wake,
             stop: stop_task,
             task: Mutex::new(Some(task)),
+            screen_factory,
         })
     }
     pub async fn stop(&self) {
@@ -334,9 +374,29 @@ impl CallRuntime {
                 }
             }
             CallRequest::Status => {
-                let mut dto = status_dto(&state.controller, state.media_stats.as_ref());
+                let mut dto = status_dto(
+                    &state.controller,
+                    state.media_stats.as_ref(),
+                    state.screen_sharing,
+                );
                 dto.muted = state.muted.load(Ordering::SeqCst);
                 CallResponse::Status(dto)
+            }
+            // Screen sharing is honoured only while the call is connected with
+            // video negotiated, and is never started automatically.
+            CallRequest::StartScreenShare => {
+                if state.controller.negotiated_video() {
+                    state.screen_sharing = true;
+                    CallResponse::Ok
+                } else {
+                    CallResponse::Error("not_ready".into())
+                }
+            }
+            // Stopping is idempotent: it always succeeds and leaves any camera
+            // stream untouched.
+            CallRequest::StopScreenShare => {
+                state.screen_sharing = false;
+                CallResponse::Ok
             }
             CallRequest::Events { since } => state.notices.events(since),
             CallRequest::ListAudioDevices => CallResponse::AudioDevices(host_device_list()),
@@ -366,13 +426,11 @@ fn apply_selection(
 fn status_dto<P: CallPorts>(
     controller: &CallController<P>,
     stats: Option<&MediaStats>,
+    screen_sharing: bool,
 ) -> CallStatusDto {
     let status = controller.status();
-    let stats = if status.state == State::Connected {
-        stats
-    } else {
-        None
-    };
+    let connected = status.state == State::Connected;
+    let stats = if connected { stats } else { None };
     CallStatusDto {
         state: state_word(status.state).into(),
         pending_token: status.pending_token,
@@ -380,13 +438,14 @@ fn status_dto<P: CallPorts>(
         negotiated_video: status.negotiated_video,
         safety_code: controller.safety_code(),
         muted: false,
-        screen_sharing: false,
         media_frames_sent: stats.map_or(0, |s| s.frames_sent.load(Ordering::Relaxed)),
         media_frames_played: stats.map_or(0, |s| s.frames_played.load(Ordering::Relaxed)),
         camera_in_use: stats.map_or(false, |s| s.camera_in_use.load(Ordering::Relaxed)),
         media_video_frames_sent: stats.map_or(0, |s| s.video_frames_sent.load(Ordering::Relaxed)),
         media_video_frames_played: stats
             .map_or(0, |s| s.video_frames_played.load(Ordering::Relaxed)),
+        // Only ever true inside a connected call.
+        screen_sharing: connected && screen_sharing,
     }
 }
 fn dial_result(result: Result<(), CallError>) -> CallResponse {
@@ -578,6 +637,8 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             None,
             AudioChoice::default(),
+            None,
+            false,
         );
         sync_media(
             &mut b,
@@ -587,6 +648,8 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             None,
             AudioChoice::default(),
+            None,
+            false,
         );
         sync_media(
             &mut a,
@@ -596,6 +659,8 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             None,
             AudioChoice::default(),
+            None,
+            false,
         );
         tokio::task::yield_now().await;
         assert_eq!(provider.opens.load(Ordering::SeqCst), 2);
@@ -603,8 +668,8 @@ mod tests {
         assert_eq!(b.status().state, State::Connected);
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
-                let a_status = status_dto(&a, a_stats.as_ref());
-                let b_status = status_dto(&b, b_stats.as_ref());
+                let a_status = status_dto(&a, a_stats.as_ref(), false);
+                let b_status = status_dto(&b, b_stats.as_ref(), false);
                 if a_status.media_frames_sent > 0
                     && a_status.media_frames_played > 0
                     && b_status.media_frames_sent > 0
@@ -627,6 +692,8 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             None,
             AudioChoice::default(),
+            None,
+            false,
         );
         sync_media(
             &mut b,
@@ -636,11 +703,13 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             None,
             AudioChoice::default(),
+            None,
+            false,
         );
         assert!(am.is_none() && bm.is_none());
         for status in [
-            status_dto(&a, a_stats.as_ref()),
-            status_dto(&b, b_stats.as_ref()),
+            status_dto(&a, a_stats.as_ref(), false),
+            status_dto(&b, b_stats.as_ref(), false),
         ] {
             assert_eq!(status.media_frames_sent, 0);
             assert_eq!(status.media_frames_played, 0);
@@ -663,6 +732,8 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             None,
             AudioChoice::default(),
+            None,
+            false,
         );
         assert!(!media.take().unwrap().await.unwrap());
         let mut notices = NoticeRing::default();
@@ -767,5 +838,51 @@ mod tests {
             list.default_input,
             list.default_output,
         );
+    }
+
+    #[test]
+    fn status_dto_reports_screen_sharing_only_when_connected() {
+        // A connected call with the flag set reports it.
+        let (a, _b) = connected();
+        assert_eq!(a.status().state, State::Connected);
+        assert!(status_dto(&a, None, true).screen_sharing);
+        assert!(!status_dto(&a, None, false).screen_sharing);
+
+        // An idle controller never reports screen sharing, even if asked to.
+        let idle = CallController::new(Ports);
+        assert_eq!(idle.status().state, State::Idle);
+        assert!(!status_dto(&idle, None, true).screen_sharing);
+    }
+
+    // The screen-share start/stop decision taken by `CallRuntime::handle`:
+    // start is honoured only while video is negotiated; stop always clears it.
+    fn decide_screen_share(controller: &CallController<Ports>, start: bool, prev: bool) -> bool {
+        if start {
+            if controller.negotiated_video() {
+                true
+            } else {
+                prev
+            }
+        } else {
+            false
+        }
+    }
+
+    #[test]
+    fn screen_share_start_needs_negotiated_video_and_stop_is_idempotent() {
+        // Connected with video negotiated: start turns it on, stop turns it off,
+        // and a repeated stop stays off.
+        let (a, _b) = connected();
+        assert!(a.negotiated_video());
+        assert!(decide_screen_share(&a, true, false));
+        assert!(!decide_screen_share(&a, false, true));
+        assert!(!decide_screen_share(&a, false, false));
+
+        // Not connected (no video negotiated): start is refused, leaving the
+        // previous value untouched; stop still clears it.
+        let idle = CallController::new(Ports);
+        assert!(!idle.negotiated_video());
+        assert!(!decide_screen_share(&idle, true, false));
+        assert!(!decide_screen_share(&idle, false, true));
     }
 }

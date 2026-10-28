@@ -89,6 +89,11 @@ pub enum CallRequest {
         #[serde(default)]
         output: Option<String>,
     },
+    /// Begin sharing the screen as a second video-like stream. Honoured only
+    /// while the call is connected and video was negotiated; never automatic.
+    StartScreenShare,
+    /// Stop sharing the screen. The camera stream, if any, is unaffected.
+    StopScreenShare,
 }
 
 /// The audio devices the host reports, carried in an IPC response. Plain names
@@ -712,6 +717,8 @@ mod tests {
                 input: Some("Mic A".into()),
                 output: Some("Speaker B".into()),
             },
+            CallRequest::StartScreenShare,
+            CallRequest::StopScreenShare,
         ];
         for request in requests {
             let value = serde_json::to_value(ChatRequest::Call(request)).unwrap();
@@ -790,6 +797,8 @@ mod tests {
         // New video counters also default when an old client omits them.
         assert_eq!(old_status.media_video_frames_sent, 0);
         assert_eq!(old_status.media_video_frames_played, 0);
+        // The screen-sharing flag also defaults to false for an old client.
+        assert!(!old_status.screen_sharing);
         let old: ChatRequest = serde_json::from_str(r#"{"Conversations":{}}"#).unwrap();
         assert!(matches!(old, ChatRequest::Conversations {}));
     }
