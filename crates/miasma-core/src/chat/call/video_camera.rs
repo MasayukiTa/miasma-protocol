@@ -3,7 +3,7 @@ use super::video::{RawPicture, VideoSource};
 use nokhwa::{
     buffer::Buffer,
     pixel_format::RgbFormat,
-    types::{CameraIndex, RequestedFormat, RequestedFormatType},
+    utils::{CameraIndex, RequestedFormat, RequestedFormatType},
     Camera,
 };
 use std::sync::{
