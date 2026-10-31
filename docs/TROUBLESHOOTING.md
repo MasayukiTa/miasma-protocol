@@ -112,13 +112,15 @@ Both settings persist across restarts.
 
 ## Calls
 
-**No microphone or camera found**: Check that the device is connected and available to your system. On Windows, check the microphone or camera settings and select an available device. Camera capture works on Windows only; on macOS the camera button reports that no camera can be used and the call continues without video. Screen sharing works on Windows and macOS. On other platforms a call stays voice-only and uses test devices.
+**No microphone or camera found**: Check that the device is connected and available to your system. On Windows, check the microphone or camera settings and select an available device. Camera capture works on Windows and macOS. On macOS, the first time a call uses the camera the system asks for camera access; allow it so the camera can be used. Screen sharing works on Windows and macOS. On other platforms a call stays voice-only and uses test devices.
 
 **Choosing a microphone or speaker**: During a call, open the audio-device menu in the call view and pick the microphone and speaker you want. Leave an entry on the default device to use the one your system already uses.
 
-**Camera and screen-share buttons**: During a connected call with video, use the camera button to turn your camera on or off, and the screen button to start or stop sharing your screen. The camera is available on Windows only; on macOS the camera button reports that no camera can be used and the call continues without video, while screen sharing works on both Windows and macOS. If the camera cannot be turned on, the call view shows a short notice and the call continues without it.
+**Camera and screen-share buttons**: During a connected call with video, use the camera button to turn your camera on or off, and the screen button to start or stop sharing your screen. The camera is available on Windows and macOS, and screen sharing works on both as well. If the camera cannot be turned on, the call view shows a short notice and the call continues without it.
 
 **Permission denied on Windows**: Open Windows Settings > Privacy & security > Microphone or Camera. Allow access to the device and allow desktop apps to use it, then try again.
+
+**Permission denied on macOS**: Open System Settings > Privacy & Security > Camera, allow access for Miasma, then try again. If the camera was refused earlier, the call continues without video until access is allowed.
 
 **Turn calls off**: In `config.toml`, set `enabled = false` under `[call]`:
 

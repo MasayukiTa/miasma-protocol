@@ -72,7 +72,62 @@ impl CameraSource {
             .spawn(move || {
                 #[cfg(target_os = "macos")]
                 {
-                    let _ = tx.send(Err(CameraError::Backend));
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        // AVFoundation serves frames only after the user has granted
+                        // camera access. When the status is not yet Authorized, ask
+                        // for it and wait for the system prompt to be answered; the
+                        // completion callback runs on an arbitrary dispatch queue, so
+                        // a channel carries the decision back to this thread.
+                        if !nokhwa::nokhwa_check() {
+                            let (ptx, prx) = mpsc::sync_channel(1);
+                            nokhwa::nokhwa_initialize(move |granted| {
+                                let _ = ptx.send(granted);
+                            });
+                            let granted = prx.recv().unwrap_or(false);
+                            if !granted {
+                                return Err(CameraError::PermissionDenied);
+                            }
+                        }
+                        let devices = nokhwa::query(nokhwa::utils::ApiBackend::AVFoundation)
+                            .map_err(classify_error)?;
+                        if devices.is_empty() {
+                            return Err(CameraError::NoCamera);
+                        }
+                        let format = RequestedFormat::new::<RgbFormat>(
+                            RequestedFormatType::AbsoluteHighestFrameRate,
+                        );
+                        let mut camera =
+                            Camera::new(CameraIndex::Index(0), format).map_err(classify_error)?;
+                        camera.open_stream().map_err(classify_error)?;
+                        open.store(true, Ordering::Release);
+                        if tx.send(Ok(())).is_err() {
+                            return Ok(());
+                        }
+                        while !stop.load(Ordering::Acquire) {
+                            match camera.frame() {
+                                Ok(frame) => {
+                                    if let Ok(mut guard) = slot.try_lock() {
+                                        *guard = Some(frame);
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        Ok(())
+                    }));
+                    open.store(false, Ordering::Release);
+                    if let Ok(mut guard) = slot.try_lock() {
+                        *guard = None;
+                    }
+                    match result {
+                        Ok(Err(e)) => {
+                            let _ = tx.send(Err(e));
+                        }
+                        Err(_) => {
+                            let _ = tx.send(Err(CameraError::Backend));
+                        }
+                        _ => {}
+                    }
                     return;
                 }
                 #[cfg(windows)]
@@ -136,7 +191,7 @@ impl CameraSource {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn classify_error(error: nokhwa::error::NokhwaError) -> CameraError {
     // Nokhwa exposes backend errors as strings, so only explicit access failures
     // can be classified; all other failures remain Backend.

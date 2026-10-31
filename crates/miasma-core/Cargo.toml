@@ -78,7 +78,6 @@ rand_core_pqc = { package = "rand_core", version = "0.10", default-features = fa
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"], optional = true }
 zune-jpeg = { version = "0.5.15", default-features = false, optional = true }
-nokhwa = { version = "0.10", default-features = false, features = ["input-msmf", "decoding"], optional = true }
 # Real call audio (see src/chat/call/audio_device.rs and codec.rs). Both are
 # optional, desktop-only, and gated by the `call-audio` feature.
 # cpal: capture and playback on Windows and macOS through the
@@ -100,12 +99,19 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_Foundation", "Win32_Storage_Packaging_Appx", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_Threading", "Win32_System_Power"] }
+# Camera capture through Media Foundation (src/chat/call/video_camera.rs).
+nokhwa = { version = "0.10", default-features = false, features = ["input-msmf", "decoding"], optional = true }
 
 # Keep-awake while work is in flight (src/power.rs). Both crates are already in
 # Cargo.lock through the desktop GUI stack, so this adds no new crate.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
+# Camera capture through AVFoundation (src/chat/call/video_camera.rs). The
+# backend serves frames only after camera access is granted, so the capture
+# thread requests it before opening the stream; the app bundle carries the
+# matching NSCameraUsageDescription key.
+nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation", "decoding"], optional = true }
 
 [features]
 default = ["iroh", "call-audio", "call-video", "call-camera", "call-screen"]
