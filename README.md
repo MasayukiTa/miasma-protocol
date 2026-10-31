@@ -92,9 +92,9 @@ A browser client lives in `web/`. With the desktop app or the CLI running, `mias
 
 ## Calls
 
-Contacts can make voice calls. The camera works on Windows only, while screen sharing works on both Windows and macOS. Calls ring only for contacts and are on by default. To turn them off, put `enabled = false` under `[call]` in `config.toml`.
+Contacts can make voice calls. The camera and screen sharing both work on Windows and macOS. Calls ring only for contacts and are on by default. To turn them off, put `enabled = false` under `[call]` in `config.toml`.
 
-During a call you can turn your camera on or off and start or stop sharing your screen with buttons in the call view, and you can pick which microphone and speaker the call uses from the audio-device menu. The camera works on Windows only; on macOS the camera button reports that no camera can be used and the call continues without video. Screen sharing works on both Windows and macOS. On other platforms a call stays voice-only with test devices.
+During a call you can turn your camera on or off and start or stop sharing your screen with buttons in the call view, and you can pick which microphone and speaker the call uses from the audio-device menu. The camera works on Windows and macOS; on macOS the system asks for camera access the first time and the call continues without video if it is refused. Screen sharing works on both Windows and macOS. On other platforms a call stays voice-only with test devices.
 
 Calls are end-to-end protected with keys exchanged inside the chat channel. During a call, compare the 20-digit safety code by reading it to each other; a mismatch may indicate an attacker. An indicator stays visible while the microphone, camera or screen is in use.
 
