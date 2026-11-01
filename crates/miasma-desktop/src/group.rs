@@ -1364,7 +1364,10 @@ mod tests {
         );
         assert!(can_share_history(&g, &g.members[1]), "joined member");
         assert!(!can_share_history(&g, &g.members[0]), "not oneself");
-        assert!(!can_share_history(&g, &g.members[2]), "invited has nothing yet");
+        assert!(
+            !can_share_history(&g, &g.members[2]),
+            "invited has nothing yet"
+        );
         assert!(
             can_share_history(&g, &g.members[3]),
             "older service sends no status: read as joined"
@@ -1373,9 +1376,15 @@ mod tests {
         let out = detail(
             "left",
             false,
-            vec![member("me", true, false, false), with_status("a", Some("joined"))],
+            vec![
+                member("me", true, false, false),
+                with_status("a", Some("joined")),
+            ],
         );
-        assert!(!can_share_history(&out, &out.members[1]), "not once I am out");
+        assert!(
+            !can_share_history(&out, &out.members[1]),
+            "not once I am out"
+        );
     }
 
     #[test]
