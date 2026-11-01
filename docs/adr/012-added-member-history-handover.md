@@ -1,6 +1,6 @@
 # ADR-012: History hand-over to a newly added member or device
 
-## Status: Accepted (implemented in the chat/group and desktop layers; the custody transport for an offline target is a separate job, left as the named seam `GroupCore::custody_offers_for`)
+## Status: Accepted (implemented in the chat/group and desktop layers; the custody transport for an offline target is now wired in the group service, so a hand-over offer to an unreachable member is deposited with trusted holders and collected through the group path)
 
 ## Date: 2026-11-01
 
@@ -323,7 +323,7 @@ because the holder neither knows nor cares what kind a sealed envelope contains.
 4. **Per-epoch rate marker in `GroupState`.** Add the marker, bump
    `STATE_VERSION` to 3 with a v1/v2 read path. Test: round-trip, and that a
    pre-v3 document still decodes (mirror `state.rs:573-584`).
-5. **Custody carriage of offers.** Wire `handover` to `MailboxClient::deposit`
+5. **Custody carriage of offers. (done)** Wire `handover` to `MailboxClient::deposit`
    when the direct send reports the target offline, and apply via `collect`.
    Test: a simulation like `mailbox/sim_tests.rs:174-222` but the deposited item
    is a `HistOffer`; N offline, then online, applies it once; holder drops it.
@@ -363,9 +363,12 @@ decisions.
    holds; if `sweep_retention` has removed old messages, they are simply not
    offered. This is accepted.
 
-The custody transport for an offline target (step 5) is a separate job. This
-change leaves it as the named seam `GroupCore::custody_offers_for`, which direct
-pairwise delivery does not depend on.
+The custody transport for an offline target (step 5) is now implemented. When a
+direct send reports the member unreachable, the group service deposits each
+sealed offer with trusted holders and the member collects and applies it through
+the group path on reconnect; direct pairwise delivery is unchanged. The named
+seam `GroupCore::custody_offers_for` stays as the in-engine hook for the queued
+offers and is not on this offline path.
 
 ---
 

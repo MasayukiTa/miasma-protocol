@@ -52,6 +52,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Keep the CI core test list in step with the test files: every test
+      # named with --test must have a matching crates/*/tests/<name>.rs file
+      # (ADR-012). Standard-library Python only, no network.
+      - name: CI test manifest is consistent
+        run: python scripts/check_ci_test_manifest.py
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -67,6 +73,21 @@ jobs:
       # no feature flags).
       - name: Test history hand-over (ADR-012)
         run: cargo test -p miasma-core --locked --test group_handover_test
+
+      # The custody carry of a hand-over offer (ADR-012 step 5) is named here
+      # too: it checks the group offer keeps to its own tag and is only ever
+      # collected through the group path. Platform-neutral (no network, no
+      # feature flags).
+      - name: Test history hand-over over custody (ADR-012 step 5)
+        run: cargo test -p miasma-core --locked --test group_handover_custody_test
+
+      # The exactly-once carriage and the custody-off behaviour of a
+      # hand-over offer (ADR-012 step 5): an offer left while the member
+      # is offline is applied once on reconnect, and with custody off
+      # nothing is deposited. Platform-neutral (no network, no feature
+      # flags).
+      - name: Test hand-over custody carriage (ADR-012 step 5)
+        run: cargo test -p miasma-core --locked --test group_handover_custody_carry_test
 
   test-core-pqc:
     name: Core Tests, opt-in hybrid feature (Ubuntu)

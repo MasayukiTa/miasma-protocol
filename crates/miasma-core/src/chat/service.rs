@@ -1069,6 +1069,11 @@ impl ChatService {
         if rep.taken > 0 {
             debug!("collected {} message(s) from holders", rep.taken);
         }
+        // Group hand-over offers wait under their own tag and apply through the
+        // group path, so collect them in the same round when group chat is on.
+        if let Some(g) = self.groups.get() {
+            g.collect_hist_offers();
+        }
     }
 
     // ── Receiving ────────────────────────────────────────────────────────────
