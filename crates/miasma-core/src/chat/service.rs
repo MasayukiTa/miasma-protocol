@@ -45,6 +45,7 @@ use super::{
     sync,
 };
 use crate::{
+    chat::mailbox::holder::CustodyStore as _,
     config::{NodeConfig, PqcMode},
     push::{
         contact::fingerprint,
@@ -1172,7 +1173,8 @@ impl ChatService {
                 }
                 continue;
             }
-            let mut rx = AsyncReadExt::chain(&[first][..], rx);
+            let first_byte = [first];
+            let mut rx = AsyncReadExt::chain(&first_byte[..], rx);
             let frame =
                 tokio::time::timeout(self.settings.read_timeout, proto::read_frame(&mut rx)).await;
             let wire = match frame {
