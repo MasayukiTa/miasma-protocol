@@ -111,7 +111,53 @@ impl<T: MailboxTransport> MailboxClient<T> {
         wire: &[u8],
         now_ms: u64,
     ) -> DepositReport {
-        let tag = RecipientTag::for_recipient(recipient);
+        self.deposit_tagged(
+            RecipientTag::for_recipient(recipient),
+            holders,
+            sender,
+            recipient,
+            item,
+            wire,
+            now_ms,
+        )
+    }
+
+    /// As [`Self::deposit`], but for a group hand-over item: the copy is kept
+    /// under the group tag of `recipient` so the recipient collects and
+    /// applies it through the group path, never as a private message
+    /// (ADR-012 step 5).
+    #[allow(clippy::too_many_arguments)]
+    pub fn deposit_group(
+        &self,
+        holders: &[[u8; 32]],
+        sender: &[u8; 32],
+        recipient: &[u8; 32],
+        item: ItemId,
+        wire: &[u8],
+        now_ms: u64,
+    ) -> DepositReport {
+        self.deposit_tagged(
+            RecipientTag::for_group_recipient(recipient),
+            holders,
+            sender,
+            recipient,
+            item,
+            wire,
+            now_ms,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn deposit_tagged(
+        &self,
+        tag: RecipientTag,
+        holders: &[[u8; 32]],
+        sender: &[u8; 32],
+        recipient: &[u8; 32],
+        item: ItemId,
+        wire: &[u8],
+        now_ms: u64,
+    ) -> DepositReport {
         let mut blob = Vec::with_capacity(32 + wire.len());
         blob.extend_from_slice(sender);
         blob.extend_from_slice(wire);
@@ -141,9 +187,38 @@ impl<T: MailboxTransport> MailboxClient<T> {
         holders: &[[u8; 32]],
         me: &[u8; 32],
         now_ms: u64,
+        take: impl FnMut(&[u8; 32], &[u8]) -> bool,
+    ) -> CollectReport {
+        self.collect_tagged(RecipientTag::for_recipient(me), holders, me, now_ms, take)
+    }
+
+    /// As [`Self::collect`], but for group hand-over items kept under the
+    /// group tag of `me`. Each item is applied through the group path by
+    /// `take` (ADR-012 step 5).
+    pub fn collect_group(
+        &self,
+        holders: &[[u8; 32]],
+        me: &[u8; 32],
+        now_ms: u64,
+        take: impl FnMut(&[u8; 32], &[u8]) -> bool,
+    ) -> CollectReport {
+        self.collect_tagged(
+            RecipientTag::for_group_recipient(me),
+            holders,
+            me,
+            now_ms,
+            take,
+        )
+    }
+
+    fn collect_tagged(
+        &self,
+        tag: RecipientTag,
+        holders: &[[u8; 32]],
+        me: &[u8; 32],
+        now_ms: u64,
         mut take: impl FnMut(&[u8; 32], &[u8]) -> bool,
     ) -> CollectReport {
-        let tag = RecipientTag::for_recipient(me);
         let mut rep = CollectReport::default();
         let mut seen: HashSet<ItemId> = HashSet::new();
         let mut taken_ids: HashSet<ItemId> = HashSet::new();

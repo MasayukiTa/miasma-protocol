@@ -194,6 +194,87 @@ impl GroupService {
         tokio::spawn(async move { me.worker(peer, wake).await });
     }
 
+    /// Leave a sealed hand-over offer for an offline member with trusted
+    /// holders, so the member can collect it later through the group path.
+    /// Returns true when at least one holder took it. Does nothing (returns
+    /// false) when custody is off, nothing seals, or no holder can be asked;
+    /// in that case the offer stays queued and is retried as before.
+    fn deposit_hist_offer(&self, peer: &[u8; 32], plain: &[u8]) -> bool {
+        if !self.settings.custody_enabled {
+            return false;
+        }
+        let Ok((wire, _)) = self.core.chat().seal_for(peer, plain) else {
+            return false;
+        };
+        let Some(item) = crate::chat::mailbox::ids::item_id_of(&wire) else {
+            return false;
+        };
+        let holders: Vec<[u8; 32]> = self
+            .contacts
+            .list()
+            .into_iter()
+            .filter_map(|c| c.endpoint_bytes())
+            .filter(|id| id != peer)
+            .collect();
+        if holders.is_empty() {
+            return false;
+        }
+        let client = crate::chat::mailbox::client::MailboxClient::new(
+            crate::chat::mailbox::transport::ChatMailboxTransport::new(self.node.clone()),
+            self.settings.custody_copies,
+        );
+        let me = self.core.own_id();
+        let rep = client.deposit_group(&holders, &me, peer, item, &wire, now_ms());
+        if !rep.held_by.is_empty() {
+            debug!(
+                peer = %fingerprint(peer),
+                "left a hand-over offer with {} holder(s)", rep.held_by.len()
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Ask trusted holders for hand-over offers waiting for us and apply each
+    /// through the group path. A no-op when custody is off or no holder can be
+    /// asked. Driven by the chat service's collection cadence.
+    pub fn collect_hist_offers(self: &Arc<Self>) {
+        if !self.settings.custody_enabled {
+            return;
+        }
+        let holders: Vec<[u8; 32]> = self
+            .contacts
+            .list()
+            .into_iter()
+            .filter_map(|c| c.endpoint_bytes())
+            .collect();
+        if holders.is_empty() {
+            return;
+        }
+        let client = crate::chat::mailbox::client::MailboxClient::new(
+            crate::chat::mailbox::transport::ChatMailboxTransport::new(self.node.clone()),
+            self.settings.custody_copies,
+        );
+        let me = self.core.own_id();
+        let core = self.core.clone();
+        let contacts = self.contacts.clone();
+        let mut kicks: Vec<[u8; 32]> = Vec::new();
+        let rep = client.collect_group(&holders, &me, now_ms(), |sender, wire| {
+            let is_trusted =
+                |id: &[u8; 32]| contacts.by_endpoint(id).is_some_and(|c| c.allow_receive);
+            let got = core.accept(sender, wire, now_ms(), &is_trusted);
+            kicks.extend(got.kick);
+            got.status.is_delivered()
+        });
+        for p in kicks {
+            self.kick(&p);
+        }
+        if rep.taken > 0 {
+            debug!("collected {} hand-over offer(s) from holders", rep.taken);
+        }
+    }
+
     async fn worker(self: Arc<Self>, peer: [u8; 32], wake: Arc<Notify>) {
         let mut stop = self.shutdown.subscribe();
         let mut conn: Option<Connection> = None;
@@ -252,6 +333,19 @@ impl GroupService {
                     //   out yet, so nothing is reported until it settles.
                     let transient = matches!(why, "peer_busy" | "pqc_pending");
                     self.core.note_delivery(&peer, (!transient).then_some(why));
+                    // A hand-over offer to a member we cannot reach can wait
+                    // with trusted holders instead, exactly as an offline
+                    // direct message does. On success the offer leaves the
+                    // queue; the member applies it on collection through the
+                    // group path. With custody off this does nothing and the
+                    // offer stays queued and is retried as before.
+                    if !transient
+                        && matches!(out.work, Work::Hist { .. })
+                        && self.deposit_hist_offer(&peer, &out.plain)
+                    {
+                        self.core.delivered(&peer, &out.work);
+                        continue;
+                    }
                     if self.wait(&wake, &mut stop, failures).await {
                         failures = 0;
                     }
