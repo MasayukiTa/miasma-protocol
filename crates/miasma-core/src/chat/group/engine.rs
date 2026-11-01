@@ -133,12 +133,23 @@ pub struct GroupEvent {
 /// One thing to put on the wire for a member.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Work {
-    Text { gid: [u8; 16], id: [u8; 16] },
-    Descs { gid: [u8; 16] },
-    Sync { gid: [u8; 16] },
+    Text {
+        gid: [u8; 16],
+        id: [u8; 16],
+    },
+    Descs {
+        gid: [u8; 16],
+    },
+    Sync {
+        gid: [u8; 16],
+    },
     /// A past message handed to a newly added member (ADR-012). `seq` names the
     /// queued offer so a delivery result can remove exactly that one.
-    Hist { gid: [u8; 16], to: [u8; 32], seq: u64 },
+    Hist {
+        gid: [u8; 16],
+        to: [u8; 32],
+        seq: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -1008,6 +1019,7 @@ impl GroupCore {
             return;
         };
         match work {
+            Work::Hist { .. } => unreachable!("handled above"),
             Work::Descs { .. } => st
                 .ctrl
                 .retain(|c| !(&c.to == peer && c.kind == CtrlKind::Descs)),
