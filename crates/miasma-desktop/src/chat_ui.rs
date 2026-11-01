@@ -1406,22 +1406,47 @@ impl ChatUi {
         // A newer frame is uploaded (replacing the old one); no frame at all (audio-only call, or
         // the call ended) frees the texture, so stale call content never lingers.
         self.sync_call_video_texture(ui.ctx());
+        // The banner / in-call panel float over the window as an overlay instead of taking real
+        // height in the top bar. Drawn in the flow, they pushed every tab below them down when a
+        // call began and let them spring back when it ended; as an Area they never move the
+        // layout beneath. They are only shown when there is actually a call to show.
         let mut pressed: Option<CallAction> = None;
-        if let Some(token) = self.call.pending_token() {
-            if let Some(a) = crate::call_ui::incoming_banner(ui, cc, cc.caller_unknown, token) {
-                pressed = Some(a);
-            }
-        }
-        if self.call.exists() && self.call.pending_token().is_none() {
-            let video = self
-                .call_video_texture
-                .as_ref()
-                .map(|t| (t, self.call_video_size));
-            if let Some(a) =
-                crate::call_ui::in_call_panel(ui, cc, &self.call, self.call.status(), now, video)
-            {
-                pressed = Some(a);
-            }
+        let show_banner = self.call.pending_token().is_some();
+        let show_panel = self.call.exists() && self.call.pending_token().is_none();
+        if show_banner || show_panel {
+            let width = ui.available_width().min(560.0).max(280.0);
+            egui::Area::new(ui.id().with("call_overlay"))
+                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, kit::SP_2))
+                .order(egui::Order::Foreground)
+                .show(ui.ctx(), |ui| {
+                    ui.set_max_width(width);
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_max_width(width);
+                        if let Some(token) = self.call.pending_token() {
+                            if let Some(a) =
+                                crate::call_ui::incoming_banner(ui, cc, cc.caller_unknown, token)
+                            {
+                                pressed = Some(a);
+                            }
+                        }
+                        if show_panel {
+                            let video = self
+                                .call_video_texture
+                                .as_ref()
+                                .map(|t| (t, self.call_video_size));
+                            if let Some(a) = crate::call_ui::in_call_panel(
+                                ui,
+                                cc,
+                                &self.call,
+                                self.call.status(),
+                                now,
+                                video,
+                            ) {
+                                pressed = Some(a);
+                            }
+                        }
+                    });
+                });
         }
         match pressed {
             Some(CallAction::Dial) => {
@@ -1844,6 +1869,23 @@ impl ChatUi {
             }
         };
         let menu_ref: &mut dyn FnMut(&mut egui::Ui) = &mut menu;
+        // The Call button rides in the header, just left of the "...", instead of a loose row of
+        // its own. The press is only recorded here (so the closure borrows nothing of `self`);
+        // it is turned into the dial request after the header is drawn.
+        #[cfg(feature = "pqc")]
+        let mut dialed = false;
+        #[cfg(feature = "pqc")]
+        let cc = crate::locale::call_strings(self.locale);
+        #[cfg(feature = "pqc")]
+        let mut call_extra = |ui: &mut egui::Ui| {
+            if crate::call_ui::call_button(ui, cc) {
+                dialed = true;
+            }
+        };
+        #[cfg(feature = "pqc")]
+        let extra: Option<&mut dyn FnMut(&mut egui::Ui)> = Some(&mut call_extra);
+        #[cfg(not(feature = "pqc"))]
+        let extra: Option<&mut dyn FnMut(&mut egui::Ui)> = None;
         // Beside the list (a wide window) there is no way back to the list to draw.
         let back_name = if self.wide { None } else { Some(c.a11y_back) };
         let back = kit::conversation_header_ex(
@@ -1856,9 +1898,16 @@ impl ChatUi {
                 key: "chat",
                 open: std::mem::take(&mut self.open_menu_once),
                 menu: menu_ref,
+                extra,
             },
         )
         .back;
+        #[cfg(feature = "pqc")]
+        if dialed {
+            self.out
+                .push_back(ChatRequest::Call(crate::call::dial(&o.endpoint_id)));
+            self.call.on_dial();
+        }
         if let Some(a) = chosen {
             self.apply_action(a, o, &name, action);
         }
@@ -1869,18 +1918,6 @@ impl ChatUi {
         if back {
             self.close_conversation();
             return;
-        }
-
-        // The Call button for this conversation: a press dials the open contact. The call then
-        // shows in the screens drawn above (banner for the other side, panel for ours).
-        #[cfg(feature = "pqc")]
-        {
-            let cc = crate::locale::call_strings(self.locale);
-            if crate::call_ui::call_button(ui, cc) {
-                self.out
-                    .push_back(ChatRequest::Call(crate::call::dial(&o.endpoint_id)));
-                self.call.on_dial();
-            }
         }
 
         self.thread_view(ui, c, o);
@@ -4105,6 +4142,40 @@ mod tests {
             }
         }
 
+        // Draw one frame the way app.rs does: the chat screen, then the call screens on the same
+        // ui just below it. The call screens are an overlay (an Area), so they must not take any
+        // height from this flow.
+        fn frame_with_call_screens(&mut self) {
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    vec2(self.width, 900.0),
+                )),
+                time: Some(self.clock),
+                predicted_dt: 1.0 / 60.0,
+                ..Default::default()
+            };
+            raw.viewports
+                .entry(egui::ViewportId::ROOT)
+                .or_default()
+                .native_pixels_per_point = Some(1.0);
+            self.clock += 1.0 / 60.0;
+            let (chat, list) = (&mut self.chat, &self.contacts);
+            let out = self.ctx.run(raw, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    kit::column_max(ui, TWO_PANE_MAX, |ui| {
+                        let _ = chat.show(ui, chat_strings(Locale::En), true, list);
+                        chat.call_screens(ui);
+                    });
+                });
+            });
+            self.last = out
+                .platform_output
+                .accesskit_update
+                .expect("an accessibility update")
+                .nodes;
+        }
+
         fn button(&self, prefix: &str) -> (accesskit::NodeId, accesskit::Rect) {
             let found = self.last.iter().find(|(_, n)| {
                 n.role() == accesskit::Role::Button
@@ -4289,6 +4360,155 @@ mod tests {
             "the two panes differ: {} and {}",
             d.y1,
             g.y1
+        );
+    }
+
+    // ── The call button in the header, and the composer that must not spill ───────────────────
+
+    /// Defect 2: the call button now rides in the conversation header (just left of the "..."),
+    /// not in a loose row of its own, so it is reachable as a button from the open conversation.
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn the_call_button_is_reachable_from_the_open_conversation_header() {
+        let cc = crate::locale::call_strings(Locale::En);
+        for width in [700.0, 1400.0] {
+            let rig = ChatRig::new("thread", width);
+            // The call button is drawn and exposed as a button to assistive tech.
+            let (_, call) = rig.button(cc.call);
+            // It sits on the header row, above the message thread and the composer below it.
+            let composer = bounds_of(&rig, chat_strings(Locale::En).a11y_composer);
+            assert!(
+                call.y1 <= composer.y0,
+                "{width} px: call button (ends {}) is not above the composer (starts {})",
+                call.y1,
+                composer.y0
+            );
+        }
+    }
+
+    /// Defect 2: pressing that header call button queues exactly the dial request the old loose
+    /// row did — a Call(dial) for the open contact's endpoint — and nothing else call-related.
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn pressing_the_header_call_button_dials_the_open_contact() {
+        const A_EP: &str = "d9a3f1c07b2e4a58b6c1e0f39a7d5b24c8e61f0a9b3d7c2e5f4a8b1c6d0e3f72";
+        let cc = crate::locale::call_strings(Locale::En);
+        let mut rig = ChatRig::new("thread", 1400.0);
+        rig.press(cc.call, Press::Pointer);
+        // ChatRequest has no PartialEq, so compare the queued call requests by their debug form
+        // against the very request the old loose-row button produced: dial(open endpoint).
+        let calls: Vec<String> = requests(&mut rig.chat)
+            .into_iter()
+            .filter_map(|r| match r {
+                ChatRequest::Call(c) => Some(format!("{c:?}")),
+                _ => None,
+            })
+            .collect();
+        let want = format!("{:?}", crate::call::dial(A_EP));
+        assert!(
+            calls.iter().any(|c| c == &want),
+            "the press did not queue the dial for the open contact: {calls:?}"
+        );
+    }
+
+    /// Defect 1: at a narrow default window the composer row (its send button) stays inside the
+    /// pane instead of hanging past the right edge and being clipped.
+    #[test]
+    fn the_composer_send_button_stays_inside_a_narrow_pane() {
+        let cs = chat_strings(Locale::En);
+        let width = 700.0;
+        let rig = ChatRig::new("thread", width);
+        let send = rig.button(cs.send).1;
+        // The send button's right edge is within the window: nothing is clipped off the side.
+        assert!(
+            send.x1 <= width as f64 + 0.5,
+            "send button right edge {} spills past the {width} px pane",
+            send.x1
+        );
+        // And it lines up with the composer input it sits beside, not floating in another row.
+        let input = bounds_of(&rig, cs.a11y_composer);
+        assert!(
+            send.x1 <= input.x1 + input.width() + 0.5,
+            "send button {} is unexpectedly far right of the input {}",
+            send.x1,
+            input.x1
+        );
+    }
+
+    /// Defect 3: a call must never move the rest of the layout. Drawn as an overlay (an Area),
+    /// the incoming banner and the in-call panel take no height from the flow, so the content
+    /// below (here the conversation composer) keeps the same y position before, during and after
+    /// a call. Asserts on the composer's rect, not on pixels.
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn a_call_does_not_move_the_content_below_before_during_or_after() {
+        use miasma_core::chat::ipc::CallStatusDto;
+        let cs = chat_strings(Locale::En);
+        let mut rig = ChatRig::new("thread", 1400.0);
+        let composer_y0 = |rig: &ChatRig| bounds_of(rig, cs.a11y_composer).y0;
+
+        // Before: no call. Settle, then record where the composer sits.
+        rig.frame_with_call_screens();
+        rig.frame_with_call_screens();
+        let before = composer_y0(&rig);
+
+        // During (ringing): an incoming call waits, so the banner overlay is shown.
+        let ringing = CallStatusDto {
+            state: "ringing".to_owned(),
+            pending_token: Some(7),
+            signalling_connected: true,
+            negotiated_video: false,
+            safety_code: None,
+            muted: false,
+            camera_in_use: false,
+            screen_sharing: false,
+            media_frames_sent: 0,
+            media_frames_played: 0,
+            media_video_frames_sent: 0,
+            media_video_frames_played: 0,
+        };
+        rig.chat.call.on_status(&ringing, 1_000);
+        rig.frame_with_call_screens();
+        rig.frame_with_call_screens();
+        let during_ringing = composer_y0(&rig);
+
+        // During (connected): the in-call panel overlay is shown instead.
+        let connected = CallStatusDto {
+            state: "connected".to_owned(),
+            pending_token: None,
+            signalling_connected: true,
+            negotiated_video: false,
+            safety_code: None,
+            muted: false,
+            camera_in_use: false,
+            screen_sharing: false,
+            media_frames_sent: 0,
+            media_frames_played: 0,
+            media_video_frames_sent: 0,
+            media_video_frames_played: 0,
+        };
+        rig.chat.call.on_status(&connected, 2_000);
+        rig.frame_with_call_screens();
+        rig.frame_with_call_screens();
+        let during_connected = composer_y0(&rig);
+
+        // After: the call ended. The overlay is gone; the composer has not moved back.
+        rig.chat.call.end();
+        rig.frame_with_call_screens();
+        rig.frame_with_call_screens();
+        let after = composer_y0(&rig);
+
+        assert!(
+            (during_ringing - before).abs() < 0.5,
+            "a ringing call moved the composer: before {before}, during {during_ringing}"
+        );
+        assert!(
+            (during_connected - before).abs() < 0.5,
+            "a connected call moved the composer: before {before}, during {during_connected}"
+        );
+        assert!(
+            (after - before).abs() < 0.5,
+            "after the call the composer did not return: before {before}, after {after}"
         );
     }
 
