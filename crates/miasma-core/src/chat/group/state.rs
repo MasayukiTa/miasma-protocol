@@ -18,10 +18,15 @@ use crate::chat::{crypto::Rd, proto::MAX_TEXT_BYTES};
 
 use super::membership::{Chain, Descriptor, MAX_CHAIN, MAX_MEMBERS};
 
-/// Version 2 appends who added us and who has shown they joined; version 1
-/// documents are still read (both fields empty).
-const STATE_VERSION: u8 = 2;
+/// Version 3 appends the per-epoch hand-over markers (ADR-012); version 2
+/// appended who added us and who has shown they joined; version 1 documents are
+/// still read (the newer fields empty). Reading never requires the newest
+/// version, so a document written by an older build still parses.
+const STATE_VERSION: u8 = 3;
+const STATE_VERSION_V2: u8 = 2;
 const STATE_VERSION_V1: u8 = 1;
+/// Hand-over markers kept at once (one per target epoch that was served).
+pub const MAX_HANDED: usize = 256;
 /// Messages of one group that may wait for delivery at once.
 pub const MAX_PENDING: usize = 100;
 /// Entries of the delivery ledger.
@@ -141,6 +146,16 @@ pub struct Ctrl {
     pub arg: u32,
 }
 
+/// A record that this device already handed recent history to `to` while the
+/// group stood at descriptor epoch `epoch` (ADR-012). It bounds hand-over to at
+/// most one round to a given target per epoch, tying the rate to a real
+/// membership state change rather than to wall-clock time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandOver {
+    pub to: [u8; 32],
+    pub epoch: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct GroupState {
     pub chain: Chain,
@@ -160,6 +175,10 @@ pub struct GroupState {
     /// Members that have shown they are in the group: something they sent us
     /// was accepted, or something we sent them was accepted by a joined device.
     pub confirmed: Vec<[u8; 32]>,
+    /// Targets this device already handed recent history to, each at the epoch
+    /// it was served (ADR-012). Bounds hand-over to one round per target per
+    /// epoch.
+    pub handed: Vec<HandOver>,
 }
 
 impl GroupState {
@@ -186,7 +205,27 @@ impl GroupState {
             ctrl: Vec::new(),
             added_by: None,
             confirmed: Vec::new(),
+            handed: Vec::new(),
         }
+    }
+
+    /// Note that recent history was handed to `to` at descriptor `epoch`. True
+    /// when this is the first time for that target at that epoch, i.e. a round
+    /// is allowed now; false when one was already served (so nothing repeats).
+    pub fn mark_handover(&mut self, to: [u8; 32], epoch: u32) -> bool {
+        if self.handed.iter().any(|h| h.to == to && h.epoch == epoch) {
+            return false;
+        }
+        if self.handed.len() >= MAX_HANDED {
+            self.handed.remove(0);
+        }
+        self.handed.push(HandOver { to, epoch });
+        true
+    }
+
+    /// Whether a hand-over round to `to` at `epoch` has already been served.
+    pub fn handed_over(&self, to: &[u8; 32], epoch: u32) -> bool {
+        self.handed.iter().any(|h| &h.to == to && h.epoch == epoch)
     }
 
     pub fn gid(&self) -> [u8; 16] {
@@ -295,13 +334,19 @@ impl GroupState {
         for c in &self.confirmed {
             w.extend_from_slice(c);
         }
+        // Version 3: the per-epoch hand-over markers.
+        w.extend_from_slice(&(self.handed.len() as u16).to_be_bytes());
+        for h in &self.handed {
+            w.extend_from_slice(&h.to);
+            w.extend_from_slice(&h.epoch.to_be_bytes());
+        }
         w
     }
 
     pub fn decode(b: &[u8]) -> Option<Self> {
         let mut r = Rd::new(b);
         let version = r.u8().ok()?;
-        if version != STATE_VERSION && version != STATE_VERSION_V1 {
+        if version != STATE_VERSION && version != STATE_VERSION_V2 && version != STATE_VERSION_V1 {
             return None;
         }
         let status = match r.u8().ok()? {
@@ -428,6 +473,18 @@ impl GroupState {
                 confirmed.push(r.arr::<32>().ok()?);
             }
         }
+        let mut handed = Vec::new();
+        if version >= 3 {
+            let n = r.u16().ok()? as usize;
+            if n > MAX_HANDED {
+                return None;
+            }
+            for _ in 0..n {
+                let to = r.arr::<32>().ok()?;
+                let epoch = r.u32().ok()?;
+                handed.push(HandOver { to, epoch });
+            }
+        }
         if !r.done() {
             return None;
         }
@@ -444,6 +501,7 @@ impl GroupState {
             ctrl,
             added_by,
             confirmed,
+            handed,
         })
     }
 }
@@ -573,14 +631,41 @@ mod tests {
     #[test]
     fn a_document_from_before_these_fields_still_reads() {
         let s = GroupState::new(chain(), Status::Joined);
-        let mut bytes = s.encode().to_vec();
-        // Version 2 ends with "no added_by" (1 byte) and "no confirmed" (1 byte).
-        bytes.truncate(bytes.len() - 2);
-        bytes[0] = STATE_VERSION_V1;
-        let back = GroupState::decode(&bytes).expect("a version 1 document");
+        let full = s.encode().to_vec();
+        // Version 3 ends with the version-2 tail ("no added_by" 1 byte, "no
+        // confirmed" 1 byte) followed by the version-3 tail ("no handed", a
+        // 2-byte length of zero). Dropping all four bytes and stamping the
+        // version to 1 yields the shape an old build wrote.
+        let mut v1 = full.clone();
+        v1.truncate(v1.len() - 4);
+        v1[0] = STATE_VERSION_V1;
+        let back = GroupState::decode(&v1).expect("a version 1 document");
         assert_eq!(back.added_by, None);
         assert!(back.confirmed.is_empty());
+        assert!(back.handed.is_empty());
         assert_eq!(back.status, Status::Joined);
+        // A version-2 document (drop only the 2-byte version-3 tail) also reads,
+        // with the hand-over markers defaulting to empty.
+        let mut v2 = full;
+        v2.truncate(v2.len() - 2);
+        v2[0] = STATE_VERSION_V2;
+        let back2 = GroupState::decode(&v2).expect("a version 2 document");
+        assert!(back2.handed.is_empty());
+        assert_eq!(back2.status, Status::Joined);
+    }
+
+    #[test]
+    fn hand_over_markers_round_trip_and_bound_one_round_per_epoch() {
+        let mut s = GroupState::new(chain(), Status::Joined);
+        assert!(s.mark_handover([7; 32], 3));
+        assert!(!s.mark_handover([7; 32], 3));
+        assert!(s.mark_handover([7; 32], 4));
+        assert!(s.mark_handover([8; 32], 3));
+        assert!(s.handed_over(&[7; 32], 3));
+        assert!(!s.handed_over(&[9; 32], 3));
+        let back = GroupState::decode(&s.encode()).unwrap();
+        assert_eq!(back.handed, s.handed);
+        assert!(back.handed_over(&[8; 32], 3));
     }
 
     #[test]

@@ -42,6 +42,11 @@ pub struct GroupMsg {
     pub at_ms: u64,
     pub epoch: u32,
     pub text: String,
+    /// When another member handed this past message over (ADR-012), the member
+    /// who shared it. `None` for a message this device received or sent live.
+    /// The outer seal authenticated the sharer, not the original `sender`, so
+    /// the UI shows it as a claim by this person.
+    pub shared_by: Option<[u8; 32]>,
 }
 
 impl GroupMsg {
@@ -51,7 +56,9 @@ impl GroupMsg {
 
     pub fn encode(&self) -> Vec<u8> {
         let mut v = Vec::with_capacity(100 + self.text.len());
-        v.push(1);
+        // Version 2 appends the optional "shared by" key; a version-1 record is
+        // still read (shared_by defaults to None).
+        v.push(2);
         v.extend_from_slice(&self.ord.to_be_bytes());
         v.push(u8::from(self.outgoing));
         v.extend_from_slice(&self.sender);
@@ -62,12 +69,20 @@ impl GroupMsg {
         v.extend_from_slice(&self.epoch.to_be_bytes());
         v.extend_from_slice(&(self.text.len() as u16).to_be_bytes());
         v.extend_from_slice(self.text.as_bytes());
+        match self.shared_by {
+            Some(by) => {
+                v.push(1);
+                v.extend_from_slice(&by);
+            }
+            None => v.push(0),
+        }
         v
     }
 
     pub fn decode(b: &[u8]) -> Option<Self> {
         let mut r = Rd::new(b);
-        if r.u8().ok()? != 1 {
+        let version = r.u8().ok()?;
+        if version != 1 && version != 2 {
             return None;
         }
         let ord = r.u64().ok()?;
@@ -83,6 +98,15 @@ impl GroupMsg {
             return None;
         }
         let text = std::str::from_utf8(r.bytes(n).ok()?).ok()?.to_owned();
+        let shared_by = if version >= 2 {
+            match r.u8().ok()? {
+                0 => None,
+                1 => Some(r.arr::<32>().ok()?),
+                _ => return None,
+            }
+        } else {
+            None
+        };
         if !r.done() {
             return None;
         }
@@ -96,6 +120,7 @@ impl GroupMsg {
             at_ms,
             epoch,
             text,
+            shared_by,
         })
     }
 }
@@ -458,7 +483,29 @@ mod tests {
             at_ms: 200 + ord,
             epoch: 2,
             text: text.to_owned(),
+            shared_by: None,
         }
+    }
+
+    #[test]
+    fn group_msg_keeps_shared_by_and_still_reads_version_one() {
+        // A shared message round-trips with the member who handed it over.
+        let mut m = msg(4, "from the past");
+        m.shared_by = Some([5; 32]);
+        assert_eq!(GroupMsg::decode(&m.encode()).unwrap(), m);
+        // A plain message round-trips with shared_by None.
+        let plain = msg(5, "live");
+        assert_eq!(GroupMsg::decode(&plain.encode()).unwrap(), plain);
+        // A version-1 record (no shared-by byte) still decodes to None. Build
+        // one by hand: a version-2 encode of a plain message, with the trailing
+        // "0" byte removed and the version stamped back to 1.
+        let mut v1 = plain.encode();
+        assert_eq!(*v1.last().unwrap(), 0, "plain message ends with a 0 marker");
+        v1.truncate(v1.len() - 1);
+        v1[0] = 1;
+        let back = GroupMsg::decode(&v1).expect("a version 1 record");
+        assert_eq!(back.shared_by, None);
+        assert_eq!(back.text, "live");
     }
 
     #[test]

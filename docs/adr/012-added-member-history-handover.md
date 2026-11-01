@@ -1,6 +1,6 @@
 # ADR-012: History hand-over to a newly added member or device
 
-## Status: Proposed (design only; no code in this change)
+## Status: Accepted (implemented in the chat/group and desktop layers; the custody transport for an offline target is a separate job, left as the named seam `GroupCore::custody_offers_for`)
 
 ## Date: 2026-11-01
 
@@ -337,31 +337,35 @@ Each new test file must be added to the CI manifest
 
 ---
 
-## Open questions (need the owner's decision)
+## Resolved by the owner
 
-1. **Policy default.** Confirm the default is "no backfill unless a member hands
-   it over". This ADR assumes opt-in; an opt-out or admin-forced backfill would
-   change the threat model (item 2).
-2. **Shared files, not just chat text.** This ADR hands over message *bodies*
-   only. Handing over a file means handing over a share pointer (MID + key) or a
-   directed envelope, which reopens ADR-006's anti-misdirection property that
-   ADR-010 deferred (`010...md:183-190`). Decide whether file hand-over is in a
-   later ADR or never.
-3. **Attribution strength.** Is "attributed-by-H" display acceptable, or must a
-   handed-over message carry the original author's signature? The current group
-   records are not individually signed by the author (authentication is the
-   pairwise seal, `engine.rs:5-10`), so author-signed history would be a new
-   primitive.
-4. **Which members may hand over.** Any member, or admins only? Eligibility here
-   gates on N being a current member, not on H's role; an admin-only rule is a
-   one-line change but a policy choice.
-5. **Holder persistence.** The holder is RAM-only today (custody audit section
-   1). Should offers for a long-offline new device survive a holder restart? If
-   yes, that is a separate disk-persistence ADR.
-6. **Interaction with retention sweep.** `sweep_retention` deletes old local
-   messages (`engine.rs:1278-`). If H has swept, it cannot hand over what it no
-   longer holds; confirm that is acceptable (hand-over is best-effort over what
-   H still has).
+The open questions were decided as follows, and this change implements those
+decisions.
+
+1. **Policy default: opt-in.** History is handed over only when a current member
+   explicitly chooses to; there is no automatic backfill and no admin-forced
+   backfill. A member starts a round through the user-facing action only
+   (`GroupRequest::ShareHistory`); nothing is shared otherwise.
+2. **Message bodies only.** A round hands over message *bodies* only. File
+   hand-over (a share pointer or a directed envelope) is out of scope and is
+   left to a possible later ADR, so ADR-006's anti-misdirection property is not
+   reopened here.
+3. **Attribution: attributed-by-H display is acceptable.** A handed-over message
+   keeps the original author in `sender` and names the member who passed it on
+   in `shared_by` (`ipc.rs` `GroupMessageInfo.shared_by`). Author-signed history
+   is not required and is not introduced.
+4. **Any current member may hand over.** Eligibility gates on the target being a
+   current member, not on the sender's role; admins have no special rights here.
+5. **Holder persistence: RAM-only, best-effort.** Offers are kept in memory and
+   do not survive a holder restart. Disk persistence for a long-offline new
+   device is explicitly not in this change.
+6. **Retention sweep wins.** Hand-over is best-effort over what the member still
+   holds; if `sweep_retention` has removed old messages, they are simply not
+   offered. This is accepted.
+
+The custody transport for an offline target (step 5) is a separate job. This
+change leaves it as the named seam `GroupCore::custody_offers_for`, which direct
+pairwise delivery does not depend on.
 
 ---
 

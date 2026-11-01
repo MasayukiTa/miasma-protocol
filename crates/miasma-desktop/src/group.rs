@@ -691,6 +691,17 @@ pub fn can_remove(d: &GroupDetailInfo, m: &MemberInfo) -> bool {
     d.is_admin && !m.you && GroupStatus::parse(&d.group.status) == GroupStatus::Joined
 }
 
+/// "Share recent messages" next to a member (ADR-012): offered by any member who is in the group,
+/// to another member who has joined (not oneself). It needs no admin right -- it only shares what
+/// this device already holds. A member who is only invited (their join has not shown yet) is not
+/// offered it, since there is nothing to receive it reliably until they are in.
+pub fn can_share_history(d: &GroupDetailInfo, m: &MemberInfo) -> bool {
+    let me_in = GroupStatus::parse(&d.group.status) == GroupStatus::Joined;
+    // An older service sends no per-member status; it is read as joined.
+    let them_joined = m.status.as_deref().map(|s| s == "joined").unwrap_or(true);
+    me_in && !m.you && them_joined
+}
+
 pub fn can_leave(status: GroupStatus) -> bool {
     status == GroupStatus::Joined
 }
@@ -1330,6 +1341,40 @@ mod tests {
             ],
         );
         assert!(!can_remove(&gone, &gone.members[1]), "not once out");
+    }
+
+    #[test]
+    fn sharing_history_is_offered_to_joined_members_by_anyone_in_the_group() {
+        let with_status = |ep: &str, status: Option<&str>| {
+            let mut m = member(ep, false, true, false);
+            m.status = status.map(|s| s.to_owned());
+            m
+        };
+        // A plain (non-admin) member may share with another who has joined.
+        let g = detail(
+            "joined",
+            false,
+            vec![
+                member("me", true, false, false),
+                with_status("a", Some("joined")),
+                with_status("b", Some("invited")),
+                with_status("c", None),
+            ],
+        );
+        assert!(can_share_history(&g, &g.members[1]), "joined member");
+        assert!(!can_share_history(&g, &g.members[0]), "not oneself");
+        assert!(!can_share_history(&g, &g.members[2]), "invited has nothing yet");
+        assert!(
+            can_share_history(&g, &g.members[3]),
+            "older service sends no status: read as joined"
+        );
+        // Once I am no longer in the group, I offer nothing, even to a joined member.
+        let out = detail(
+            "left",
+            false,
+            vec![member("me", true, false, false), with_status("a", Some("joined"))],
+        );
+        assert!(!can_share_history(&out, &out.members[1]), "not once I am out");
     }
 
     #[test]
