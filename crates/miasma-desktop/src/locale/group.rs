@@ -73,6 +73,9 @@ group_strings! {
     // names for assistive technology that match the one-to-one screen, conversation search
     waiting_note, day_today, day_yesterday, remove_from_group, a11y_group_composer,
     a11y_group_send, search_conversations, search_conversations_none,
+    // Sharing this device's recent history with one member (ADR-012): the menu entry and the
+    // two answers (some messages were queued, or there was nothing to pass on).
+    share_history, shared_done, shared_none,
     // Easy mode: plain-language versions of the delivery line and the groups-unsupported note.
     state_waiting_easy, unsupported_easy, state_waiting_short_easy,
 }
@@ -244,6 +247,9 @@ static GR_EN: GroupStrings = GroupStrings {
     day_today: "Today",
     day_yesterday: "Yesterday",
     remove_from_group: "Remove from this group",
+    share_history: "Share recent messages",
+    shared_done: "Shared recent messages with {who} ({n} on the way).",
+    shared_none: "Nothing recent to share with {who}.",
     a11y_group_composer: "Message input for the group",
     a11y_group_send: "Send message to the group",
     search_conversations: "Search conversations",
@@ -412,6 +418,9 @@ static GR_JA: GroupStrings = GroupStrings {
     day_today: "今日",
     day_yesterday: "昨日",
     remove_from_group: "このグループから外す",
+    share_history: "最近のメッセージを共有",
+    shared_done: "{who} に最近のメッセージを共有しました（{n} 件送信中）。",
+    shared_none: "{who} に共有できる最近のメッセージはありません。",
     a11y_group_composer: "グループ宛てのメッセージを入力",
     a11y_group_send: "グループ宛てのメッセージを送信",
     search_conversations: "会話を検索",
@@ -580,6 +589,9 @@ static GR_ZH_CN: GroupStrings = GroupStrings {
     day_today: "今天",
     day_yesterday: "昨天",
     remove_from_group: "移出本群",
+    share_history: "分享最近的消息",
+    shared_done: "已与 {who} 分享最近的消息（{n} 条发送中）。",
+    shared_none: "没有可与 {who} 分享的最近消息。",
     a11y_group_composer: "群组消息输入框",
     a11y_group_send: "发送消息到群组",
     search_conversations: "搜索会话",

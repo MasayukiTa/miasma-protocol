@@ -103,6 +103,9 @@ struct MemberOut {
     add_contact: Option<String>,
     /// (endpoint ID, name) of the member to remove, after the confirmation dialog.
     remove: Option<(String, String)>,
+    /// (endpoint ID, name) of the member to offer this device's recent history to (ADR-012).
+    /// Sharing is not destructive, so it is sent without a confirmation dialog.
+    share_history: Option<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -164,6 +167,8 @@ pub struct GroupUi {
     list_dirty: bool,
     thread_dirty: bool,
     detail_dirty: bool,
+    /// Who the last history offer was sent to (ADR-012), so the service's answer can name them.
+    share_offered_to: Option<String>,
 }
 
 impl Default for GroupUi {
@@ -213,6 +218,7 @@ impl Default for GroupUi {
             list_dirty: false,
             thread_dirty: false,
             detail_dirty: false,
+            share_offered_to: None,
         }
     }
 }
@@ -577,7 +583,8 @@ impl GroupUi {
             GroupRequest::Remove { .. }
             | GroupRequest::Leave { .. }
             | GroupRequest::Accept { .. }
-            | GroupRequest::Decline { .. } => {
+            | GroupRequest::Decline { .. }
+            | GroupRequest::ShareHistory { .. } => {
                 self.acting = None;
                 self.page_msg = Some(why);
             }
@@ -679,6 +686,22 @@ impl GroupUi {
                 self.list_dirty = true;
             }
             GroupResponse::Done {} => self.on_done(),
+            GroupResponse::Shared { offered } => {
+                let gs = self.gs();
+                let who = self.share_offered_to.take().unwrap_or_default();
+                let who = elide(&who, NAME_CHARS);
+                let note = if offered == 0 {
+                    fill(gs.shared_none, &[("who", &who)])
+                } else {
+                    fill(
+                        gs.shared_done,
+                        &[("who", &who), ("n", &offered.to_string())],
+                    )
+                };
+                self.notices.push(note);
+                self.thread_dirty = true;
+                self.detail_dirty = true;
+            }
             // The change was made in the service; the saved setting is the screen's own.
             GroupResponse::Settings { .. } => {}
         }
@@ -1244,6 +1267,7 @@ impl GroupUi {
         let mut ask_leave = false;
         let mut ask_delete = false;
         let mut ask_remove: Option<(String, String)> = None;
+        let mut share_history: Option<(String, String)> = None;
         let mut add_contact: Option<String> = None;
         let Some(d) = self.detail.clone() else {
             ui.label(RichText::new(cs.loading).color(pal().muted));
@@ -1285,6 +1309,9 @@ impl GroupUi {
                             }
                             if let Some(who) = out.remove {
                                 ask_remove = Some(who);
+                            }
+                            if let Some(who) = out.share_history {
+                                share_history = Some(who);
                             }
                         }
                     },
@@ -1381,6 +1408,17 @@ impl GroupUi {
         if let Some((endpoint_id, who)) = ask_remove {
             self.confirm = Some(Confirm::Remove { endpoint_id, who });
         }
+        if let Some((endpoint_id, who)) = share_history {
+            // Sharing is not destructive and needs no confirmation: queue it straight away.
+            // The name is remembered so the answer can name who it was offered to.
+            if let Some(o) = self.open.clone() {
+                self.share_offered_to = Some(who);
+                self.push(GroupRequest::ShareHistory {
+                    group: o.id,
+                    member: endpoint_id,
+                });
+            }
+        }
         if let Some(code) = add_contact {
             self.action = Some(ChatAction::AddContact(code));
         }
@@ -1431,16 +1469,34 @@ impl GroupUi {
             ui.set_min_width(row_w);
             ui.spacing_mut().item_spacing.x = kit::SP_2;
             if !m.you {
+                // The menu is built in order; each entry remembers what it does so the
+                // chosen index maps back to an action even as entries come and go.
+                enum RowAct {
+                    Toggle,
+                    ShareHistory,
+                    Remove,
+                }
                 let mut items = vec![kit::MenuItem::new(toggle_label)];
+                let mut acts = vec![RowAct::Toggle];
+                if can_share_history(d, m) {
+                    items.push(kit::MenuItem::new(gs.share_history).enabled(!busy));
+                    acts.push(RowAct::ShareHistory);
+                }
                 if can_remove(d, m) {
                     // Says what is removed and from where, not only "Remove".
                     items.push(kit::MenuItem::danger(gs.remove_from_group).enabled(!busy));
+                    acts.push(RowAct::Remove);
                 }
                 if let Some(i) = kit::row_menu(ui, ("member", &m.endpoint_id), &more, &items) {
-                    if i == 0 {
-                        toggle = true;
-                    } else {
-                        out.remove = Some((m.endpoint_id.clone(), name.clone()));
+                    match acts.get(i) {
+                        Some(RowAct::Toggle) => toggle = true,
+                        Some(RowAct::ShareHistory) => {
+                            out.share_history = Some((m.endpoint_id.clone(), name.clone()));
+                        }
+                        Some(RowAct::Remove) => {
+                            out.remove = Some((m.endpoint_id.clone(), name.clone()));
+                        }
+                        None => {}
                     }
                 }
                 if !m.verified {
@@ -1843,7 +1899,8 @@ fn group_of(req: &GroupRequest) -> Option<&str> {
         | GroupRequest::Send { group, .. }
         | GroupRequest::History { group, .. }
         | GroupRequest::Accept { group }
-        | GroupRequest::Decline { group } => Some(group),
+        | GroupRequest::Decline { group }
+        | GroupRequest::ShareHistory { group, .. } => Some(group),
         GroupRequest::Create { .. } | GroupRequest::List {} | GroupRequest::Settings { .. } => None,
     }
 }
@@ -2151,6 +2208,7 @@ impl GroupUi {
                 delivered: outgoing.then_some(1),
                 failed: outgoing.then_some(0),
                 gap_before: 0,
+                shared_by: None,
             };
         let mut ui = GroupUi {
             locale,
@@ -2268,6 +2326,7 @@ mod tests {
             delivered: outgoing.then_some(1),
             failed: outgoing.then_some(0),
             gap_before: if ord == 3 { 2 } else { 0 },
+            shared_by: None,
         }
     }
 

@@ -61,6 +61,13 @@ jobs:
       - name: Test miasma-core
         run: cargo test -p miasma-core --tests --locked
 
+      # The history hand-over wire test (ADR-012) is named here explicitly so a
+      # regression in it fails this job by name, not only through the
+      # auto-collected `--tests` run above. It is platform-neutral (no network,
+      # no feature flags).
+      - name: Test history hand-over (ADR-012)
+        run: cargo test -p miasma-core --locked --test group_handover_test
+
   test-core-pqc:
     name: Core Tests, opt-in hybrid feature (Ubuntu)
     runs-on: ubuntu-24.04

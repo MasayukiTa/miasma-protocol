@@ -937,3 +937,171 @@ fn the_limit_on_groups_still_applies_when_joining_at_once() {
     pump(&nodes);
     assert_eq!(c.core.list().len(), MAX_GROUPS);
 }
+
+// -- Handing recent messages to an added member (ADR-012) ---------------------
+
+use super::engine::MAX_HIST_PER_HANDOVER;
+
+/// A member added after messages were sent sees none of the past by default,
+/// and sees it only once a current member explicitly hands it over. The shared
+/// copies are attributed to their author but marked as shared by the sharer.
+#[test]
+fn history_is_handed_over_only_when_a_member_chooses_to() {
+    let mut nodes = friends(3);
+    let gid = make_group(&nodes[..2], "pair");
+    nodes[0].core.send(&gid, "old one", 10).unwrap();
+    nodes[1].core.send(&gid, "old two", 20).unwrap();
+    pump(&nodes[..2]);
+    // A third person is added after those messages; they catch up on the live
+    // membership but not the past.
+    let d = &nodes[2];
+    nodes[0]
+        .core
+        .add(&gid, &[(d.id(), String::new(), false)])
+        .unwrap();
+    pump(&nodes);
+    nodes[2].core.accept_invite(&gid).unwrap();
+    pump(&nodes);
+    assert!(
+        nodes[2].texts(&gid).is_empty(),
+        "the past is not shared on its own"
+    );
+    // nodes[0] chooses to share its recent history with the new member.
+    let out = nodes[0].core.handover(&gid, &nodes[2].id()).unwrap();
+    assert_eq!(out.offered, 2, "both past messages are offered");
+    assert_eq!(out.wake, Some(nodes[2].id()));
+    pump(&nodes);
+    let mut t = nodes[2].texts(&gid);
+    t.sort();
+    assert_eq!(t, vec!["old one".to_owned(), "old two".to_owned()]);
+    // The shared copies name who handed them over, and keep their author.
+    let h = nodes[2].core.history(&gid, None, 10).unwrap();
+    let shared = h.iter().find(|v| v.msg.text == "old two").unwrap();
+    assert_eq!(shared.msg.shared_by, Some(nodes[0].id()));
+    assert_eq!(shared.msg.sender, nodes[1].id(), "author is preserved");
+    let _ = &mut nodes;
+}
+
+/// A hand-over runs at most once per target per epoch, and a repeat in the same
+/// epoch does nothing.
+#[test]
+fn a_second_handover_in_the_same_epoch_does_nothing() {
+    let nodes = friends(2);
+    let gid = make_group(&nodes, "pair");
+    nodes[0].core.send(&gid, "one", 10).unwrap();
+    pump(&nodes);
+    let first = nodes[0].core.handover(&gid, &nodes[1].id()).unwrap();
+    assert_eq!(first.offered, 1);
+    let again = nodes[0].core.handover(&gid, &nodes[1].id()).unwrap();
+    assert_eq!(again.offered, 0, "one round per epoch");
+    assert_eq!(again.wake, None);
+}
+
+/// Hand-over refuses a non-member and this device itself, and never offers a
+/// message back to its own author or passes on a message shared to us.
+#[test]
+fn handover_refuses_a_non_member_and_skips_the_authors_own_and_reshared() {
+    let nodes = friends(3);
+    let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    // a and b are members from the start and both hold the two live messages;
+    // c is added only afterwards, so c holds none of the past on its own.
+    let gid = make_group(&nodes[..2], "trio");
+    a.core.send(&gid, "from a", 10).unwrap();
+    b.core.send(&gid, "from b", 20).unwrap();
+    pump(&nodes[..2]);
+    // A non-member and oneself are refused.
+    assert_eq!(
+        a.core.handover(&gid, &[42u8; 32]),
+        Err(GroupError::NotMember)
+    );
+    assert_eq!(a.core.handover(&gid, &a.id()), Err(GroupError::NotMember));
+    // a's offer to b omits b's own message: only "from a" is offered back.
+    let to_b = a.core.handover(&gid, &b.id()).unwrap();
+    assert_eq!(to_b.offered, 1, "b's own message is not offered back to b");
+    pump(&nodes[..2]);
+    // c is added after the fact, catches up on live membership only, and holds
+    // no past messages until a hands them over.
+    a.core.add(&gid, &[(c.id(), String::new(), false)]).unwrap();
+    pump(&nodes);
+    c.core.accept_invite(&gid).unwrap();
+    pump(&nodes);
+    assert!(
+        c.texts(&gid).is_empty(),
+        "the past is not shared on its own"
+    );
+    // a hands its first-hand history to c: both "from a" and "from b" arrive as
+    // shared-in copies attributed to their authors but marked shared by a.
+    a.core.handover(&gid, &c.id()).unwrap();
+    pump(&nodes);
+    let shared_here: Vec<_> = c
+        .core
+        .history(&gid, None, 50)
+        .unwrap()
+        .into_iter()
+        .filter(|v| v.msg.shared_by.is_some())
+        .collect();
+    assert!(
+        !shared_here.is_empty(),
+        "c holds at least one shared-in copy"
+    );
+    // c now re-shares to b. The copies c holds were themselves handed to it, so
+    // they are not forwarded again; b gains no shared-in copy of them.
+    let reshared = c.core.handover(&gid, &b.id());
+    if let Ok(out) = reshared {
+        for _ in 0..out.offered {}
+    }
+    pump(&nodes);
+    let b_shared: Vec<_> = b
+        .core
+        .history(&gid, None, 50)
+        .unwrap()
+        .into_iter()
+        .filter(|v| v.msg.shared_by.is_some())
+        .collect();
+    assert!(
+        b_shared.is_empty(),
+        "a copy that was itself handed to c is not forwarded again"
+    );
+}
+
+/// A counter the receiver already holds is a duplicate: re-sharing the same
+/// past message changes nothing.
+#[test]
+fn re_sharing_a_message_the_member_already_holds_is_a_duplicate() {
+    let nodes = friends(3);
+    let (a, _b, c) = (&nodes[0], &nodes[1], &nodes[2]);
+    let gid = make_group(&nodes, "trio");
+    a.core.send(&gid, "shared once", 10).unwrap();
+    pump(&nodes);
+    // c already received it live. A hand-over of the same counter is a no-op on
+    // c's side (a duplicate), so the count does not grow.
+    let before = c.texts(&gid).len();
+    a.core.handover(&gid, &c.id()).unwrap();
+    let log = pump(&nodes);
+    assert!(
+        log.iter().any(|l| l.2 == AckStatus::Duplicate),
+        "the receiver reports the re-shared counter as a duplicate"
+    );
+    assert_eq!(c.texts(&gid).len(), before, "no new copy is stored");
+}
+
+/// The selection is bounded by [`MAX_HIST_PER_HANDOVER`].
+#[test]
+fn a_handover_offers_at_most_the_bound() {
+    let nodes = friends(2);
+    let gid = make_group(&nodes, "pair");
+    // Send more than the hand-over bound, but drain the outbox between rounds
+    // so no single round exceeds [`MAX_PENDING`] (the outbox bound the sender
+    // enforces). Every message still lands in the store, so the hand-over
+    // selects from more than the bound and must cap itself.
+    for i in 0..(MAX_HIST_PER_HANDOVER + 5) {
+        nodes[0].core.send(&gid, "m", i as u64).unwrap();
+        pump(&nodes);
+    }
+    let out = nodes[0].core.handover(&gid, &nodes[1].id()).unwrap();
+    assert!(
+        out.offered <= MAX_HIST_PER_HANDOVER,
+        "offered {} exceeds the bound",
+        out.offered
+    );
+}

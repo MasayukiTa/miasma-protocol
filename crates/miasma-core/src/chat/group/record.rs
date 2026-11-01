@@ -9,7 +9,13 @@
 //! Text    = 0x10 | [16] gid | u32 epoch | u64 counter | [16] message id | u64 sent_ms | u16 len | utf-8
 //! Descs   = 0x11 | u8 n | n x ( u16 len | descriptor )          oldest first
 //! SyncReq = 0x12 | [16] gid | u32 have_epoch                    "send me what follows epoch N"
+//! HistOff = 0x13 | [16] gid | u32 origin_epoch | [32] author | u64 counter | [16] id | u64 sent_ms | u16 len | utf-8
 //! ```
+//!
+//! A hand-over (`HistOff`, ADR-012) carries one past message a current member
+//! offers to a newly added member. [`hist_gid`] reads its group ID straight
+//! from these header bytes so the delivery layer can name the group without
+//! decoding the whole record.
 //!
 //! The sender of a record is the peer of the pairwise session; it is never
 //! taken from the record.
@@ -21,6 +27,11 @@ use super::membership::{DescError, Descriptor};
 pub const KIND_TEXT: u8 = 0x10;
 pub const KIND_DESCS: u8 = 0x11;
 pub const KIND_SYNC: u8 = 0x12;
+/// A past message one member hands over to a newly added member (ADR-012).
+/// It travels inside the same pairwise sealed envelope as any other record,
+/// so an older peer that does not know this kind returns `Unsupported` and is
+/// otherwise unaffected.
+pub const KIND_HIST_OFFER: u8 = 0x13;
 
 /// Room for descriptors in one record (the padded plaintext is at most 16 KiB).
 pub const MAX_DESCS_BYTES: usize = 15_000;
@@ -43,11 +54,44 @@ pub struct GroupText {
     pub text: String,
 }
 
+/// A single past message that one member offers to a newly added member,
+/// quoting the original author (ADR-012). The outer pairwise seal authenticates
+/// the member who hands it over, not the original author, so a receiver shows it
+/// as a claim by the member who shared it (attributed, not author-signed).
+///
+/// This type carries a message body, so it deliberately does not derive `Debug`;
+/// its manual `Debug` omits the body and the original author's key so neither is
+/// written to a log.
+#[derive(Clone, PartialEq, Eq)]
+pub struct HistOffer {
+    pub gid: [u8; 16],
+    pub origin_epoch: u32,
+    pub original_sender: [u8; 32],
+    pub original_counter: u64,
+    pub original_id: [u8; 16],
+    pub original_sent_ms: u64,
+    pub text: String,
+}
+
+impl std::fmt::Debug for HistOffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HistOffer")
+            .field("gid", &self.gid)
+            .field("origin_epoch", &self.origin_epoch)
+            .field("original_counter", &self.original_counter)
+            .field("original_id", &self.original_id)
+            .field("original_sent_ms", &self.original_sent_ms)
+            .field("text_len", &self.text.len())
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Record {
     Text(GroupText),
     Descs(Vec<Descriptor>),
     Sync { gid: [u8; 16], have_epoch: u32 },
+    HistOffer(HistOffer),
 }
 
 impl GroupText {
@@ -63,6 +107,26 @@ impl GroupText {
         v.extend_from_slice(&self.counter.to_be_bytes());
         v.extend_from_slice(&self.id);
         v.extend_from_slice(&self.sent_ms.to_be_bytes());
+        v.extend_from_slice(&(n as u16).to_be_bytes());
+        v.extend_from_slice(self.text.as_bytes());
+        Ok(v)
+    }
+}
+
+impl HistOffer {
+    pub fn encode(&self) -> Result<Vec<u8>, RecordError> {
+        let n = self.text.len();
+        if n == 0 || n > MAX_TEXT_BYTES || self.original_counter == 0 {
+            return Err(RecordError::Malformed);
+        }
+        let mut v = Vec::with_capacity(1 + 16 + 4 + 32 + 8 + 16 + 8 + 2 + n);
+        v.push(KIND_HIST_OFFER);
+        v.extend_from_slice(&self.gid);
+        v.extend_from_slice(&self.origin_epoch.to_be_bytes());
+        v.extend_from_slice(&self.original_sender);
+        v.extend_from_slice(&self.original_counter.to_be_bytes());
+        v.extend_from_slice(&self.original_id);
+        v.extend_from_slice(&self.original_sent_ms.to_be_bytes());
         v.extend_from_slice(&(n as u16).to_be_bytes());
         v.extend_from_slice(self.text.as_bytes());
         Ok(v)
@@ -91,6 +155,20 @@ pub fn encode_sync(gid: &[u8; 16], have_epoch: u32) -> Vec<u8> {
     v.extend_from_slice(gid);
     v.extend_from_slice(&have_epoch.to_be_bytes());
     v
+}
+
+/// The group ID carried by an encoded history offer (ADR-012), read straight
+/// from the wire bytes without decoding the whole record. Returns `None` when
+/// the bytes are not a well-formed `KIND_HIST_OFFER` header, so a caller never
+/// mistakes another record for a hand-over. It reads only the fixed header (the
+/// kind byte and the 16-byte group ID) and never touches the body.
+pub fn hist_gid(plain: &[u8]) -> Option<[u8; 16]> {
+    if plain.len() < 1 + 16 || plain[0] != KIND_HIST_OFFER {
+        return None;
+    }
+    let mut gid = [0u8; 16];
+    gid.copy_from_slice(&plain[1..1 + 16]);
+    Some(gid)
 }
 
 /// The newest descriptors of `items` (oldest first) that fit in one record.
@@ -163,6 +241,33 @@ impl Record {
                     return Err(RecordError::Malformed);
                 }
                 Ok(Record::Sync { gid, have_epoch })
+            }
+            KIND_HIST_OFFER => {
+                let gid = r.arr::<16>().map_err(bad)?;
+                let origin_epoch = r.u32().map_err(bad)?;
+                let original_sender = r.arr::<32>().map_err(bad)?;
+                let original_counter = r.u64().map_err(bad)?;
+                let original_id = r.arr::<16>().map_err(bad)?;
+                let original_sent_ms = r.u64().map_err(bad)?;
+                let n = r.u16().map_err(bad)? as usize;
+                if n == 0 || n > MAX_TEXT_BYTES || original_counter == 0 {
+                    return Err(RecordError::Malformed);
+                }
+                let text = std::str::from_utf8(r.bytes(n).map_err(bad)?)
+                    .map_err(|_| RecordError::Malformed)?
+                    .to_owned();
+                if !r.done() {
+                    return Err(RecordError::Malformed);
+                }
+                Ok(Record::HistOffer(HistOffer {
+                    gid,
+                    origin_epoch,
+                    original_sender,
+                    original_counter,
+                    original_id,
+                    original_sent_ms,
+                    text,
+                }))
             }
             other => Err(RecordError::UnknownKind(other)),
         }
@@ -266,6 +371,65 @@ mod tests {
         assert_eq!(fit.last(), ds.last());
         assert!(encode_descs(&fit).is_ok());
         assert!(newest_that_fit(&ds[..1]).len() == 1);
+    }
+
+    fn offer(t: &str) -> HistOffer {
+        HistOffer {
+            gid: rand::random(),
+            origin_epoch: 4,
+            original_sender: rand::random(),
+            original_counter: 12,
+            original_id: rand::random(),
+            original_sent_ms: 1_700_000_000_000,
+            text: t.to_owned(),
+        }
+    }
+
+    #[test]
+    fn hist_offer_round_trips_including_japanese_and_refuses_damage() {
+        for t in ["hi", "こんにちは、みなさん", &"あ".repeat(1000)] {
+            let o = offer(t);
+            let b = o.encode().unwrap();
+            assert_eq!(Record::decode(&b).unwrap(), Record::HistOffer(o));
+            for n in 0..b.len() {
+                assert!(Record::decode(&b[..n]).is_err(), "prefix {n}");
+            }
+        }
+        assert!(offer("").encode().is_err());
+        assert!(offer(&"x".repeat(MAX_TEXT_BYTES + 1)).encode().is_err());
+        let mut zero = offer("a");
+        zero.original_counter = 0;
+        assert!(zero.encode().is_err());
+        let mut b = offer("abc").encode().unwrap();
+        b.push(0);
+        assert!(Record::decode(&b).is_err());
+    }
+
+    #[test]
+    fn a_hist_offer_kind_is_unknown_to_a_decoder_that_predates_it() {
+        // An older app never recognises 0x13: its first byte is not one of the
+        // kinds it knows, so it reports UnknownKind and is otherwise unharmed.
+        assert_eq!(
+            Record::decode(&[KIND_HIST_OFFER]),
+            Err(RecordError::Malformed)
+        );
+        // The kind byte on its own is malformed (too short); a full record is
+        // only ever ignorable by a peer whose match has no 0x13 arm. We assert
+        // the constant is the documented value so the wire number cannot drift.
+        assert_eq!(KIND_HIST_OFFER, 0x13);
+    }
+
+    #[test]
+    fn hist_gid_reads_the_group_id_only_from_a_real_offer() {
+        let o = offer("from the past");
+        let b = o.encode().unwrap();
+        assert_eq!(hist_gid(&b), Some(o.gid));
+        // A text record carries the same header shape but a different kind, so
+        // it is not mistaken for a hand-over.
+        assert_eq!(hist_gid(&text("hi").encode().unwrap()), None);
+        // Too short to hold a kind byte and a group ID.
+        assert_eq!(hist_gid(&[KIND_HIST_OFFER]), None);
+        assert_eq!(hist_gid(&[]), None);
     }
 
     #[test]

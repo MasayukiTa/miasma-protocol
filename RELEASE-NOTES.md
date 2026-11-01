@@ -1,9 +1,10 @@
 # Miasma v0.3.2-beta.13
 
-This beta adds calls between contacts.
+This beta adds calls between contacts, and lets a group member share recent messages with one other member.
 
 ## What's new
 
+- In a group's information view, each other member now has a "Share recent messages" action. Choosing it offers that member the most recent messages this device still holds, so someone who was added after a conversation started can catch up. Sharing is opt-in: nothing is shared unless you choose this action for a member, and it does not need anyone's confirmation to send. Only the most recent messages are offered, and only their text; files are not shared this way. A shared message keeps its original author, and the view shows which member passed it on. If there is nothing recent to pass on, you are told so and nothing is sent. Sharing reaches a member who is online now; carrying an offer to a member who is offline is not part of this release, and hand-over is best-effort over what your device still holds (messages already removed by the retention limit are not offered).
 - Contacts can make voice calls. The camera and screen sharing both work on Windows and macOS. Calls ring only for contacts. Calls are on by default; to turn them off, set `enabled = false` under `[call]` in `config.toml`.
 - During a call you can turn your camera on or off and start or stop sharing your screen with buttons in the call view. The camera works on Windows and macOS; on macOS the system asks for camera access the first time, and the call continues without video if it is refused. Screen sharing works on Windows and macOS. On other platforms a call stays voice-only with test devices.
 - You can choose which microphone and speaker the call uses from the audio-device menu in the call view.

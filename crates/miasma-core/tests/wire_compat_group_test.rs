@@ -497,7 +497,7 @@ fn a_changed_byte_breaks_the_signature_not_the_shape() {
 #[test]
 fn unknown_record_kinds_and_bad_shapes_are_refused() {
     assert_eq!(Record::decode(&[]), Err(RecordError::Malformed));
-    for k in [0x00u8, 0x01, 0x02, 0x0F, 0x13, 0x20, 0xFF] {
+    for k in [0x00u8, 0x01, 0x02, 0x0F, 0x14, 0x20, 0xFF] {
         let mut b = frozen("record_sync");
         b[0] = k;
         assert_eq!(

@@ -63,6 +63,13 @@ pub enum GroupRequest {
         #[serde(default)]
         auto_join: Option<bool>,
     },
+    /// Offer this device's recent messages to one current member (ADR-012).
+    /// Opt-in: nothing is shared unless this is sent. At most one round per
+    /// member per membership epoch; a repeat in the same epoch shares nothing.
+    ShareHistory {
+        group: String,
+        member: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +148,12 @@ pub struct GroupMessageInfo {
     pub failed: Option<u32>,
     /// Messages of this sender before this one that have not arrived.
     pub gap_before: u64,
+    /// Set when this message reached us as a hand-over from a current member
+    /// (ADR-012): the endpoint ID of the member who shared it. The `sender`
+    /// stays the original author; this names who passed it on. An older service
+    /// sends none.
+    #[serde(default)]
+    pub shared_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,6 +172,12 @@ pub enum GroupResponse {
     Queued {
         id: String,
         recipients: u32,
+    },
+    /// The answer to [`GroupRequest::ShareHistory`]: how many past messages were
+    /// queued to offer (zero when a round was already served this epoch or there
+    /// was nothing to share).
+    Shared {
+        offered: u32,
     },
     History {
         group: GroupInfo,
@@ -491,6 +510,7 @@ mod run {
                                 delivered: v.delivery.map(|d| u32::from(d.1)),
                                 failed: v.delivery.map(|d| u32::from(d.2)),
                                 gap_before: v.gap_before,
+                                shared_by: m.shared_by.map(hex::encode),
                             }
                         })
                         .collect(),
@@ -527,6 +547,26 @@ mod run {
                     Err(e) => from_error(e),
                 }
             }
+            GroupRequest::ShareHistory { group: sel, member } => {
+                let gid = match group(&sel) {
+                    Ok(g) => g,
+                    Err(e) => return from_error(e),
+                };
+                let Some(who) = member_named(svc, &gid, &member) else {
+                    return err("not_member", format!("\"{member}\" is not in the group"));
+                };
+                match core.handover(&gid, &who) {
+                    Ok(out) => {
+                        if let Some(wake) = out.wake {
+                            svc.kick_all(&[wake]);
+                        }
+                        GroupResponse::Shared {
+                            offered: out.offered as u32,
+                        }
+                    }
+                    Err(e) => from_error(e),
+                }
+            }
         }
     }
 }
@@ -557,5 +597,21 @@ mod tests {
         })
         .unwrap();
         assert!(serde_json::from_str::<GroupResponse>(&e).is_ok());
+
+        // ShareHistory request and its Shared answer round-trip too (ADR-012).
+        let sh = serde_json::to_string(&GroupRequest::ShareHistory {
+            group: "g1".into(),
+            member: "bob".into(),
+        })
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_str::<GroupRequest>(&sh).unwrap(),
+            GroupRequest::ShareHistory { .. }
+        ));
+        let shared = serde_json::to_string(&GroupResponse::Shared { offered: 3 }).unwrap();
+        assert!(matches!(
+            serde_json::from_str::<GroupResponse>(&shared).unwrap(),
+            GroupResponse::Shared { offered: 3 }
+        ));
     }
 }

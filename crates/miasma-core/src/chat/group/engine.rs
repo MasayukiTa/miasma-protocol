@@ -56,6 +56,10 @@ pub const MAX_INVITES: usize = 8;
 /// Largest text a member who is not a trusted contact may send.
 pub const UNVERIFIED_MAX_TEXT: usize = 2048;
 const EVENT_CAP: usize = 200;
+/// Most past messages one hand-over round offers to a member (ADR-012). Matches
+/// [`MAX_PENDING`], the cap on group messages already allowed to be in flight,
+/// so a hand-over cannot queue more than the engine already tolerates at once.
+pub const MAX_HIST_PER_HANDOVER: usize = MAX_PENDING;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GroupError {
@@ -129,9 +133,23 @@ pub struct GroupEvent {
 /// One thing to put on the wire for a member.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Work {
-    Text { gid: [u8; 16], id: [u8; 16] },
-    Descs { gid: [u8; 16] },
-    Sync { gid: [u8; 16] },
+    Text {
+        gid: [u8; 16],
+        id: [u8; 16],
+    },
+    Descs {
+        gid: [u8; 16],
+    },
+    Sync {
+        gid: [u8; 16],
+    },
+    /// A past message handed to a newly added member (ADR-012). `seq` names the
+    /// queued offer so a delivery result can remove exactly that one.
+    Hist {
+        gid: [u8; 16],
+        to: [u8; 32],
+        seq: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -152,6 +170,17 @@ pub struct Accepted {
 pub struct SendOutcome {
     pub id: [u8; 16],
     pub recipients: Vec<[u8; 32]>,
+}
+
+/// The result of a history hand-over (ADR-012).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoverOutcome {
+    /// How many past messages were queued to offer. Zero when a round was
+    /// already served to this target at this epoch, or nothing shareable was
+    /// held.
+    pub offered: usize,
+    /// The target to wake delivery for, when anything was queued.
+    pub wake: Option<[u8; 32]>,
 }
 
 #[derive(Debug, Clone)]
@@ -240,12 +269,26 @@ struct Events {
     items: VecDeque<GroupEvent>,
 }
 
+/// One past message queued to hand over to a member (ADR-012). Memory only: a
+/// hand-over is best effort, so a restart simply drops anything not yet sent
+/// rather than persisting a backlog. `seq` names it for delivery results.
+#[derive(Debug, Clone)]
+struct HistJob {
+    seq: u64,
+    plain: Vec<u8>,
+}
+
 struct Inner {
     groups: BTreeMap<[u8; 16], GroupState>,
     events: Events,
     /// Why the last attempt to deliver to a member failed (memory only; a
     /// success removes the entry).
     reasons: HashMap<[u8; 32], String>,
+    /// Past messages waiting to be handed to a member, oldest first. Keyed by
+    /// the target member; memory only (see [`HistJob`]).
+    hist: HashMap<[u8; 32], VecDeque<HistJob>>,
+    /// Source of the next [`HistJob::seq`].
+    hist_seq: u64,
 }
 
 pub struct GroupCore {
@@ -296,6 +339,8 @@ impl GroupCore {
                     items: VecDeque::new(),
                 },
                 reasons: HashMap::new(),
+                hist: HashMap::new(),
+                hist_seq: 1,
             }),
         })
     }
@@ -860,6 +905,7 @@ impl GroupCore {
                 at_ms: now,
                 epoch,
                 text: text.to_owned(),
+                shared_by: None,
             },
         )?;
         self.save(st)?;
@@ -927,18 +973,53 @@ impl GroupCore {
                 });
             }
         }
+        // Handed-over history goes last: a newly added member first catches up
+        // on the live descriptors and messages, then receives the past that a
+        // member chose to share.
+        if let Some(q) = g.hist.get(peer) {
+            if let Some(job) = q.front() {
+                // The gid is read back from the encoded offer so Work can name
+                // the group without a second lookup.
+                let gid = record::hist_gid(&job.plain).unwrap_or_default();
+                return Some(Outgoing {
+                    work: Work::Hist {
+                        gid,
+                        to: *peer,
+                        seq: job.seq,
+                    },
+                    plain: job.plain.clone(),
+                });
+            }
+        }
         None
     }
 
     fn settle(&self, peer: &[u8; 32], work: &Work, delivered: bool) {
         let mut g = self.lock();
+        // A hand-over offer lives only in memory, outside any group state: a
+        // result (delivered or refused) drops exactly that queued offer and
+        // never retries, so an older peer that cannot read it is not pestered.
+        if let Work::Hist { to, seq, .. } = work {
+            let empty = if let Some(q) = g.hist.get_mut(to) {
+                q.retain(|j| j.seq != *seq);
+                q.is_empty()
+            } else {
+                false
+            };
+            if empty {
+                g.hist.remove(to);
+            }
+            return;
+        }
         let gid = match work {
             Work::Text { gid, .. } | Work::Descs { gid } | Work::Sync { gid } => *gid,
+            Work::Hist { .. } => unreachable!("handled above"),
         };
         let Some(st) = g.groups.get_mut(&gid) else {
             return;
         };
         match work {
+            Work::Hist { .. } => unreachable!("handled above"),
             Work::Descs { .. } => st
                 .ctrl
                 .retain(|c| !(&c.to == peer && c.kind == CtrlKind::Descs)),
@@ -1014,6 +1095,7 @@ impl GroupCore {
         match rec {
             Record::Text(t) => self.handle_text(&mut g, peer, t, now, trusted, kick),
             Record::Descs(ds) => self.handle_descs(&mut g, peer, ds, now, trusted, kick),
+            Record::HistOffer(o) => self.handle_hist_offer(&mut g, peer, o, now),
             Record::Sync { gid, .. } => {
                 let Some(st) = g.groups.get_mut(&gid) else {
                     return AckStatus::NotAllowed;
@@ -1089,6 +1171,7 @@ impl GroupCore {
             at_ms: now,
             epoch: t.epoch,
             text: t.text,
+            shared_by: None,
         };
         let before = (st.next_ord, st.count, st.last_ms);
         if self.record_locked(st, m.clone()).is_err() {
@@ -1103,6 +1186,83 @@ impl GroupCore {
         let mut shown = m;
         shown.ord = st.next_ord - 1;
         Self::push_event(g, t.gid, GroupEventKind::Received, Some(shown));
+        AckStatus::Stored
+    }
+
+    /// A member handed us a past message (ADR-012). The outer pairwise seal
+    /// authenticated `peer` (the sharer), not the original author, so we accept
+    /// it only from a current member, record it attributed to the author but
+    /// marked as shared by `peer`, and skip anything we already hold. We never
+    /// forward it on, and a counter we have already seen is a duplicate.
+    fn handle_hist_offer(
+        &self,
+        g: &mut Inner,
+        peer: &[u8; 32],
+        o: record::HistOffer,
+        now: u64,
+    ) -> AckStatus {
+        let Some(st) = g.groups.get_mut(&o.gid) else {
+            return AckStatus::NotAllowed;
+        };
+        match st.status {
+            Status::Pending { .. } => return AckStatus::Busy,
+            Status::Left | Status::Removed => return AckStatus::NotAllowed,
+            Status::Joined => {}
+        }
+        // Only a current member may hand history over, and only for an author
+        // the group has actually carried. The sharer vouches for it; it is not
+        // author-signed, which is exactly why we label who shared it.
+        if !st.chain.latest().is_member(peer) {
+            return AckStatus::NotAllowed;
+        }
+        if o.original_sender == self.own || !st.chain.ever_member(&o.original_sender) {
+            return AckStatus::NotAllowed;
+        }
+        if o.text.len() > self.max_text {
+            return AckStatus::TooBig;
+        }
+        // The same per-sender vector that guards live messages guards these:
+        // a counter we have already recorded (live or shared) is a duplicate,
+        // so re-sharing the same past message changes nothing.
+        if !st
+            .vectors
+            .get(&o.original_sender)
+            .is_none_or(|v| v.is_new(o.original_counter))
+        {
+            return AckStatus::Duplicate;
+        }
+        if !st.vectors.contains_key(&o.original_sender)
+            && st.vectors.len() >= super::state::MAX_VECTORS
+        {
+            return AckStatus::Busy;
+        }
+        let m = GroupMsg {
+            ord: 0,
+            outgoing: false,
+            sender: o.original_sender,
+            counter: o.original_counter,
+            id: o.original_id,
+            sent_ms: o.original_sent_ms,
+            at_ms: now,
+            epoch: o.origin_epoch,
+            text: o.text,
+            shared_by: Some(*peer),
+        };
+        let before = (st.next_ord, st.count, st.last_ms);
+        if self.record_locked(st, m.clone()).is_err() {
+            (st.next_ord, st.count, st.last_ms) = before;
+            return AckStatus::Failed;
+        }
+        st.vectors
+            .entry(o.original_sender)
+            .or_default()
+            .mark(o.original_counter);
+        if self.save(st).is_err() {
+            return AckStatus::Failed;
+        }
+        let mut shown = m;
+        shown.ord = st.next_ord - 1;
+        Self::push_event(g, o.gid, GroupEventKind::Received, Some(shown));
         AckStatus::Stored
     }
 
@@ -1241,6 +1401,110 @@ impl GroupCore {
 
     // ── History ──────────────────────────────────────────────────────────────
 
+    /// Offer a bounded slice of recent history to a current member (ADR-012).
+    ///
+    /// This is the explicit, opt-in act: nothing is handed over unless a member
+    /// calls this. The target must be listed in the newest descriptor this
+    /// device holds and must not be this device itself. At most one round is
+    /// served to a given target per descriptor epoch, so reconnecting does not
+    /// repeat it; a second call in the same epoch does nothing and reports zero.
+    ///
+    /// Selection is the newest [`MAX_HIST_PER_HANDOVER`] messages this device
+    /// still holds (best effort: a message swept from the log cannot be shared).
+    /// A message is skipped when its author is the target (the target already is
+    /// that author), when it was itself handed to us by someone else (we only
+    /// pass on what we carry first-hand), or when its body does not encode.
+    ///
+    /// The offers are queued in memory and delivered on the pairwise session to
+    /// the target; the caller wakes delivery for the returned target. Carriage
+    /// through the custody layer for an offline target is a separate job and is
+    /// reached through [`Self::custody_offers_for`]; see that seam.
+    pub fn handover(&self, gid: &[u8; 16], to: &[u8; 32]) -> Result<HandoverOutcome, GroupError> {
+        if to == &self.own {
+            return Err(GroupError::NotMember);
+        }
+        let mut g = self.lock();
+        let st = Self::live_group(&mut g, gid)?;
+        // Read the eligibility facts out of the descriptor, then stop borrowing
+        // it so the marker below can take a mutable borrow of the state.
+        let (is_member, epoch) = {
+            let latest = st.chain.latest();
+            (latest.is_member(to), latest.epoch)
+        };
+        if !is_member {
+            return Err(GroupError::NotMember);
+        }
+        // One round per target per epoch. A repeat in the same epoch is a no-op.
+        if !st.mark_handover(*to, epoch) {
+            return Ok(HandoverOutcome {
+                offered: 0,
+                wake: None,
+            });
+        }
+        if let Err(e) = self.save(st) {
+            // Undo the marker we just set so a later retry is still allowed.
+            st.handed.retain(|h| !(h.to == *to && h.epoch == epoch));
+            return Err(e);
+        }
+        let recent = self.store.page(gid, None, MAX_HIST_PER_HANDOVER);
+        let offers: Vec<Vec<u8>> = recent
+            .into_iter()
+            .rev() // newest first on the wire
+            .filter(|m| m.sender != *to && m.shared_by.is_none() && !m.text.is_empty())
+            .filter_map(|m| {
+                record::HistOffer {
+                    gid: *gid,
+                    origin_epoch: m.epoch,
+                    original_sender: m.sender,
+                    original_counter: m.counter,
+                    original_id: m.id,
+                    original_sent_ms: m.sent_ms,
+                    text: m.text,
+                }
+                .encode()
+                .ok()
+            })
+            .collect();
+        if offers.is_empty() {
+            return Ok(HandoverOutcome {
+                offered: 0,
+                wake: None,
+            });
+        }
+        // The custody seam (ADR-012 step 5, a separate job): the step that
+        // carries offers to an offline target will take exactly these sealed
+        // bodies. Today they are queued for direct pairwise delivery below.
+        self.custody_offers_for(to, &offers);
+        let offered = offers.len();
+        // Number every offer first (one borrow of `hist_seq`), then append them
+        // in one borrow of the queue, so no two fields of the guard are borrowed
+        // mutably at once.
+        let mut jobs = Vec::with_capacity(offered);
+        for plain in offers {
+            let seq = g.hist_seq;
+            g.hist_seq += 1;
+            jobs.push(HistJob { seq, plain });
+        }
+        g.hist.entry(*to).or_default().extend(jobs);
+        Ok(HandoverOutcome {
+            offered,
+            wake: Some(*to),
+        })
+    }
+
+    /// Seam for ADR-012 step 5 (a separate job wires the custody transport).
+    ///
+    /// When the target is offline, the custody step will deposit each sealed
+    /// `HistOffer` with a trusted holder and the target collects it later. The
+    /// bytes handed here are the per-message plaintext offers for `to`, in the
+    /// same order they are queued for direct delivery. This function is the one
+    /// the custody step will call; it does nothing on its own yet so that direct
+    /// delivery is unaffected until that job lands.
+    fn custody_offers_for(&self, _to: &[u8; 32], _offers: &[Vec<u8>]) {
+        // Intentionally empty: direct pairwise delivery already queues these
+        // offers. Step 5 replaces this body with a custody deposit.
+    }
+
     /// A page of the group's messages (the newest `limit`, or those before
     /// `before`), in display order.
     pub fn history(
@@ -1358,6 +1622,7 @@ mod display_tests {
             at_ms: sent,
             epoch: 1,
             text: String::new(),
+            shared_by: None,
         }
     }
 

@@ -625,7 +625,7 @@ impl ChatConnectionHandler for Handler {
 ///
 /// This is the group-specific part of the no-silent-downgrade rule, kept pure
 /// so it can be unit-tested without a network: a body is gated only when the
-/// mode is `require` **and** the item is a message `Text`. Control records
+/// mode is `require` **and** the item carries a message body. Control records
 /// (`Descs`, `Sync`) are never gated — they must flow so a member can learn
 /// the group's epoch and ask for descriptors — and `prefer`/`off` never hold a
 /// body back. When this returns `true`, `pq_gate` drives the exchange and the
@@ -634,7 +634,7 @@ impl ChatConnectionHandler for Handler {
 #[cfg(feature = "pqc")]
 fn body_is_pqc_gated(mode: crate::config::PqcMode, work: &Work) -> bool {
     use crate::config::PqcMode;
-    mode == PqcMode::Require && matches!(work, Work::Text { .. })
+    mode == PqcMode::Require && matches!(work, Work::Text { .. } | Work::Hist { .. })
 }
 
 #[cfg(all(test, feature = "pqc"))]
@@ -647,6 +647,11 @@ mod pqc_gate_tests {
         gid: [1u8; 16],
         id: [2u8; 16],
     };
+    const HIST: Work = Work::Hist {
+        gid: [1u8; 16],
+        to: [3u8; 32],
+        seq: 1,
+    };
     const DESCS: Work = Work::Descs { gid: [1u8; 16] };
     const SYNC: Work = Work::Sync { gid: [1u8; 16] };
 
@@ -657,6 +662,7 @@ mod pqc_gate_tests {
     #[test]
     fn require_gates_a_text_body_so_it_never_goes_out_classical_first() {
         assert!(body_is_pqc_gated(PqcMode::Require, &TEXT));
+        assert!(body_is_pqc_gated(PqcMode::Require, &HIST));
     }
 
     /// Control records are never gated under any mode: they carry no message
