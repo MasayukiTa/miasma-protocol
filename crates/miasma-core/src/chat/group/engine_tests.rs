@@ -1003,20 +1003,34 @@ fn a_second_handover_in_the_same_epoch_does_nothing() {
 fn handover_refuses_a_non_member_and_skips_the_authors_own_and_reshared() {
     let nodes = friends(3);
     let (a, b, c) = (&nodes[0], &nodes[1], &nodes[2]);
-    let gid = make_group(&nodes, "trio");
+    // a and b are members from the start and both hold the two live messages;
+    // c is added only afterwards, so c holds none of the past on its own.
+    let gid = make_group(&nodes[..2], "trio");
     a.core.send(&gid, "from a", 10).unwrap();
     b.core.send(&gid, "from b", 20).unwrap();
-    pump(&nodes);
+    pump(&nodes[..2]);
     // A non-member and oneself are refused.
-    assert_eq!(a.core.handover(&gid, &[42u8; 32]), Err(GroupError::NotMember));
+    assert_eq!(
+        a.core.handover(&gid, &[42u8; 32]),
+        Err(GroupError::NotMember)
+    );
     assert_eq!(a.core.handover(&gid, &a.id()), Err(GroupError::NotMember));
-    // a hands history to c: c already authored nothing, so both messages go,
-    // but a's offer to b omits b's own message.
+    // a's offer to b omits b's own message: only "from a" is offered back.
     let to_b = a.core.handover(&gid, &b.id()).unwrap();
     assert_eq!(to_b.offered, 1, "b's own message is not offered back to b");
+    pump(&nodes[..2]);
+    // c is added after the fact, catches up on live membership only, and holds
+    // no past messages until a hands them over.
+    a.core.add(&gid, &[(c.id(), String::new(), false)]).unwrap();
     pump(&nodes);
-    // c now re-shares: it may pass on what it authored or received live, but a
-    // message that was itself handed to c is not forwarded again.
+    c.core.accept_invite(&gid).unwrap();
+    pump(&nodes);
+    assert!(
+        c.texts(&gid).is_empty(),
+        "the past is not shared on its own"
+    );
+    // a hands its first-hand history to c: both "from a" and "from b" arrive as
+    // shared-in copies attributed to their authors but marked shared by a.
     a.core.handover(&gid, &c.id()).unwrap();
     pump(&nodes);
     let shared_here: Vec<_> = c
@@ -1026,15 +1040,27 @@ fn handover_refuses_a_non_member_and_skips_the_authors_own_and_reshared() {
         .into_iter()
         .filter(|v| v.msg.shared_by.is_some())
         .collect();
-    let reshared = c.core.handover(&gid, &b.id());
-    // b already holds its own and a's live copies; nothing new is created, and
-    // the shared-in copies on c are not forwarded.
-    if let Ok(out) = reshared {
-        for _ in 0..out.offered {}
-    }
     assert!(
         !shared_here.is_empty(),
         "c holds at least one shared-in copy"
+    );
+    // c now re-shares to b. The copies c holds were themselves handed to it, so
+    // they are not forwarded again; b gains no shared-in copy of them.
+    let reshared = c.core.handover(&gid, &b.id());
+    if let Ok(out) = reshared {
+        for _ in 0..out.offered {}
+    }
+    pump(&nodes);
+    let b_shared: Vec<_> = b
+        .core
+        .history(&gid, None, 50)
+        .unwrap()
+        .into_iter()
+        .filter(|v| v.msg.shared_by.is_some())
+        .collect();
+    assert!(
+        b_shared.is_empty(),
+        "a copy that was itself handed to c is not forwarded again"
     );
 }
 
@@ -1064,10 +1090,14 @@ fn re_sharing_a_message_the_member_already_holds_is_a_duplicate() {
 fn a_handover_offers_at_most_the_bound() {
     let nodes = friends(2);
     let gid = make_group(&nodes, "pair");
+    // Send more than the hand-over bound, but drain the outbox between rounds
+    // so no single round exceeds [`MAX_PENDING`] (the outbox bound the sender
+    // enforces). Every message still lands in the store, so the hand-over
+    // selects from more than the bound and must cap itself.
     for i in 0..(MAX_HIST_PER_HANDOVER + 5) {
         nodes[0].core.send(&gid, "m", i as u64).unwrap();
+        pump(&nodes);
     }
-    pump(&nodes);
     let out = nodes[0].core.handover(&gid, &nodes[1].id()).unwrap();
     assert!(
         out.offered <= MAX_HIST_PER_HANDOVER,
