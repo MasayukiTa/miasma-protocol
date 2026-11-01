@@ -2,8 +2,8 @@
 //! trusted contacts, and collect what is waiting for us from them.
 //!
 //! How the bytes reach a holder is the [`MailboxTransport`]; this module only
-//! decides what to ask for and keeps the counts bounded. Nothing is sent
-//! anywhere by this crate yet: the only transport is the one the tests build.
+//! decides what to ask for and keeps the counts bounded. The transport used
+//! over the chat channel is [`super::transport`]; the tests build their own.
 
 use std::collections::HashSet;
 

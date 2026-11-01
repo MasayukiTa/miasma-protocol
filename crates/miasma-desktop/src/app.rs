@@ -225,6 +225,7 @@ pub struct MiasmaApp {
 
     // Hybrid post-quantum protection of private conversations (`privacy.pqc_mode`)
     pqc_mode: miasma_core::config::PqcMode,
+    custody_enabled: bool,
 
     // Storage (the shares this node keeps: listing and deletion)
     storage: StorageState,
@@ -598,6 +599,7 @@ impl MiasmaApp {
             launch_attempts: 0,
             logs: LogsState::new(&data_dir),
             pqc_mode: miasma_core::logging::load_privacy(&data_dir).pqc_mode(),
+            custody_enabled: miasma_core::config::load_custody_enabled(&data_dir),
             storage: StorageState::new(),
             updates: crate::updates::UpdatesUi::new(data_dir.clone()),
             network: crate::network_ui::NetworkUi::new(data_dir.clone()),
@@ -2848,6 +2850,7 @@ impl MiasmaApp {
     /// Privacy and storage: chat protection, logs and how much this computer keeps for others.
     fn settings_privacy(&mut self, ui: &mut egui::Ui) {
         self.pqc_section(ui);
+        self.custody_section(ui);
         let used = (self.quota_mb > 0).then_some(self.used_mb);
         if self.mode.is_easy() {
             // Easy: what keeps this computer's files safe first; logging is under "Advanced".
@@ -3125,6 +3128,25 @@ impl MiasmaApp {
                 self.set_msg(MsgKind::Error, self.pq().save_failed);
             }
         }
+    }
+
+    /// Holding messages for an offline contact: a switch saved to the
+    /// configuration file, off by default. The holders only ever see the
+    /// sealed message, never its contents.
+    fn custody_section(&mut self, ui: &mut egui::Ui) {
+        let st = crate::locale::settings_strings(self.locale);
+        let mut on = self.custody_enabled;
+        kit::section(ui, st.custody_label, |ui| {
+            if ui.checkbox(&mut on, st.custody_label).changed() {
+                let saved =
+                    miasma_core::config::set_custody_enabled_persistent(&self.data_dir, on).is_ok();
+                self.custody_enabled = miasma_core::config::load_custody_enabled(&self.data_dir);
+                if !saved || self.custody_enabled != on {
+                    self.set_msg(MsgKind::Error, st.custody_label);
+                }
+            }
+            kit::hint(ui, st.custody_desc);
+        });
     }
 
     // ── Logs section (Settings) ───────────────────────────────────────────

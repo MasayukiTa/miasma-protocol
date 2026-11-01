@@ -232,6 +232,29 @@ pub fn set_pqc_mode_persistent(data_dir: &Path, mode: PqcMode) -> std::io::Resul
     Ok(())
 }
 
+/// Turn holding messages for offline contacts on or off, saved to the
+/// configuration file so the running node reads the same value. Writes only
+/// when the value changes.
+pub fn set_custody_enabled_persistent(data_dir: &Path, on: bool) -> std::io::Result<()> {
+    let mut c = NodeConfig::load(data_dir)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    if c.chat.custody_enabled != on {
+        c.chat.custody_enabled = on;
+        c.save(data_dir)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+    }
+    c.transport.zeroize_secret_copies();
+    Ok(())
+}
+
+/// Read the saved "hold messages for offline contacts" value, or the default
+/// (off) when the file cannot be read.
+pub fn load_custody_enabled(data_dir: &Path) -> bool {
+    NodeConfig::load(data_dir)
+        .map(|c| c.chat.custody_enabled)
+        .unwrap_or(false)
+}
+
 pub const DEFAULT_LOG_BUFFER_MIB: u32 = 2;
 pub const MIN_LOG_BUFFER_MIB: u32 = 1;
 pub const MAX_LOG_BUFFER_MIB: u32 = 8;
@@ -355,10 +378,16 @@ pub struct ChatConfig {
     #[serde(default = "default_true")]
     pub read_receipts: bool,
     /// Hold sealed messages in memory for trusted contacts who are offline
-    /// (default off). Nothing listens for it yet; the setting only decides
-    /// whether the in-memory custody store accepts items.
+    /// (default off). When on, this node answers the custody verbs for the
+    /// contacts it trusts, and a message that cannot be delivered directly is
+    /// left with trusted holders and collected on reconnect.
     #[serde(default)]
     pub custody_enabled: bool,
+    /// How many trusted holders get a copy of a message that could not be
+    /// delivered directly (1-8, default 2). Only used when a direct send
+    /// fails; the holders are chosen from the contact list.
+    #[serde(default = "default_chat_custody_copies")]
+    pub custody_copies: usize,
     /// Join a group at once when a trusted contact who administers it adds
     /// you (default on). Off: the invitation waits for an answer (Accept or
     /// Decline). Either way you can leave with one action, and an invitation
@@ -369,12 +398,16 @@ pub struct ChatConfig {
 
 pub const DEFAULT_CHAT_MAX_MESSAGE_BYTES: usize = 4096;
 pub const DEFAULT_CHAT_OUTBOX_MAX: usize = 500;
+pub const DEFAULT_CHAT_CUSTODY_COPIES: usize = 2;
 
 fn default_chat_max_message_bytes() -> usize {
     DEFAULT_CHAT_MAX_MESSAGE_BYTES
 }
 fn default_chat_outbox_max() -> usize {
     DEFAULT_CHAT_OUTBOX_MAX
+}
+fn default_chat_custody_copies() -> usize {
+    DEFAULT_CHAT_CUSTODY_COPIES
 }
 
 impl Default for ChatConfig {
@@ -387,6 +420,7 @@ impl Default for ChatConfig {
             retention_days: 0,
             read_receipts: true,
             custody_enabled: false,
+            custody_copies: DEFAULT_CHAT_CUSTODY_COPIES,
             group_auto_join: true,
         }
     }

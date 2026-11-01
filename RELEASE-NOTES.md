@@ -10,6 +10,7 @@ This beta adds calls between contacts, and lets a group member share recent mess
 - You can choose which microphone and speaker the call uses from the audio-device menu in the call view.
 - Calls are end-to-end protected, with keys exchanged inside the chat channel. During a call, both people can read the 20-digit safety code shown on their screens to each other. If the codes differ, an attacker may be interfering; end the call and check with your contact.
 - An indicator stays visible while the microphone, camera or screen is in use.
+- Chat can hold messages for an offline contact. When this is on, your node keeps a sealed copy of a message for a trusted contact who is offline, and when a direct send does not get through it leaves a copy with your other trusted contacts; the message is delivered once the recipient comes back online, and is applied only once even if the sender also resends in the meantime. The people who hold a copy only ever see the sealed message, never its contents, and nothing is written to disk. This is off by default; turn it on with `custody_enabled = true` under `[chat]` in `config.toml`, or with "Hold messages for offline contacts" on the Privacy and storage settings page. You can also set how many trusted contacts receive a copy with `custody_copies` (1 to 8).
 
 ## Notes
 
