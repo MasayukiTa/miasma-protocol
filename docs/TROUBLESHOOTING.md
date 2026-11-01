@@ -131,6 +131,21 @@ enabled = false
 
 **Safety code**: During a call, each person sees a 20-digit code. Read the codes to each other and compare all 20 digits. If they differ, an attacker may be interfering; end the call and check with your contact. The code helps detect interference; calls are beta and have not been independently audited. Do not use them for material whose exposure would be serious.
 
+## Messages held for offline contacts
+
+**What it does**: When holding is on, your node keeps a sealed copy of a message for a trusted contact who is offline. When a direct send does not get through, it also leaves a copy with your other trusted contacts, who pass it on once the recipient is back online. The message is applied only once, even if the sender resends it directly in the meantime. The contacts who hold a copy only ever see the sealed message, never its contents, and nothing is written to disk.
+
+**Turn it on**: It is off by default. In `config.toml`, set `custody_enabled = true` under `[chat]`, or on the desktop app open Settings > Privacy and storage and turn on "Hold messages for offline contacts".
+
+```toml
+[chat]
+custody_enabled = true
+```
+
+**How many copies**: Set `custody_copies` under `[chat]` to the number of trusted contacts that receive a copy of an undelivered message (1 to 8).
+
+**A message did not arrive after reconnect**: Holding only works for contacts you both trust, and only while at least one of your trusted contacts was online to hold the copy. If no trusted contact was reachable when the direct send failed, the message waits in the sender's outbox and is retried instead. Check that holding is on, that the sender and recipient are contacts of the holder, and that a holder was online.
+
 ## Getting support
 
 1. Open the Status tab
