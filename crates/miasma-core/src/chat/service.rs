@@ -22,6 +22,7 @@ use std::{
 };
 
 use iroh::endpoint::{Connection, ConnectionError};
+use tokio::io::AsyncReadExt;
 use tokio::sync::{watch, Notify, Semaphore};
 use tracing::{debug, info, warn};
 
@@ -44,6 +45,7 @@ use super::{
     sync,
 };
 use crate::{
+    chat::mailbox::holder::CustodyStore as _,
     config::{NodeConfig, PqcMode},
     push::{
         contact::fingerprint,
@@ -86,6 +88,16 @@ pub struct ChatSettings {
     pub inbound_per_minute: f64,
     /// Join a group at once when a trusted administrator adds us (`chat.group_auto_join`).
     pub group_auto_join: bool,
+    /// Hold sealed messages for trusted contacts who are offline, and leave a
+    /// copy with trusted holders when a direct send cannot go through
+    /// (`chat.custody_enabled`, default off).
+    pub custody_enabled: bool,
+    /// How many trusted holders get a copy when a direct send fails
+    /// (`chat.custody_copies`, 1-8).
+    pub custody_copies: usize,
+    /// How often the collection task asks our trusted holders for anything
+    /// kept for us. It also runs when woken by a fresh inbound connection.
+    pub custody_collect_every: Duration,
     /// `privacy.pqc_mode`. Only builds with the `pqc` feature act on it.
     pub pqc_mode: PqcMode,
     /// Where the record of the last session files written is kept, outside
@@ -111,6 +123,9 @@ impl Default for ChatSettings {
             inbound_burst: 20.0,
             inbound_per_minute: 30.0,
             group_auto_join: true,
+            custody_enabled: false,
+            custody_copies: crate::config::DEFAULT_CHAT_CUSTODY_COPIES,
+            custody_collect_every: Duration::from_secs(300),
             // Baseline for tests and embedders; the daemon takes the mode from
             // `privacy.pqc_mode` (default `prefer`) when it starts.
             pqc_mode: PqcMode::Off,
@@ -223,6 +238,8 @@ pub fn start_for_daemon(
     let settings = ChatSettings {
         max_message_bytes: cfg.chat.max_message_bytes.clamp(1, proto::MAX_TEXT_BYTES),
         group_auto_join: cfg.chat.group_auto_join,
+        custody_enabled: cfg.chat.custody_enabled,
+        custody_copies: cfg.chat.custody_copies.clamp(1, 8),
         pqc_mode: cfg.privacy.pqc_mode(),
         anchor_dir: crate::paths::anchor_dir(data_dir),
         ..ChatSettings::default()
@@ -293,6 +310,13 @@ pub struct ChatService {
     /// Node-wide count of chat sends in flight, shared with group chat and the
     /// push send loop so the latter can pace itself while chat is sending.
     activity: ChatActivity,
+    /// The holder store, when `custody_enabled` is on; `None` keeps the node
+    /// holding nothing and answering no custody verb (exactly as before).
+    custody: Option<Arc<super::mailbox::holder::MemoryCustody>>,
+    /// Wakes the collection task so it asks holders at once (on a fresh inbound
+    /// connection, say). The task also runs on its own timer. Unused when
+    /// custody is off.
+    custody_collect: Arc<Notify>,
     groups: OnceLock<Arc<super::group::service::GroupService>>,
     #[cfg(feature = "pqc")]
     call_sink: Mutex<Option<tokio::sync::mpsc::Sender<super::call::CallInbound>>>,
@@ -350,6 +374,24 @@ impl ChatService {
             core.record_unsent(&e, fail::EXPIRED, now);
         }
         let (shutdown, _) = watch::channel(false);
+        // With custody on, build the holder store and let every contact this
+        // node trusts use it. Trust is re-seeded for a caller on each request
+        // too, so a contact added later is served without a restart.
+        let custody = if settings.custody_enabled {
+            let store =
+                super::mailbox::holder::MemoryCustody::new(super::mailbox::holder::CustodyLimits {
+                    enabled: true,
+                    ..super::mailbox::holder::CustodyLimits::default()
+                });
+            for c in contacts.list() {
+                if let Some(id) = c.endpoint_bytes() {
+                    store.trust(id);
+                }
+            }
+            Some(Arc::new(store))
+        } else {
+            None
+        };
         let svc = Arc::new(Self {
             core,
             contacts,
@@ -367,6 +409,8 @@ impl ChatService {
             workers: Mutex::new(HashMap::new()),
             shutdown,
             activity: ChatActivity::new(),
+            custody,
+            custody_collect: Arc::new(Notify::new()),
             groups: OnceLock::new(),
             #[cfg(feature = "pqc")]
             call_sink: Mutex::new(None),
@@ -390,6 +434,31 @@ impl ChatService {
                     }
                     tokio::select! {
                         _ = tokio::time::sleep(Duration::from_secs(24 * 3600)) => {}
+                        _ = stop.changed() => return,
+                    }
+                }
+            });
+        }
+        // With custody on, one task asks our trusted holders for anything kept
+        // for us: on a timer, and at once whenever it is woken (a contact just
+        // connected). It runs even with an empty outbox, so an idle recipient
+        // still collects. Each item is applied as a direct delivery, so a copy
+        // we already have is dropped.
+        if svc.custody.is_some() {
+            let me = svc.clone();
+            let wake = svc.custody_collect.clone();
+            let mut stop = svc.shutdown.subscribe();
+            tokio::spawn(async move {
+                // A short first pass so a recipient that just came online does
+                // not wait a whole period for messages left while it was away.
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                loop {
+                    let worker = me.clone();
+                    let _ =
+                        tokio::task::spawn_blocking(move || worker.collect_from_holders()).await;
+                    tokio::select! {
+                        _ = tokio::time::sleep(me.settings.custody_collect_every) => {}
+                        _ = wake.notified() => {}
                         _ = stop.changed() => return,
                     }
                 }
@@ -508,6 +577,19 @@ impl ChatService {
         tokio::spawn(async move { me.worker(peer, wake).await });
     }
 
+    /// Wake the custody collection task so it asks our holders right away.
+    /// A no-op when custody is off.
+    pub fn kick_collect(&self) {
+        if self.custody.is_some() {
+            self.custody_collect.notify_one();
+        }
+    }
+
+    /// A snapshot of what this node is holding for others, when custody is on.
+    pub fn custody_stats(&self) -> Option<super::mailbox::holder::CustodyStats> {
+        self.custody.as_ref().map(|c| c.stats())
+    }
+
     async fn worker(self: Arc<Self>, peer: [u8; 32], wake: Arc<Notify>) {
         let mut stop = self.shutdown.subscribe();
         let mut conn: Option<Connection> = None;
@@ -610,6 +692,22 @@ impl ChatService {
                         e.attempts += 1;
                         e.last_error = Some(why.to_owned());
                     });
+                    // A direct send that did not go through: leave a copy with
+                    // trusted holders (text only, not a read receipt), so the
+                    // contact can collect it while we cannot reach it. The
+                    // sealed bytes are the same the direct send used, so a
+                    // duplicate is dropped on arrival.
+                    if self.custody.is_some() && entry.kind != OutKind::Read {
+                        if let Ok((wire, _)) = self.core.prepare_wire(&entry.id) {
+                            let me = self.clone();
+                            let peer = peer;
+                            tokio::task::spawn_blocking(move || {
+                                me.deposit_with_holders(&peer, &wire)
+                            })
+                            .await
+                            .ok();
+                        }
+                    }
                     // A wake means the contact is here: start the schedule over.
                     if self.wait(&wake, &mut stop, failures).await {
                         failures = 0;
@@ -846,6 +944,133 @@ impl ChatService {
         }
     }
 
+    // ── Custody ──────────────────────────────────────────────────────────────
+
+    /// Whether `peer` is a contact this node accepts messages from (and so may
+    /// also use custody).
+    fn contact_may_write(&self, peer: &[u8; 32]) -> bool {
+        matches!(self.contacts.by_endpoint(peer), Some(c) if c.allow_receive)
+    }
+
+    /// Answer one custody request on an open stream. The caller `who` is the
+    /// authenticated peer; it is trusted afresh here so a contact added after
+    /// start is served. A refusal is a frame, not a closed connection.
+    async fn serve_custody(
+        &self,
+        who: &[u8; 32],
+        tx: &mut iroh::endpoint::SendStream,
+        rx: &mut iroh::endpoint::RecvStream,
+    ) {
+        use super::mailbox::holder::CustodyStore;
+        use super::mailbox::wire::{self, Request, Response};
+        let Some(store) = self.custody.clone() else {
+            return;
+        };
+        store.trust(*who);
+        let req =
+            match tokio::time::timeout(self.settings.read_timeout, wire::read_request(rx)).await {
+                Ok(Ok(r)) => r,
+                _ => return,
+            };
+        let now = now_ms();
+        let who = *who;
+        let resp = tokio::task::spawn_blocking(move || match req {
+            Request::Deposit { tag, item, blob } => {
+                match store.deposit(&who, tag, item, &blob, now) {
+                    Ok(o) => Response::Deposited(o),
+                    Err(e) => Response::Refused(e),
+                }
+            }
+            Request::List { tag, now_ms } => match store.list(&who, tag, now_ms) {
+                Ok(v) => Response::Listing(v),
+                Err(e) => Response::Refused(e),
+            },
+            Request::Fetch { tag, item, now_ms } => match store.fetch(&who, tag, item, now_ms) {
+                Ok(o) => Response::Item(o),
+                Err(e) => Response::Refused(e),
+            },
+            Request::Delete { tag, item } => match store.delete(&who, tag, item) {
+                Ok(b) => Response::Deleted(b),
+                Err(e) => Response::Refused(e),
+            },
+        })
+        .await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let _ = wire::write_response(tx, &resp).await;
+        let _ = tx.finish();
+    }
+
+    /// The trusted contacts, other than `peer`, that could hold a copy for it.
+    fn holders_for(&self, peer: &[u8; 32]) -> Vec<[u8; 32]> {
+        self.contacts
+            .list()
+            .into_iter()
+            .filter_map(|c| c.endpoint_bytes())
+            .filter(|id| id != peer)
+            .collect()
+    }
+
+    /// Leave a copy of the sealed envelope for `peer` with trusted holders,
+    /// after a direct send could not go through. Does nothing when custody is
+    /// off or there is no holder to ask. The envelope is the same bytes the
+    /// direct send would have used, so the recipient drops a duplicate.
+    fn deposit_with_holders(&self, peer: &[u8; 32], wire: &[u8]) {
+        if self.custody.is_none() {
+            return;
+        }
+        let Some(item) = super::mailbox::ids::item_id_of(wire) else {
+            return;
+        };
+        let holders = self.holders_for(peer);
+        if holders.is_empty() {
+            return;
+        }
+        let client = super::mailbox::client::MailboxClient::new(
+            super::mailbox::transport::ChatMailboxTransport::new(self.node.clone()),
+            self.settings.custody_copies,
+        );
+        let me = self.core.own_id();
+        let rep = client.deposit(&holders, &me, peer, item, wire, now_ms());
+        if !rep.held_by.is_empty() {
+            debug!(
+                peer = %fingerprint(peer),
+                "left a copy with {} holder(s)", rep.held_by.len()
+            );
+        }
+    }
+
+    /// Collect from trusted holders whatever waits for us, applying each item
+    /// once as a direct delivery. Does nothing when custody is off.
+    fn collect_from_holders(&self) {
+        if self.custody.is_none() {
+            return;
+        }
+        let holders: Vec<[u8; 32]> = self
+            .contacts
+            .list()
+            .into_iter()
+            .filter_map(|c| c.endpoint_bytes())
+            .collect();
+        if holders.is_empty() {
+            return;
+        }
+        let client = super::mailbox::client::MailboxClient::new(
+            super::mailbox::transport::ChatMailboxTransport::new(self.node.clone()),
+            self.settings.custody_copies,
+        );
+        let me = self.core.own_id();
+        let core = self.core.clone();
+        let rep = client.collect(&holders, &me, now_ms(), |sender, wire| {
+            core.accept(sender, wire, now_ms()).status.is_delivered()
+        });
+        if rep.taken > 0 {
+            debug!("collected {} message(s) from holders", rep.taken);
+        }
+    }
+
     // ── Receiving ────────────────────────────────────────────────────────────
 
     async fn serve(self: Arc<Self>, conn: Connection) {
@@ -874,8 +1099,11 @@ impl ChatService {
             }
             if !announced {
                 announced = true;
-                // The contact is online: let our own queue for it go out now.
+                // The contact is online: let our own queue for it go out now,
+                // and ask our holders in case this contact (or any) kept
+                // something for us while we were away.
                 self.kick(&remote);
+                self.kick_collect();
             }
             let (mut tx, mut rx) = tokio::select! {
                 _ = shutdown.changed() => break,
@@ -924,6 +1152,29 @@ impl ChatService {
                     _ => break,
                 }
             };
+            // One byte is read first. A custody request (deposit/list/fetch/
+            // delete) begins with CUSTODY_STREAM_TAG (0xC0); a chat frame
+            // begins with the high byte of its length, always 0x00 for a body
+            // within MAX_FRAME_BODY, so the two can never be confused and a
+            // build from before custody never sends the tag. The byte is
+            // restored in front of the stream for the chat path.
+            let first = tokio::time::timeout(self.settings.read_timeout, rx.read_u8()).await;
+            let first = match first {
+                Ok(Ok(b)) => b,
+                _ => break,
+            };
+            if first == super::mailbox::wire::CUSTODY_STREAM_TAG {
+                if self.custody.is_some() && self.contact_may_write(&remote) {
+                    self.serve_custody(&remote, &mut tx, &mut rx).await;
+                } else {
+                    // Not offering custody, or not a contact that may use it.
+                    conn.close(CLOSE_NOT_ALLOWED.into(), b"");
+                    return;
+                }
+                continue;
+            }
+            let first_byte = [first];
+            let mut rx = AsyncReadExt::chain(&first_byte[..], rx);
             let frame =
                 tokio::time::timeout(self.settings.read_timeout, proto::read_frame(&mut rx)).await;
             let wire = match frame {

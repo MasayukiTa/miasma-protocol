@@ -26,6 +26,8 @@ settings_strings! {
     cat_general, cat_privacy, cat_network, cat_updates, cat_about, cat_danger,
     // The Danger zone page.
     danger_intro,
+    // The custody switch on the Privacy and storage page.
+    custody_label, custody_desc,
     // Absolute dates: the zone the time is written in.
     utc,
 }
@@ -46,6 +48,8 @@ static SE_EN: SettingsStrings = SettingsStrings {
     cat_about: "About",
     cat_danger: "Danger zone",
     danger_intro: "These actions delete data and cannot be undone. Each one asks you to confirm and says what will be deleted.",
+    custody_label: "Hold messages for offline contacts",
+    custody_desc: "When this is on, your node keeps a sealed copy of a message for a trusted contact who is offline, and leaves a copy with your other trusted contacts when a direct send does not get through, so it can be delivered once they come back. Holders only ever see the sealed message, never its contents. Off by default.",
     utc: "UTC",
 };
 
@@ -57,6 +61,8 @@ static SE_JA: SettingsStrings = SettingsStrings {
     cat_about: "このアプリについて",
     cat_danger: "危険な操作",
     danger_intro: "ここにある操作はデータを削除し、元に戻せません。どの操作も、実行前に何が消えるかを示して確認を求めます。",
+    custody_label: "オフラインの相手宛てのメッセージを預かる",
+    custody_desc: "オンにすると、オフラインの信頼できる相手宛てのメッセージを封をしたまま自分のノードが預かり、直接送れなかったときは信頼できるほかの相手にも封をした複製を預けて、相手が戻ったときに届けられるようにします。預かる側に見えるのは封をしたメッセージだけで、中身は見えません。既定ではオフです。",
     utc: "UTC",
 };
 
@@ -69,6 +75,8 @@ static SE_ZH_CN: SettingsStrings = SettingsStrings {
     cat_danger: "危险操作",
     danger_intro:
         "这里的操作会删除数据，且无法撤销。每项操作在执行前都会说明将删除什么并请您确认。",
+    custody_label: "为离线联系人保管消息",
+    custody_desc: "开启后，当信任的联系人处于离线状态时，你的节点会为其保管一份密封的消息副本；当无法直接送达时，还会在你其他信任的联系人处留存一份密封副本，以便对方恢复在线后送达。保管方只能看到密封的消息，看不到其内容。默认关闭。",
     utc: "UTC",
 };
 

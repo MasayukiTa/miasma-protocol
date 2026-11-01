@@ -21,7 +21,7 @@ You do not need to know how peer-to-peer networks work. The app is built around 
 - **Send a file to a trusted contact.** Pick the person, pick the file, and send. No account, no upload to a website, and no link to paste around.
 - **Receive a file.** Files from your contacts show up in the app. You can also receive by Share ID, with an optional password.
 - **Keep a file safely.** Save a file in encrypted form on your own computer and get it back later.
-- **Talk in conversations and groups.** Send short messages to one contact or to a group. Messages sent while someone is offline are held and delivered when they return.
+- **Talk in conversations and groups.** Send short messages to one contact or to a group. Messages sent while someone is offline are held and delivered when they return. You can also turn on holding a sealed copy with your other trusted contacts, so a message still arrives when a direct send does not get through; this is off by default and the holders never see the contents.
 - **Work on a poor connection.** Large transfers can be stopped and continued later from where they stopped.
 - **Use it in your language.** The interface is available in English, Japanese and Simplified Chinese.
 
