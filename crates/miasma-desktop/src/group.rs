@@ -1117,6 +1117,7 @@ mod tests {
             delivered: outgoing.then_some(0),
             failed: outgoing.then_some(0),
             gap_before: 0,
+            shared_by: None,
         }
     }
 

@@ -2208,6 +2208,7 @@ impl GroupUi {
                 delivered: outgoing.then_some(1),
                 failed: outgoing.then_some(0),
                 gap_before: 0,
+                shared_by: None,
             };
         let mut ui = GroupUi {
             locale,
@@ -2325,6 +2326,7 @@ mod tests {
             delivered: outgoing.then_some(1),
             failed: outgoing.then_some(0),
             gap_before: if ord == 3 { 2 } else { 0 },
+            shared_by: None,
         }
     }
 
