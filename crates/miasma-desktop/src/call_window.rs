@@ -159,8 +159,7 @@ fn draw_contents(
     let safety_height = 72.0;
     let avail = ui.available_size();
     let video_height = (avail.y - controls_height - safety_height).max(48.0);
-    let (area, _) =
-        ui.allocate_exact_size(egui::vec2(avail.x, video_height), egui::Sense::hover());
+    let (area, _) = ui.allocate_exact_size(egui::vec2(avail.x, video_height), egui::Sense::hover());
     ui.painter().rect_filled(area, 0.0, egui::Color32::BLACK);
     if let Some((texture, size)) = video {
         let rect = fit_video_rect(area, size);
@@ -300,8 +299,16 @@ mod tests {
         // A small picture in a big area stays its native size (no upscaling).
         let area = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 600.0));
         let rect = fit_video_rect(area, (320, 240));
-        assert!((rect.width() - 320.0).abs() < 0.5, "width was {}", rect.width());
-        assert!((rect.height() - 240.0).abs() < 0.5, "height was {}", rect.height());
+        assert!(
+            (rect.width() - 320.0).abs() < 0.5,
+            "width was {}",
+            rect.width()
+        );
+        assert!(
+            (rect.height() - 240.0).abs() < 0.5,
+            "height was {}",
+            rect.height()
+        );
     }
 
     #[test]

@@ -656,10 +656,7 @@ impl ChatUi {
             // sending nothing of its own can still be shown the other side's shared screen, and
             // gating on local negotiation left that screen unpolled and therefore invisible. Being
             // connected is enough; the daemon returns nothing when there is no newer frame.
-            let wants_video = self
-                .call
-                .status()
-                .map_or(false, |s| s.state == "connected");
+            let wants_video = self.call.status().map_or(false, |s| s.state == "connected");
             if wants_video
                 && call_now.saturating_sub(self.last_frame_poll_ms) >= FRAME_POLL_INTERVAL_MS
             {
@@ -1420,16 +1417,29 @@ impl ChatUi {
             .as_ref()
             .map(|t| (t, self.call_video_size));
         let outcome = crate::call_window::show(ui.ctx(), cc, &self.call, now, video);
-        // Closing the window ends the call: send HangUp exactly once and drop local call state.
-        // This takes precedence over any button pressed in the same frame, so HangUp is not sent
-        // twice.
+        // Closing the window ends the call: it takes precedence over any button pressed in the
+        // same frame, so a HangUp from a button is not sent on top of the one the close sends.
         if outcome.close_requested {
-            self.out.push_back(ChatRequest::Call(CallRequest::HangUp));
-            self.call.end();
-            self.free_call_video_texture();
+            self.on_call_window_closed();
             return;
         }
         self.apply_call_action(outcome.action);
+    }
+
+    /// Handle the call window's own close button: end the call once. Sending HangUp and dropping
+    /// the local call state is guarded by whether a call still exists, so a second close (or a
+    /// close after the call already ended) issues nothing and never sends a duplicate HangUp.
+    /// Returns true when it ended a call this time.
+    #[cfg(feature = "pqc")]
+    fn on_call_window_closed(&mut self) -> bool {
+        use miasma_core::chat::ipc::CallRequest;
+        if !self.call.exists() {
+            return false;
+        }
+        self.out.push_back(ChatRequest::Call(CallRequest::HangUp));
+        self.call.end();
+        self.free_call_video_texture();
+        true
     }
 
     /// Turn a pressed call action into the matching request and local state change. Shared by the
@@ -4142,8 +4152,8 @@ mod tests {
         }
 
         // Draw one frame the way app.rs does: the chat screen, then the call screens on the same
-        // ui just below it. The call screens are an overlay (an Area), so they must not take any
-        // height from this flow.
+        // ui just below it. The call now lives in its own window, so `call_screens` must not take
+        // any height from this flow.
         fn frame_with_call_screens(&mut self) {
             let mut raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -4434,10 +4444,10 @@ mod tests {
         );
     }
 
-    /// Defect 3: a call must never move the rest of the layout. Drawn as an overlay (an Area),
-    /// the incoming banner and the in-call panel take no height from the flow, so the content
-    /// below (here the conversation composer) keeps the same y position before, during and after
-    /// a call. Asserts on the composer's rect, not on pixels.
+    /// Defect 3: a call must never move the rest of the layout. The call now lives in its own
+    /// window, so `call_screens` adds nothing to this flow and the content below (here the
+    /// conversation composer) keeps the same y position before, during and after a call. Asserts
+    /// on the composer's rect, not on pixels.
     #[cfg(feature = "pqc")]
     #[test]
     fn a_call_does_not_move_the_content_below_before_during_or_after() {
@@ -4509,6 +4519,62 @@ mod tests {
             (after - before).abs() < 0.5,
             "after the call the composer did not return: before {before}, after {after}"
         );
+    }
+
+    /// Closing the call window ends the call exactly once: the first close sends a single HangUp
+    /// and drops the local call state; a second close (the window is already gone, the call has
+    /// ended) sends nothing, so a call never leaves a duplicate HangUp behind.
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn closing_the_call_window_hangs_up_once() {
+        use miasma_core::chat::ipc::{CallRequest, CallStatusDto};
+        let mut rig = ChatRig::new("thread", 1400.0);
+        let connected = CallStatusDto {
+            state: "connected".to_owned(),
+            pending_token: None,
+            signalling_connected: true,
+            negotiated_video: false,
+            safety_code: None,
+            muted: false,
+            camera_in_use: false,
+            screen_sharing: false,
+            media_frames_sent: 0,
+            media_frames_played: 0,
+            media_video_frames_sent: 0,
+            media_video_frames_played: 0,
+        };
+        rig.chat.call.on_status(&connected, 1_000);
+        assert!(rig.chat.call.exists(), "the call is up before the close");
+
+        let hang_ups = |rig: &ChatRig| {
+            rig.chat
+                .out
+                .iter()
+                .filter(|r| matches!(r, ChatRequest::Call(CallRequest::HangUp)))
+                .count()
+        };
+
+        // First close: one HangUp, and the local call state is gone.
+        assert!(
+            rig.chat.on_call_window_closed(),
+            "the first close ends the call"
+        );
+        assert_eq!(
+            hang_ups(&rig),
+            1,
+            "the first close sends exactly one HangUp"
+        );
+        assert!(
+            !rig.chat.call.exists(),
+            "the call state is dropped by the close"
+        );
+
+        // Second close (already ended): nothing more is sent, so no duplicate HangUp.
+        assert!(
+            !rig.chat.on_call_window_closed(),
+            "a close after the call ended does nothing"
+        );
+        assert_eq!(hang_ups(&rig), 1, "a second close sends no further HangUp");
     }
 
     #[test]
