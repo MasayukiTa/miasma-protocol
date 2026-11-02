@@ -646,14 +646,20 @@ impl ChatUi {
                     }));
                 }
             }
-            // While a call is connected and the peer's video is negotiated, poll the newest
-            // decoded remote frame on a faster cadence than the status poll, reusing this same
-            // periodic tick (no extra thread). `last_seen` is the counter of the frame already
-            // held, so the daemon answers with nothing until a newer one exists.
+            // While a call is connected, poll the newest decoded remote frame on a faster
+            // cadence than the status poll, reusing this same periodic tick (no extra thread).
+            // `last_seen` is the counter of the frame already held, so the daemon answers with
+            // nothing until a newer one exists.
+            //
+            // The remote frame carries the peer's camera video OR the peer's shared screen. The
+            // gate here must not depend on the local `negotiated_video` flag: a receiver that is
+            // sending nothing of its own can still be shown the other side's shared screen, and
+            // gating on local negotiation left that screen unpolled and therefore invisible. Being
+            // connected is enough; the daemon returns nothing when there is no newer frame.
             let wants_video = self
                 .call
                 .status()
-                .map_or(false, |s| s.state == "connected" && s.negotiated_video);
+                .map_or(false, |s| s.state == "connected");
             if wants_video
                 && call_now.saturating_sub(self.last_frame_poll_ms) >= FRAME_POLL_INTERVAL_MS
             {
@@ -1398,6 +1404,9 @@ impl ChatUi {
     }
 
     #[cfg(feature = "pqc")]
+    /// Draw the call window (a separate native window) for the current call, if any, and apply
+    /// what was pressed. Replaces the old in-window overlay: the banner and in-call panel now live
+    /// in their own OS window (`call_window.rs`). Closing that window hangs up the call.
     pub fn call_screens(&mut self, ui: &mut egui::Ui) {
         use miasma_core::chat::ipc::CallRequest;
         let cc = crate::locale::call_strings(self.locale);
@@ -1406,48 +1415,27 @@ impl ChatUi {
         // A newer frame is uploaded (replacing the old one); no frame at all (audio-only call, or
         // the call ended) frees the texture, so stale call content never lingers.
         self.sync_call_video_texture(ui.ctx());
-        // The banner / in-call panel float over the window as an overlay instead of taking real
-        // height in the top bar. Drawn in the flow, they pushed every tab below them down when a
-        // call began and let them spring back when it ended; as an Area they never move the
-        // layout beneath. They are only shown when there is actually a call to show.
-        let mut pressed: Option<CallAction> = None;
-        let show_banner = self.call.pending_token().is_some();
-        let show_panel = self.call.exists() && self.call.pending_token().is_none();
-        if show_banner || show_panel {
-            let width = ui.available_width().min(560.0).max(280.0);
-            egui::Area::new(ui.id().with("call_overlay"))
-                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, kit::SP_2))
-                .order(egui::Order::Foreground)
-                .show(ui.ctx(), |ui| {
-                    ui.set_max_width(width);
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.set_max_width(width);
-                        if let Some(token) = self.call.pending_token() {
-                            if let Some(a) =
-                                crate::call_ui::incoming_banner(ui, cc, cc.caller_unknown, token)
-                            {
-                                pressed = Some(a);
-                            }
-                        }
-                        if show_panel {
-                            let video = self
-                                .call_video_texture
-                                .as_ref()
-                                .map(|t| (t, self.call_video_size));
-                            if let Some(a) = crate::call_ui::in_call_panel(
-                                ui,
-                                cc,
-                                &self.call,
-                                self.call.status(),
-                                now,
-                                video,
-                            ) {
-                                pressed = Some(a);
-                            }
-                        }
-                    });
-                });
+        let video = self
+            .call_video_texture
+            .as_ref()
+            .map(|t| (t, self.call_video_size));
+        let outcome = crate::call_window::show(ui.ctx(), cc, &self.call, now, video);
+        // Closing the window ends the call: send HangUp exactly once and drop local call state.
+        // This takes precedence over any button pressed in the same frame, so HangUp is not sent
+        // twice.
+        if outcome.close_requested {
+            self.out.push_back(ChatRequest::Call(CallRequest::HangUp));
+            self.call.end();
+            self.free_call_video_texture();
+            return;
         }
+        self.apply_call_action(outcome.action);
+    }
+
+    /// Turn a pressed call action into the matching request and local state change. Shared by the
+    /// call window; kept as its own method so the mapping lives in one place.
+    fn apply_call_action(&mut self, pressed: Option<CallAction>) {
+        use miasma_core::chat::ipc::CallRequest;
         match pressed {
             Some(CallAction::Dial) => {
                 // Dialing starts from the conversation header, not from these screens.
@@ -1876,10 +1864,21 @@ impl ChatUi {
         let mut dialed = false;
         #[cfg(feature = "pqc")]
         let cc = crate::locale::call_strings(self.locale);
+        // Whether a call exists right now, read before the closure so it borrows nothing of `self`.
+        // While a call is up, a small "in a call" marker rides beside the Call button, since the
+        // call itself now lives in its own window and not over the chat.
+        #[cfg(feature = "pqc")]
+        let in_a_call = self.call.exists();
         #[cfg(feature = "pqc")]
         let mut call_extra = |ui: &mut egui::Ui| {
             if crate::call_ui::call_button(ui, cc) {
                 dialed = true;
+            }
+            if in_a_call {
+                ui.add_space(kit::SP_1);
+                ui.add(egui::Label::new(
+                    kit::meta_text(cc.in_a_call, crate::theme::palette().accent).strong(),
+                ));
             }
         };
         #[cfg(feature = "pqc")]

@@ -306,6 +306,34 @@ impl CallUi {
     }
 }
 
+/// Whether the call window should be open, and in which state, for a given call.
+///
+/// A ringing incoming call opens the window in the `Incoming` state (Accept / Reject); a call of
+/// ours (dialing or connected) opens it in the `Active` state; no call at all keeps it `Closed`.
+/// This is the one place that decides it, so the window code and its tests agree.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CallWindow {
+    /// No call: no window.
+    Closed,
+    /// A ringing incoming call: the window shows Accept / Reject.
+    Incoming,
+    /// A call of ours (dialing, ringing out, or connected): the in-call view.
+    Active,
+}
+
+/// Decide the call window's state from the call screen state. An incoming ringing call takes
+/// precedence (there is a token to answer); otherwise an existing call of ours is `Active`; with
+/// no call the window is `Closed`.
+pub fn call_window_state(state: &CallUi) -> CallWindow {
+    if state.pending_token().is_some() {
+        CallWindow::Incoming
+    } else if state.exists() {
+        CallWindow::Active
+    } else {
+        CallWindow::Closed
+    }
+}
+
 /// Build the `Dial` request for a contact (its endpoint id or label, as the chat requests use).
 pub fn dial(contact: &str) -> CallRequest {
     CallRequest::Dial {
@@ -653,5 +681,27 @@ mod tests {
         assert!(ui.remote_frame().is_some());
         ui.on_status(&status("idle", None), 3_000);
         assert!(ui.remote_frame().is_none());
+    }
+
+    #[test]
+    fn the_call_window_opens_on_dial_on_incoming_and_closes_on_end() {
+        let mut ui = CallUi::default();
+        // No call: the window stays closed.
+        assert_eq!(call_window_state(&ui), CallWindow::Closed);
+        // Dialing a contact opens the window in the active state.
+        ui.on_dial();
+        assert_eq!(call_window_state(&ui), CallWindow::Active);
+        // Ending the call closes it again.
+        ui.end();
+        assert_eq!(call_window_state(&ui), CallWindow::Closed);
+        // A ringing incoming call opens the window in the incoming state (a token to answer).
+        ui.on_status(&status("ringing", Some(7)), 1_000);
+        assert_eq!(call_window_state(&ui), CallWindow::Incoming);
+        // Once it connects there is no pending token, so it is an active call.
+        ui.on_status(&status("connected", None), 2_000);
+        assert_eq!(call_window_state(&ui), CallWindow::Active);
+        // An idle status ends the call and closes the window.
+        ui.on_status(&status("idle", None), 3_000);
+        assert_eq!(call_window_state(&ui), CallWindow::Closed);
     }
 }
