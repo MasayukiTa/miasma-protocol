@@ -1588,10 +1588,18 @@ pub fn composer(
     let mut note = None;
     ui.horizontal_top(|ui| {
         ui.spacing_mut().item_spacing.x = SP_2;
+        let has_attach = spec.attach.is_some();
         if let Some((name, enabled)) = spec.attach {
             out.attach = icon_button(ui, Icon::Attach, name, enabled).clicked();
         }
-        let field_w = (ui.available_width() - BTN_MIN_W - SP_2).max(120.0);
+        // Reserve the send button and a gap for every seam in this row. The row does not wrap, so
+        // any width it asks for past the column spills over the right edge and is clipped. After
+        // the attach icon is placed, `available_width()` already excludes the icon but not the
+        // spacing egui inserts before each following widget: there is the field->send seam always,
+        // and the icon->field seam as well when the attach icon is shown. Counting both keeps the
+        // send button inside the column instead of hanging SP_2 past it.
+        let seams = if has_attach { 2.0 } else { 1.0 };
+        let field_w = (ui.available_width() - BTN_MIN_W - seams * SP_2).max(120.0);
         let resp = ui
             .allocate_ui(vec2(field_w, 0.0), |ui| {
                 egui::ScrollArea::vertical()
@@ -1657,6 +1665,7 @@ pub fn conversation_header(
             key: menu_key,
             open: open_menu,
             menu,
+            extra: None,
         },
         None => HeaderEnd::None,
     };
@@ -1668,12 +1677,15 @@ pub fn conversation_header(
 pub enum HeaderEnd<'a> {
     /// Nothing.
     None,
-    /// A "..." button with a popup of rare actions (only worth it with two or more).
+    /// A "..." button with a popup of rare actions (only worth it with two or more). `extra`,
+    /// when given, is one direct action (e.g. a call button) drawn just to the left of the
+    /// "..." so it rides in the header row instead of taking a loose row of its own.
     Menu {
         name: &'a str,
         key: &'a str,
         open: bool,
         menu: &'a mut dyn FnMut(&mut Ui),
+        extra: Option<&'a mut dyn FnMut(&mut Ui)>,
     },
     /// One direct "i" button (named `name`): for a conversation whose only extra is its
     /// information, so no popup covers the messages.
@@ -1724,6 +1736,7 @@ pub fn conversation_header_ex(
                 key,
                 open,
                 menu,
+                extra,
             } => {
                 ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                     let resp = icon_button(ui, Icon::More, name, true);
@@ -1738,6 +1751,11 @@ pub fn conversation_header_ex(
                         ui.set_width(260.0);
                         menu(ui);
                     });
+                    // A direct action (e.g. the call button) sits just left of the "..." in this
+                    // right-to-left row, so it shares the header line instead of a loose row.
+                    if let Some(extra) = extra {
+                        extra(ui);
+                    }
                 });
             }
             HeaderEnd::Info { name } => {

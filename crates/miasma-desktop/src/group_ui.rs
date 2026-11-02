@@ -1064,6 +1064,7 @@ impl GroupUi {
                     key: "group",
                     open: false,
                     menu: menu_ref,
+                    extra: None,
                 }
             } else {
                 kit::HeaderEnd::None
