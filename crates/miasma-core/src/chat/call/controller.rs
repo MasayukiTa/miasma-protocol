@@ -24,7 +24,7 @@ use super::media::{self, Direction};
 use super::signal::{self, Record};
 use super::state::{
     CallId, CallMachine, Control, Effect, Event, Notice, Offer, PeerId, Reason, Role, State,
-    OFFER_TTL_MS,
+    MEDIA_SILENCE_MS, OFFER_TTL_MS,
 };
 
 pub trait CallSender {
@@ -266,6 +266,65 @@ mod inbound_tests {
             assert!(limiter.allow([peer; 32], u64::from(peer) * 60_000));
         }
         assert_eq!(limiter.peers.len(), 32);
+    }
+
+    // Drive a controller into the connected state the way the production dial
+    // path does: dial, read back the call id from the pending offer, then feed
+    // the matching answer. Returns the connected controller and its peer.
+    fn connected_controller() -> (CallController<Ports>, [u8; 32]) {
+        let peer = [7; 32];
+        let mut c = controller();
+        assert!(c.dial(peer).is_ok());
+        let id = match c.pending_sends[0].effect {
+            Effect::Send { call_id, .. } => call_id,
+            _ => panic!("expected an outgoing offer"),
+        };
+        c.apply_event(Event::ReceivedAnswer { call_id: id }, 1000);
+        assert_eq!(c.status().state, State::Connected);
+        (c, peer)
+    }
+
+    // The peer-loss detector: a connected call whose peer stops sending media
+    // for longer than MEDIA_SILENCE_MS ends on the next tick with the
+    // PeerGone notice (distinct from the hang-up and bye paths, which show
+    // CallEnded). This is the case a loopback test never exercises, where a
+    // dropped bye left the call hung.
+    #[test]
+    fn a_silent_peer_ends_a_connected_call() {
+        let (mut c, _peer) = connected_controller();
+        // Just inside the silence window: still connected, nothing torn down.
+        c.ports.now = 1000 + MEDIA_SILENCE_MS;
+        c.on_tick();
+        assert_eq!(c.status().state, State::Connected);
+        // One millisecond past the window with no peer media observed: the
+        // call ends on its own and the user is told the peer went away.
+        c.ports.now = 1000 + MEDIA_SILENCE_MS + 1;
+        c.on_tick();
+        assert_eq!(c.status().state, State::Idle);
+        assert!(c.take_notices().0.contains(&CallNotice::PeerGone));
+    }
+
+    // A slow-but-alive call must never be torn down: as long as peer media keeps
+    // being observed (note_media_activity), the silence timer is reset every
+    // time, so even far past one window the call stays connected.
+    #[test]
+    fn ongoing_peer_media_keeps_a_slow_call_alive() {
+        let (mut c, _peer) = connected_controller();
+        // Step forward in chunks a little under the window, each time reporting
+        // peer media, for well over a full window in total.
+        let step = MEDIA_SILENCE_MS - 1;
+        let mut now = 1000u64;
+        for _ in 0..4 {
+            now += step;
+            c.note_media_activity(now);
+            c.ports.now = now;
+            c.on_tick();
+            assert_eq!(c.status().state, State::Connected);
+        }
+        // Now let it fall silent: one window after the last activity it ends.
+        c.ports.now = now + MEDIA_SILENCE_MS + 1;
+        c.on_tick();
+        assert_eq!(c.status().state, State::Idle);
     }
 
     struct Sender {
@@ -597,6 +656,10 @@ pub enum CallNotice {
     NoAnswer,
     Connected,
     CallEnded,
+    /// The connected call ended because the peer went silent (media-silence
+    /// timeout); distinct from [`CallNotice::CallEnded`] so the UI can say the
+    /// call dropped on its own.
+    PeerGone,
     EstablishmentFailed,
     ClearIncoming,
     /// The caller failed to send a control message (e.g. transport down).
@@ -618,6 +681,7 @@ impl From<Notice> for CallNotice {
             Notice::NoAnswer => CallNotice::NoAnswer,
             Notice::Connected => CallNotice::Connected,
             Notice::CallEnded => CallNotice::CallEnded,
+            Notice::PeerGone => CallNotice::PeerGone,
             Notice::EstablishmentFailed => CallNotice::EstablishmentFailed,
             Notice::ClearIncoming => CallNotice::ClearIncoming,
         }
@@ -721,6 +785,10 @@ pub struct CallController<P: CallPorts> {
     safety_code: OnceLock<String>,
     negotiated_media: u8,
     entered_at_ms: Option<u64>,
+    // Clock reading of the most recent media activity (peer frame or the
+    // moment of connection). Drives the media-silence timeout: a connected
+    // call whose peer stops sending for MEDIA_SILENCE_MS is torn down.
+    last_media_ms: Option<u64>,
     offer_limiter: OfferLimiter,
     dropped_offers: u64,
     // Whether this endpoint offers video in its own capabilities. Production
@@ -753,6 +821,7 @@ impl<P: CallPorts> CallController<P> {
             safety_code: OnceLock::new(),
             negotiated_media: 0,
             entered_at_ms: None,
+            last_media_ms: None,
             offer_limiter: OfferLimiter::new(),
             dropped_offers: 0,
             local_offers_video: true,
@@ -898,7 +967,14 @@ impl<P: CallPorts> CallController<P> {
         }
     }
 
-    /// Inject the offer timeout after more than 45 seconds in Calling or Ringing.
+    /// Inject the offer timeout after more than 45 seconds in Calling or Ringing,
+    /// and the media-silence timeout when a connected call has received no peer
+    /// media for MEDIA_SILENCE_MS. The silence timer is the peer-loss detector:
+    /// a hang-up signal lost on the relay, or a peer that closed the app without
+    /// sending one, is noticed here because no frames keep arriving. The timer is
+    /// reset by `note_media_activity` whenever peer frames are observed, so a
+    /// slow-but-alive call is never torn down (see MEDIA_SILENCE_MS for why the
+    /// window is 20 s).
     pub fn on_tick(&mut self) {
         let now = self.ports.now_ms();
         if matches!(self.machine.state(), State::Calling | State::Ringing)
@@ -907,6 +983,24 @@ impl<P: CallPorts> CallController<P> {
                 .map_or(false, |entered| now.saturating_sub(entered) > OFFER_TTL_MS)
         {
             self.apply_event(Event::Timeout, now);
+        }
+        if self.machine.state() == State::Connected
+            && self
+                .last_media_ms
+                .map_or(false, |seen| now.saturating_sub(seen) > MEDIA_SILENCE_MS)
+        {
+            self.apply_event(Event::MediaSilence, now);
+        }
+    }
+
+    /// Record that peer media was just observed, resetting the media-silence
+    /// timer. Called once per tick by the runtime before `on_tick` when the
+    /// peer's played-frame counter has advanced. Only meaningful while
+    /// connected; ignored otherwise so a stale reading cannot arm the timer
+    /// outside a call.
+    pub fn note_media_activity(&mut self, now_ms: u64) {
+        if self.machine.state() == State::Connected {
+            self.last_media_ms = Some(now_ms);
         }
     }
 
@@ -1175,6 +1269,10 @@ impl<P: CallPorts> CallController<P> {
                 .as_ref()
                 .and_then(|keys| keys.negotiated)
                 .map_or(0, |caps| caps.media_types);
+            // Arm the media-silence timer from the moment of connection, so a
+            // call that never carries a single peer frame is still torn down
+            // after the silence window rather than hanging forever.
+            self.last_media_ms = Some(now);
         }
         if transition.next == State::Idle {
             self.sas_context = None;
@@ -1184,6 +1282,7 @@ impl<P: CallPorts> CallController<P> {
             self.pending_sends.retain(|send| send.encoded.is_none());
             self.peer = None;
             self.pending_token = None;
+            self.last_media_ms = None;
         }
         send_id
     }

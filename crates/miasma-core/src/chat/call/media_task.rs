@@ -462,10 +462,18 @@ where
         // Camera fragments for this tick (empty when the camera is off).
         let camera_packets = match video.as_mut() {
             Some(driver) => {
-                stats
-                    .camera_in_use
-                    .store(driver.source_is_open(), Ordering::Relaxed);
-                driver.tick(now)
+                let packets = driver.tick(now);
+                // Report the camera as in use only once it has actually put a
+                // frame on the wire, not merely because the device is open. A
+                // frame too large to fragment is dropped before it reaches the
+                // wire (see `frames_dropped_oversize`), leaving the device open
+                // but nothing sent; in that case the camera is not really in
+                // use and the panel must not claim it is.
+                stats.camera_in_use.store(
+                    driver.source_is_open() && driver.frames_sent > 0,
+                    Ordering::Relaxed,
+                );
+                packets
             }
             None => {
                 stats.camera_in_use.store(false, Ordering::Relaxed);

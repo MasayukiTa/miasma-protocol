@@ -581,6 +581,12 @@ pub struct VideoDriver<S, K, E, D> {
     last_decoded: Option<RawPicture>,
     pub frames_sent: u64,
     pub frames_played: u64,
+    /// Source frames that could not be fragmented because they exceeded the
+    /// fragmenter's per-frame ceiling (see `fragment_frame`). Such a frame is
+    /// skipped and a keyframe is requested so the stream recovers; this counter
+    /// makes the skip observable instead of a silent drop. It never holds pixel
+    /// bytes, a key, a nonce, a call id or a peer id.
+    pub frames_dropped_oversize: u64,
 }
 
 impl<S: VideoSource, K: VideoSink, E: VideoEncoder, D: VideoDecoder> VideoDriver<S, K, E, D> {
@@ -601,6 +607,7 @@ impl<S: VideoSource, K: VideoSink, E: VideoEncoder, D: VideoDecoder> VideoDriver
             last_decoded: None,
             frames_sent: 0,
             frames_played: 0,
+            frames_dropped_oversize: 0,
         }
     }
 
@@ -630,6 +637,14 @@ impl<S: VideoSource, K: VideoSink, E: VideoEncoder, D: VideoDecoder> VideoDriver
                 {
                     self.frame_number = self.frame_number.wrapping_add(1);
                     self.frames_sent = self.frames_sent.saturating_add(1);
+                } else {
+                    // The frame did not fit the fragmenter (too many fragments
+                    // for one frame). Skip it rather than send a partial frame,
+                    // and ask the encoder for a keyframe so the next frame can
+                    // stand on its own. Count it so the drop is visible instead
+                    // of silent.
+                    self.frames_dropped_oversize = self.frames_dropped_oversize.saturating_add(1);
+                    self.encoder.request_keyframe();
                 }
             }
         }
@@ -917,6 +932,58 @@ mod tests {
         assert_eq!(MAX_VIDEO_FRAGMENTS_PER_TICK, 70);
     }
 
+    // A source picture whose encoded frame exceeds the fragmenter ceiling is
+    // skipped and counted, not silently swallowed, and the stream keeps going:
+    // the next, in-budget frame is fragmented and sent as usual. This guards
+    // the real-camera regression where a too-large raw picture produced no
+    // wire packets at all and advanced no counter.
+    struct OneOversizeThenSmall {
+        sent: u32,
+    }
+    impl VideoSource for OneOversizeThenSmall {
+        fn next_picture(&mut self) -> Option<RawPicture> {
+            // First picture is far larger than one frame may fragment into;
+            // every later picture is tiny and fits easily.
+            let size = if self.sent == 0 {
+                (MAX_FRAGMENTS_PER_FRAME as usize + 1) * FRAGMENT_PAYLOAD_LEN
+            } else {
+                FRAGMENT_PAYLOAD_LEN
+            };
+            self.sent = self.sent.saturating_add(1);
+            Some(RawPicture {
+                width: 2,
+                height: 2,
+                pixels: vec![self.sent as u8; size],
+            })
+        }
+    }
+
+    #[test]
+    fn oversize_source_frame_is_skipped_counted_and_recovers() {
+        let mut driver = VideoDriver::new(
+            OneOversizeThenSmall { sent: 0 },
+            RecordingVideoSink::new(),
+            PassthroughCodec::new(),
+            PassthroughCodec::new(),
+            20,
+        );
+        // First tick: the oversize frame is skipped and counted; nothing is
+        // queued to send and no frame counts as sent.
+        let first = driver.tick(0);
+        assert!(
+            first.is_empty(),
+            "an oversize frame must not emit fragments"
+        );
+        assert_eq!(driver.frames_sent, 0);
+        assert_eq!(driver.frames_dropped_oversize, 1);
+        // A later tick past the frame interval: the next, small frame fits and
+        // is fragmented and sent, so the stream recovered.
+        let later = driver.tick(20);
+        assert!(!later.is_empty(), "the next in-budget frame must send");
+        assert_eq!(driver.frames_sent, 1);
+        assert_eq!(driver.frames_dropped_oversize, 1);
+    }
+
     // The pseudo codec + fragmentation form an end-to-end moving-pattern path:
     // source -> encode -> fragment -> reassemble -> decode -> sink, and the
     // sink sees the same moving pattern the source produced.
@@ -947,5 +1014,95 @@ mod tests {
             assert_eq!(pic.height, 16);
             assert!(pic.pixels.iter().all(|&b| b == i as u8));
         }
+    }
+
+    // A relay that is both slow and small: it delays every packet by a fixed
+    // number of ticks and carries only a few packets per hop, so a frame that
+    // splits into many fragments cannot cross in one go. Video must still
+    // arrive: the fragments queue, drain a few per tick, and reassemble on the
+    // far side after the delay. This mirrors how `call_ipc_media_test` drives a
+    // pair of endpoints across a transport, but with a deterministic in-process
+    // link instead of a real node, so it carries no key, nonce, call id or peer
+    // id and needs no network.
+    #[test]
+    fn video_survives_a_slow_small_message_transport() {
+        // A picture large enough that one frame needs several fragments, so the
+        // small per-hop limit really does split a frame across ticks.
+        let pixels = 60 * 60;
+        fn driver(
+            size: usize,
+        ) -> VideoDriver<TestPatternSource, RecordingVideoSink, PassthroughCodec, PassthroughCodec>
+        {
+            VideoDriver::new(
+                TestPatternSource::new(60, 60, size),
+                RecordingVideoSink::new(),
+                PassthroughCodec::new(),
+                PassthroughCodec::new(),
+                // A small per-tick send ceiling: only a few fragments leave per
+                // tick, standing in for a transport with a small maximum
+                // message size.
+                3,
+            )
+        }
+        let mut sender = driver(pixels);
+        let mut receiver = driver(pixels);
+
+        // The slow link: a packet handed in at tick `t` is delivered at tick
+        // `t + DELAY`. Holds opaque 60-byte bodies only.
+        const DELAY: u64 = 5;
+        let mut in_flight: Vec<(u64, [u8; FRAME_PLAINTEXT_LEN])> = Vec::new();
+
+        let frame_interval = 20u64;
+        let mut delivered = 0usize;
+        // Run enough ticks for several frames to be produced, fragmented a few
+        // at a time, delayed, and reassembled on the far side.
+        for step in 0..40u64 {
+            let now = step * frame_interval;
+            // Deliver everything whose delay has elapsed.
+            let mut still = Vec::new();
+            for (due, body) in in_flight.drain(..) {
+                if due <= now {
+                    receiver.receive(&body, now);
+                    delivered += 1;
+                } else {
+                    still.push((due, body));
+                }
+            }
+            in_flight = still;
+            // Produce and enqueue this tick's fragments, then hand them to the
+            // slow link with their delivery time.
+            for body in sender.tick(now) {
+                in_flight.push((now + DELAY * frame_interval, body));
+            }
+        }
+        // Flush anything still in flight after the last tick.
+        let drain_from = 40u64 * frame_interval;
+        for extra in 0..(DELAY + 2) {
+            let now = drain_from + extra * frame_interval;
+            let mut still = Vec::new();
+            for (due, body) in in_flight.drain(..) {
+                if due <= now {
+                    receiver.receive(&body, now);
+                    delivered += 1;
+                } else {
+                    still.push((due, body));
+                }
+            }
+            in_flight = still;
+        }
+
+        // The sender really did split frames into more packets than one hop
+        // could carry, and the receiver still rebuilt whole frames: video
+        // arrives over a slow, small-message transport.
+        assert!(sender.frames_sent >= 2, "several frames were produced");
+        assert!(delivered > 0, "packets crossed the slow link");
+        assert!(
+            receiver.frames_played >= 1,
+            "at least one whole frame was reassembled and decoded on the far side"
+        );
+        assert!(
+            in_flight.is_empty(),
+            "every delayed packet was eventually delivered"
+        );
     }
 }

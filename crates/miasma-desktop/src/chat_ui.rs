@@ -1003,7 +1003,8 @@ impl ChatUi {
     ///
     /// `Status` carries the state word and any ringing token, and (once connected) starts the
     /// duration clock. `Events` advances the poll cursor and ends the call on a `call_ended`
-    /// notice. `RemoteFrame` hands a newer decoded remote video frame to the call screen state.
+    /// or `peer_gone` notice (the latter also shows a short "peer dropped" line). `RemoteFrame`
+    /// hands a newer decoded remote video frame to the call screen state.
     /// `Ok`, `Unavailable` and `Error` change nothing here: the next `Status` reports
     /// the real state (an ended call shows as `idle`, which resets the screen).
     #[cfg(feature = "pqc")]
@@ -1021,7 +1022,17 @@ impl ChatUi {
             }
             CallResponse::Events { next, notices, .. } => {
                 self.call.set_events_since(next);
-                if notices.iter().any(|n| n.code == "call_ended") {
+                // Both notices end the call. `peer_gone` is the connected call
+                // dropping on its own (the peer went silent): end the call the
+                // same way, but also surface a short line so the user learns the
+                // drop was the far end, not a hang up at either side.
+                let call_ended = notices.iter().any(|n| n.code == "call_ended");
+                let peer_gone = notices.iter().any(|n| n.code == "peer_gone");
+                if peer_gone {
+                    let cc = crate::locale::call_strings(self.locale);
+                    self.notices.push(cc.peer_gone.to_string());
+                }
+                if call_ended || peer_gone {
                     self.call.end();
                     self.free_call_video_texture();
                 }

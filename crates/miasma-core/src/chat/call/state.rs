@@ -40,6 +40,18 @@ pub const OFFER_TTL_MS: u64 = 45_000;
 /// call with neither media nor keepalive for this long is treated as dropped.
 /// Injected as [`Event::MediaSilence`]; kept here as the single source of the
 /// number.
+///
+/// Derivation from the two timings the media path actually runs at: media
+/// frames are paced one per 20 ms tick, and on a relayed link the round trip
+/// measured in practice is on the order of a second (1000+ ms), so a call that
+/// is merely slow can still leave gaps of hundreds of milliseconds between the
+/// frames that arrive. The timeout must sit well above that worst-case gap so a
+/// slow-but-alive call is never torn down, yet well under a minute so a peer
+/// that has truly gone away is noticed quickly. 20 s is about twenty such round
+/// trips (20 * ~1 s) and a thousand missed 20 ms ticks: far longer than any
+/// legitimate relay stall, and short enough that a dead peer is dropped long
+/// before a minute passes. It holds only this duration: no media bytes, key,
+/// nonce, call id or peer id.
 pub const MEDIA_SILENCE_MS: u64 = 20_000;
 
 /// A 16-byte call identifier (section 3.2.1).
@@ -178,8 +190,13 @@ pub enum Notice {
     NoAnswer,
     /// The call is connected.
     Connected,
-    /// The call ended (bye, hang up or silence).
+    /// The call ended at this end's request or the peer's bye (bye or hang up).
     CallEnded,
+    /// The connected call ended because the peer went silent: no media and no
+    /// call signal arrived for [`MEDIA_SILENCE_MS`], so the peer is treated as
+    /// gone. A distinct notice from [`Notice::CallEnded`] so the UI can tell the
+    /// user the call dropped on its own rather than either side hanging up.
+    PeerGone,
     /// Media could not be established after approval (device open failure).
     EstablishmentFailed,
     /// Clear any incoming-call UI without further notice.
@@ -520,7 +537,7 @@ impl CallMachine {
                 self.clear();
                 Transition::to(
                     State::Idle,
-                    vec![Effect::ZeroizeKeys, Effect::Show(Notice::CallEnded)],
+                    vec![Effect::ZeroizeKeys, Effect::Show(Notice::PeerGone)],
                 )
             }
 
@@ -953,7 +970,8 @@ mod tests {
         assert!(has_show(&t.effects, Notice::CallEnded));
     }
 
-    // Row: connected + 20 s media silence -> idle, zeroize, show CallEnded.
+    // Row: connected + 20 s media silence -> idle, zeroize, show PeerGone (a
+    // silent peer drops the call on its own, distinct from a bye or hang up).
     #[test]
     fn row_connected_media_silence() {
         let id = rand_id();
@@ -961,7 +979,7 @@ mod tests {
         let t = m.step(Event::MediaSilence, MEDIA_SILENCE_MS + 1);
         assert_eq!(t.next, State::Idle);
         assert!(has_zeroize(&t.effects));
-        assert!(has_show(&t.effects, Notice::CallEnded));
+        assert!(has_show(&t.effects, Notice::PeerGone));
     }
 
     // Row (any state): state-reachable-but-impossible known-call-id control is

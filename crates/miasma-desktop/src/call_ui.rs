@@ -224,6 +224,12 @@ pub fn in_call_panel(
             if status.screen_sharing {
                 kit::notice(ui, Level::Warn, c.screen_sharing);
             }
+            // A connected call whose video was never negotiated is audio only:
+            // the camera button is disabled above, so say why here rather than
+            // let a camera that never turns on look like a fault.
+            if state.state() == "connected" && !status.negotiated_video {
+                kit::notice(ui, Level::Info, c.audio_only_notice);
+            }
         }
         // The daemon answered a camera-start with `no_camera`: a neutral notice says the camera
         // could not be turned on. It clears when the camera comes into use or the call ends.
@@ -403,6 +409,40 @@ mod tests {
             "connected",
             &status_with_camera(false, false)
         ));
+    }
+
+    // The panel shows the audio-only notice exactly when the call is connected
+    // but its video was never negotiated; this mirrors that choice (made in
+    // `in_call_panel`) without building a window.
+    fn audio_only_notice_shown(state: &str, status: &CallStatusDto) -> bool {
+        state == "connected" && !status.negotiated_video
+    }
+
+    #[test]
+    fn the_audio_only_notice_shows_only_when_connected_without_negotiated_video() {
+        // Connected and video negotiated: a normal video call, no notice.
+        assert!(!audio_only_notice_shown(
+            "connected",
+            &status_with_camera(false, true)
+        ));
+        // Connected but video never negotiated: audio only, so the notice shows.
+        assert!(audio_only_notice_shown(
+            "connected",
+            &status_with_camera(false, false)
+        ));
+        // Not yet connected: nothing is shown whatever the flag says.
+        assert!(!audio_only_notice_shown(
+            "connecting",
+            &status_with_camera(false, false)
+        ));
+        // The notice and the camera button are mutually exclusive: when the
+        // notice shows, the camera button is disabled, and vice versa.
+        let audio_only = status_with_camera(false, false);
+        assert!(audio_only_notice_shown("connected", &audio_only));
+        assert!(!camera_ready("connected", &audio_only));
+        let video = status_with_camera(false, true);
+        assert!(!audio_only_notice_shown("connected", &video));
+        assert!(camera_ready("connected", &video));
     }
 
     #[test]

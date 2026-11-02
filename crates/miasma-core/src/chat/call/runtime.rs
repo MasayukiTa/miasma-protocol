@@ -82,6 +82,12 @@ struct Inner {
     controller: CallController<RuntimePorts>,
     notices: NoticeRing,
     media_stats: Option<MediaStats>,
+    /// The peer media-progress counter (played audio frames plus played video
+    /// frames) seen at the previous observation. The tick loop reads the live
+    /// counter, and when it has advanced it reports peer media activity to the
+    /// controller so the media-silence timer is reset. Holds a monotonic count
+    /// only: no media bytes, key, nonce, call id or peer id.
+    last_media_progress: u64,
     muted: Arc<AtomicBool>,
     /// The audio devices chosen for the next call. A running call keeps the
     /// devices it already opened; this is read when the next call starts its
@@ -119,6 +125,30 @@ impl Inner {
         if self.controller.status().state != State::Connected {
             self.screen_sharing = false;
             self.camera_requested = false;
+            // Forget the progress baseline so a later call starts fresh and the
+            // first frames of the next call are seen as activity, not compared
+            // against a stale count from a previous call.
+            self.last_media_progress = 0;
+        }
+    }
+
+    /// Read the peer media-progress counter and, if it advanced since the last
+    /// observation, tell the controller the peer is still sending media so its
+    /// media-silence timer is reset. Called once per tick before `on_tick`, so a
+    /// call carrying frames is never torn down while a call that has gone silent
+    /// still crosses the silence window. Does nothing when no media task is
+    /// attached (no connected call).
+    fn observe_media_progress(&mut self, now_ms: u64) {
+        let progress = match self.media_stats.as_ref() {
+            Some(stats) => stats
+                .frames_played
+                .load(Ordering::Relaxed)
+                .wrapping_add(stats.video_frames_played.load(Ordering::Relaxed)),
+            None => return,
+        };
+        if progress > self.last_media_progress {
+            self.last_media_progress = progress;
+            self.controller.note_media_activity(now_ms);
         }
     }
 }
@@ -332,6 +362,7 @@ impl CallRuntime {
             controller,
             notices: NoticeRing::default(),
             media_stats: None,
+            last_media_progress: 0,
             muted: Arc::new(AtomicBool::new(false)),
             devices: AudioChoice::default(),
             screen_sharing: false,
@@ -359,7 +390,7 @@ impl CallRuntime {
                         Some(inbound) => { let mut state = task_inner.lock().unwrap_or_else(|e| e.into_inner()); state.controller.on_inbound(inbound); state.collect(); }
                         None => break,
                     },
-                    _ = interval.tick() => { let mut state = task_inner.lock().unwrap_or_else(|e| e.into_inner()); state.controller.on_tick(); state.collect(); },
+                    _ = interval.tick() => { let mut state = task_inner.lock().unwrap_or_else(|e| e.into_inner()); state.observe_media_progress(crate::chat::engine::now_ms()); state.controller.on_tick(); state.collect(); },
                     _ = task_wake.notified() => {},
                     result = sending.join_next(), if !sending.is_empty() => {
                         if let Some(Ok((ticket, ok))) = result {
@@ -668,6 +699,7 @@ fn notice_word(notice: CallNotice) -> &'static str {
         CallNotice::NoAnswer => "no_answer",
         CallNotice::Connected => "connected",
         CallNotice::CallEnded => "call_ended",
+        CallNotice::PeerGone => "peer_gone",
         CallNotice::EstablishmentFailed => "establishment_failed",
         CallNotice::ClearIncoming => "clear_incoming",
         CallNotice::SendFailed => "send_failed",

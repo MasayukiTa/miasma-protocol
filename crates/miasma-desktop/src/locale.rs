@@ -3429,11 +3429,17 @@ call_strings! {
     safety_heading, safety_pending, safety_explain,
     // The always-on line shown while the microphone is in use during a call.
     mic_in_use, camera_in_use, screen_sharing,
+    // Shown in a connected call whose video was not negotiated, so the call is
+    // audio only and the camera button stays disabled. It tells the person why,
+    // so a camera that silently never turns on does not look like a fault.
+    audio_only_notice,
     // The audio-device picker: a heading, the two drop-down labels, and the word for the entry
     // that stands for the host's own default device.
     device_heading, device_input_label, device_output_label, device_default,
-    // Short notices.
-    ended, unavailable,
+    // Short notices. `peer_gone` ends a connected call that dropped on its own
+    // (the peer went silent for the media-silence timeout), as distinct from
+    // `ended`, which is a bye or a hang up by either side.
+    ended, peer_gone, unavailable,
 }
 
 pub fn call_strings(locale: Locale) -> &'static CallStrings {
@@ -3478,12 +3484,14 @@ static CALL_EN: CallStrings = CallStrings {
         "Read this code to the other person; if you read different codes, end the call.",
     mic_in_use: "Microphone in use",
     camera_in_use: "Camera in use",
+    audio_only_notice: "This call is audio only. Video was not turned on for this call, so the camera cannot be used.",
     screen_sharing: "Screen sharing",
     device_heading: "Audio devices",
     device_input_label: "Microphone",
     device_output_label: "Speaker",
     device_default: "Default device",
     ended: "Call ended",
+    peer_gone: "Call ended: the other person's connection dropped.",
     unavailable: "Calls are not available right now.",
 };
 
@@ -3521,12 +3529,15 @@ static CALL_JA: CallStrings = CallStrings {
         "このコードを相手に読み上げ、お互いのコードが違う場合は通話を終了してください。",
     mic_in_use: "マイク使用中",
     camera_in_use: "カメラ使用中",
+    audio_only_notice:
+        "この通話は音声のみです。この通話では映像が有効になっていないため、カメラは使用できません。",
     screen_sharing: "画面共有中",
     device_heading: "音声デバイス",
     device_input_label: "マイク",
     device_output_label: "スピーカー",
     device_default: "既定のデバイス",
     ended: "通話を終了しました",
+    peer_gone: "通話を終了しました：相手との接続が切れました。",
     unavailable: "通話はいま使えない状態です。",
 };
 
@@ -3564,12 +3575,14 @@ static CALL_ZH_CN: CallStrings = CallStrings {
     safety_explain: "请向对方读出此安全码；如果双方的安全码不同，请结束通话。",
     mic_in_use: "麦克风使用中",
     camera_in_use: "摄像头使用中",
+    audio_only_notice: "此通话仅限音频。本次通话未开启视频，因此无法使用摄像头。",
     screen_sharing: "正在共享屏幕",
     device_heading: "音频设备",
     device_input_label: "麦克风",
     device_output_label: "扬声器",
     device_default: "默认设备",
     ended: "通话已结束",
+    peer_gone: "通话已结束：对方的连接已断开。",
     unavailable: "通话目前不可用。",
 };
 

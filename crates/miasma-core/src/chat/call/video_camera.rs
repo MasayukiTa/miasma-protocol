@@ -211,16 +211,34 @@ impl Drop for CameraSource {
         let _ = self.set_enabled(false);
     }
 }
+/// Capture width and height handed to the far side, in pixels.
+///
+/// Derivation: the video path carries no real compression yet (the camera uses
+/// the passthrough codec), so one captured picture is sent as raw I420:
+/// `width * height * 3 / 2` bytes plus a 4-byte geometry prefix. One video
+/// frame must fit the fragmenter's ceiling of
+/// `MAX_FRAGMENTS_PER_FRAME * FRAGMENT_PAYLOAD_LEN` = 512 * 51 = 26112 bytes
+/// (see `video_frame.rs`); a frame larger than that is rejected by
+/// `fragment_frame` and would be dropped before anything reaches the wire. At
+/// 96x72 the I420 picture is 96 * 72 * 3 / 2 = 10368 bytes (+4 = 10372), which
+/// is 204 fragments: comfortably inside the 512 ceiling with margin, and small
+/// enough that one frame completes within a few 20 ms ticks on a ~1 Mbit/s
+/// relayed link. Both dimensions are even, as the I420 chroma subsampling in
+/// `rgb_to_i420` requires. Raising these raises the per-frame fragment count
+/// (and the bit-rate) quadratically; 512 fragments is the hard upper bound.
+const CAPTURE_WIDTH: u16 = 96;
+const CAPTURE_HEIGHT: u16 = 72;
+
 impl VideoSource for CameraSource {
     fn next_picture(&mut self) -> Option<RawPicture> {
         if !self.is_open() {
             return None;
         }
         let frame = self.slot.try_lock().ok()?.take()?;
-        let pixels = convert(&frame, 320, 240)?;
+        let pixels = convert(&frame, CAPTURE_WIDTH as usize, CAPTURE_HEIGHT as usize)?;
         Some(RawPicture {
-            width: 320,
-            height: 240,
+            width: CAPTURE_WIDTH,
+            height: CAPTURE_HEIGHT,
             pixels,
         })
     }
