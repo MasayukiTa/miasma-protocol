@@ -230,6 +230,18 @@ pub fn in_call_panel(
         if state.camera_unavailable() {
             kit::notice(ui, Level::Warn, c.camera_unavailable);
         }
+        // The daemon answered a screen-share start with `screen_permission`: the Screen Recording
+        // permission is not granted. The notice says where to allow it; it clears when screen
+        // sharing comes into use or the call ends.
+        if state.screen_permission_needed() {
+            kit::notice(ui, Level::Warn, c.screen_permission);
+        }
+        // The call status reports the macOS Microphone permission is not granted (the mic opens
+        // when the call connects, not on a button). The notice says where to allow it; it clears
+        // when the call ends. Never shown on Windows or Linux.
+        if state.mic_permission_needed() {
+            kit::notice(ui, Level::Warn, c.mic_permission);
+        }
         if state.mic_in_use() {
             ui.add_space(kit::SP_2);
             mic_indicator(ui, c);

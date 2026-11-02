@@ -498,10 +498,19 @@ impl CallRuntime {
                 CallResponse::Status(dto)
             }
             CallRequest::StartScreenShare => {
+                // On macOS screen capture needs the Screen Recording permission.
+                // Preflight it before opening a source: when it is not granted,
+                // the preflight raises the one-time system prompt and this press
+                // reports a stable reason the UI can explain. On Windows and
+                // Linux the preflight always reports granted, so nothing changes.
                 if !state.controller.negotiated_video() {
                     CallResponse::Error("not_ready".into())
                 } else if state.screen_sharing {
                     CallResponse::Ok
+                } else if let Some(reason) = super::mac_permissions::screen_reason(
+                    super::mac_permissions::preflight_screen(),
+                ) {
+                    CallResponse::Error(reason.into())
                 } else if let Some(source) = state.screen_factory.create() {
                     if send_media_control(&state.media_stats, MediaControl::AttachScreen(source)) {
                         state.screen_sharing = true;
@@ -636,6 +645,10 @@ fn status_dto<P: CallPorts>(
         media_frames_sent: stats.map_or(0, |s| s.frames_sent.load(Ordering::Relaxed)),
         media_frames_played: stats.map_or(0, |s| s.frames_played.load(Ordering::Relaxed)),
         camera_in_use: stats.map_or(false, |s| s.camera_in_use.load(Ordering::Relaxed)),
+        // Only ever true inside a connected call, when the macOS mic preflight
+        // found the permission not granted; false on Windows and Linux.
+        mic_permission_needed: stats
+            .map_or(false, |s| s.mic_permission_needed.load(Ordering::Relaxed)),
         media_video_frames_sent: stats.map_or(0, |s| s.video_frames_sent.load(Ordering::Relaxed)),
         media_video_frames_played: stats
             .map_or(0, |s| s.video_frames_played.load(Ordering::Relaxed)),
@@ -1063,6 +1076,24 @@ mod tests {
         let idle = CallController::new(Ports);
         assert_eq!(idle.status().state, State::Idle);
         assert!(!status_dto(&idle, None, true).screen_sharing);
+    }
+
+    #[test]
+    fn status_dto_reports_mic_permission_only_when_connected() {
+        // A connected call whose media stats carry the mic-permission flag
+        // reports it; without the flag it does not.
+        let (a, _b) = connected();
+        assert_eq!(a.status().state, State::Connected);
+        let stats = MediaStats::default();
+        stats.mic_permission_needed.store(true, Ordering::SeqCst);
+        assert!(status_dto(&a, Some(&stats), false).mic_permission_needed);
+        assert!(!status_dto(&a, None, false).mic_permission_needed);
+
+        // An idle controller ignores the stats, so it never reports it: the
+        // flag follows a connected call only, like the other media fields.
+        let idle = CallController::new(Ports);
+        assert_eq!(idle.status().state, State::Idle);
+        assert!(!status_dto(&idle, Some(&stats), false).mic_permission_needed);
     }
 
     // The screen-share start/stop decision taken by `CallRuntime::handle`:
