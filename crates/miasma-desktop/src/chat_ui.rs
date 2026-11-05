@@ -4472,6 +4472,7 @@ mod tests {
             media_frames_played: 0,
             media_video_frames_sent: 0,
             media_video_frames_played: 0,
+            mic_permission_needed: false,
         };
         rig.chat.call.on_status(&ringing, 1_000);
         rig.frame_with_call_screens();
@@ -4492,6 +4493,7 @@ mod tests {
             media_frames_played: 0,
             media_video_frames_sent: 0,
             media_video_frames_played: 0,
+            mic_permission_needed: false,
         };
         rig.chat.call.on_status(&connected, 2_000);
         rig.frame_with_call_screens();
