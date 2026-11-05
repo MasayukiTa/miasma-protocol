@@ -49,9 +49,12 @@ plutil -lint "$APP/Contents/Info.plist"
 # Remove only these packaging attributes; preserve other extended attributes.
 xattr -rd com.apple.FinderInfo "$APP" 2>/dev/null || true
 xattr -rd com.apple.ResourceFork "$APP" 2>/dev/null || true
-for name in miasma miasma-bridge; do
+for name in miasma-desktop miasma miasma-bridge; do
     codesign --force --sign - "$APP/Contents/MacOS/$name"
 done
+# Copies can regain Finder metadata; remove it before signing the enclosing bundle.
+xattr -rd com.apple.FinderInfo "$APP" 2>/dev/null || true
+xattr -rd com.apple.ResourceFork "$APP" 2>/dev/null || true
 codesign --force --sign - "$APP"
 codesign --verify --deep --strict "$APP"
 echo "Built: $APP"
