@@ -388,6 +388,18 @@ pub struct ChatConfig {
     /// fails; the holders are chosen from the contact list.
     #[serde(default = "default_chat_custody_copies")]
     pub custody_copies: usize,
+    /// Total bytes a holder keeps for all offline contacts (default 2 MiB).
+    /// Clamped to a hard ceiling of 4 MiB when the daemon starts.
+    #[serde(default = "default_chat_custody_max_total_bytes")]
+    pub custody_max_total_bytes: usize,
+    /// Greatest number of held items a holder keeps in total (default 256).
+    /// Clamped to a hard ceiling of 1024 when the daemon starts.
+    #[serde(default = "default_chat_custody_max_items")]
+    pub custody_max_items: usize,
+    /// Days a held item lives before it is dropped (default 14). Clamped to a
+    /// hard ceiling of 30 days when the daemon starts.
+    #[serde(default = "default_chat_custody_ttl_days")]
+    pub custody_ttl_days: u64,
     /// Join a group at once when a trusted contact who administers it adds
     /// you (default on). Off: the invitation waits for an answer (Accept or
     /// Decline). Either way you can leave with one action, and an invitation
@@ -399,6 +411,9 @@ pub struct ChatConfig {
 pub const DEFAULT_CHAT_MAX_MESSAGE_BYTES: usize = 4096;
 pub const DEFAULT_CHAT_OUTBOX_MAX: usize = 500;
 pub const DEFAULT_CHAT_CUSTODY_COPIES: usize = 2;
+pub const DEFAULT_CHAT_CUSTODY_MAX_TOTAL_BYTES: usize = 2 * 1024 * 1024;
+pub const DEFAULT_CHAT_CUSTODY_MAX_ITEMS: usize = 256;
+pub const DEFAULT_CHAT_CUSTODY_TTL_DAYS: u64 = 14;
 
 fn default_chat_max_message_bytes() -> usize {
     DEFAULT_CHAT_MAX_MESSAGE_BYTES
@@ -408,6 +423,15 @@ fn default_chat_outbox_max() -> usize {
 }
 fn default_chat_custody_copies() -> usize {
     DEFAULT_CHAT_CUSTODY_COPIES
+}
+fn default_chat_custody_max_total_bytes() -> usize {
+    DEFAULT_CHAT_CUSTODY_MAX_TOTAL_BYTES
+}
+fn default_chat_custody_max_items() -> usize {
+    DEFAULT_CHAT_CUSTODY_MAX_ITEMS
+}
+fn default_chat_custody_ttl_days() -> u64 {
+    DEFAULT_CHAT_CUSTODY_TTL_DAYS
 }
 
 impl Default for ChatConfig {
@@ -421,6 +445,9 @@ impl Default for ChatConfig {
             read_receipts: true,
             custody_enabled: false,
             custody_copies: DEFAULT_CHAT_CUSTODY_COPIES,
+            custody_max_total_bytes: DEFAULT_CHAT_CUSTODY_MAX_TOTAL_BYTES,
+            custody_max_items: DEFAULT_CHAT_CUSTODY_MAX_ITEMS,
+            custody_ttl_days: DEFAULT_CHAT_CUSTODY_TTL_DAYS,
             group_auto_join: true,
         }
     }

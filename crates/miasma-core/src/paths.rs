@@ -1392,6 +1392,12 @@ pub fn chat_outbox_file(chat_dir: &Path) -> PathBuf {
     chat_dir.join("outbox.log")
 }
 
+/// `<chat dir>/custody.doc`: the sealed snapshot of what this node holds for
+/// trusted contacts who are offline (only written when `chat.custody_enabled`).
+pub fn chat_custody_file(chat_dir: &Path) -> PathBuf {
+    chat_dir.join("custody.doc")
+}
+
 /// `<chat dir>/<stem>.grp`: the state document of one group.
 pub fn chat_group_file(chat_dir: &Path, stem: &str) -> PathBuf {
     chat_dir.join(format!("{stem}.grp"))

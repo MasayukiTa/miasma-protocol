@@ -441,3 +441,48 @@ fn junk_in_custody_is_not_applied() {
     assert!(!st[0].is_delivered(), "{:?}", st[0]);
     assert!(b.received(&a.id()).is_empty());
 }
+
+#[test]
+fn a_deposit_that_reaches_no_holder_is_never_a_delivery() {
+    // The only trusted holder is offline, so the deposit reaches no one. The
+    // sender must see "not deposited", never a delivery, and the recipient must
+    // still have nothing to collect when it returns.
+    let (a, b, c) = (side(), side(), side());
+    let net = Arc::new(Net::default());
+    net.add_holder(c.id(), on(), &[a.id(), b.id()]);
+    net.set_offline(b.id(), true);
+    net.set_offline(c.id(), true);
+    a.core.enqueue(&b.id(), "no holder for this", 1).unwrap();
+    let ca = client(&net, a.id(), 1);
+    let en = a.core.outbox.first_for(&b.id()).unwrap();
+    let (wire, _) = a.core.prepare_wire(&en.id).unwrap();
+    let rep = ca.deposit(
+        &[c.id()],
+        &a.id(),
+        &b.id(),
+        item_id_of(&wire).unwrap(),
+        &wire,
+        1_000,
+    );
+    // No copy was placed: this is the count the sender shows as "not deposited",
+    // and it is never reported as delivered.
+    assert!(rep.held_by.is_empty());
+    assert_eq!(rep.failed.len(), 1);
+    assert_eq!(rep.failed[0].0, c.id());
+    assert_eq!(rep.failed[0].1, MailboxError::Unreachable);
+    assert!(
+        a.delivered(&b.id()).is_empty(),
+        "a message no holder accepted must not be shown as delivered"
+    );
+    // The message stays with the sender for a later direct delivery.
+    assert_eq!(a.core.outbox.len(), 1);
+
+    // The recipient returns, the holder is still offline: nothing to collect.
+    net.set_offline(b.id(), false);
+    let cb = client(&net, b.id(), 1);
+    let (rep, st) = collect_into(&cb, &b, &[c.id()], 2_000);
+    assert_eq!((rep.offered, rep.taken), (0, 0));
+    assert_eq!(rep.unreachable, 1);
+    assert!(st.is_empty());
+    assert!(b.received(&a.id()).is_empty());
+}
