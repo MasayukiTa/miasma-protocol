@@ -159,7 +159,11 @@ fn draw_contents(
     let safety_height = 72.0;
     let avail = ui.available_size();
     let video_height = (avail.y - controls_height - safety_height).max(48.0);
-    let (area, _) = ui.allocate_exact_size(egui::vec2(avail.x, video_height), egui::Sense::hover());
+    let (area, mut response) =
+        ui.allocate_exact_size(egui::vec2(avail.x, video_height), egui::Sense::hover());
+    // The remote video is painted by hand, so it is invisible to a screen reader without a name;
+    // give the region a localized accessible label (listed in a11y::inventory::INVENTORY).
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, c.a11y_video));
     ui.painter().rect_filled(area, 0.0, egui::Color32::BLACK);
     if let Some((texture, size)) = video {
         let rect = fit_video_rect(area, size);
