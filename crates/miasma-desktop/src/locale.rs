@@ -3439,6 +3439,11 @@ call_strings! {
     device_heading, device_input_label, device_output_label, device_default,
     // Short notices.
     ended, unavailable,
+    // The line shown instead of "calling" when the daemon did not accept the dial. `dial_busy`
+    // for a contact already in a call, `dial_securing` while the secure connection with the
+    // contact is still being set up (the call is retried on its own), and `dial_refused` for a
+    // dial the contact or the app turned away for good. `dial_dismiss` closes that banner.
+    dial_busy, dial_securing, dial_refused, dial_dismiss,
 }
 
 pub fn call_strings(locale: Locale) -> &'static CallStrings {
@@ -3492,6 +3497,10 @@ static CALL_EN: CallStrings = CallStrings {
     device_default: "Default device",
     ended: "Call ended",
     unavailable: "Calls are not available right now.",
+    dial_busy: "That contact is already in a call.",
+    dial_securing: "Setting up a secure connection, then calling...",
+    dial_refused: "The call could not be placed.",
+    dial_dismiss: "OK",
 };
 
 static CALL_JA: CallStrings = CallStrings {
@@ -3537,6 +3546,10 @@ static CALL_JA: CallStrings = CallStrings {
     device_default: "既定のデバイス",
     ended: "通話を終了しました",
     unavailable: "通話はいま使えない状態です。",
+    dial_busy: "お相手は現在ほかの通話中です。",
+    dial_securing: "安全な接続を準備してから発信します...",
+    dial_refused: "発信できませんでした。",
+    dial_dismiss: "閉じる",
 };
 
 // zh-CN: a first translation; to be reviewed by a native speaker before it is called finished.
@@ -3583,6 +3596,10 @@ static CALL_ZH_CN: CallStrings = CallStrings {
     device_default: "默认设备",
     ended: "通话已结束",
     unavailable: "通话目前不可用。",
+    dial_busy: "对方正在通话中。",
+    dial_securing: "正在建立安全连接，随后呼叫...",
+    dial_refused: "无法发起通话。",
+    dial_dismiss: "关闭",
 };
 
 // ─── Logs (memory-only logging, opt-in diagnostic logging) ──────────────────

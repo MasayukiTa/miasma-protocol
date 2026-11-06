@@ -32,6 +32,23 @@ pub fn call_state_text(c: &CallStrings, state: &str) -> &'static str {
     }
 }
 
+/// The line to show for a dial the daemon did not accept, from its stable reason word.
+///
+/// The daemon answers a `Dial` it will not start with one of `busy` (the contact is already in a
+/// call), `not_ready` (the secure connection with the contact is not set up yet, so the call is
+/// retried on its own), `not_allowed` / `refused` (turned away for good), or `unavailable` (calls
+/// cannot run right now). An unknown word falls back to the neutral "could not be placed" line so
+/// the caller never sees a blank where a reason belongs.
+pub fn dial_failed_text(c: &CallStrings, reason: &str) -> &'static str {
+    match reason {
+        "busy" => c.dial_busy,
+        "not_ready" => c.dial_securing,
+        "unavailable" => c.unavailable,
+        "not_allowed" | "refused" => c.dial_refused,
+        _ => c.dial_refused,
+    }
+}
+
 /// A call's elapsed time as `M:SS`, or `H:MM:SS` once it passes an hour. Seconds and minutes are
 /// always two digits after the first field.
 pub fn duration_text(secs: u64) -> String {
@@ -104,6 +121,20 @@ pub struct CallUi {
     /// opened when the call connects, not by a button), and cleared when the
     /// call ends. Always false on Windows and Linux.
     mic_permission_needed: bool,
+    /// The stable reason word of a dial the daemon did not accept (`refused`,
+    /// `not_allowed`, `busy`, or `unavailable`), or `None` when the last dial
+    /// was accepted or none has been made. Set from the daemon's answer to a
+    /// `Dial`, so the caller never leaves an ordinary "calling" line up for a
+    /// dial that was turned away. Cleared on a new dial, on any status, and when
+    /// the call ends.
+    dial_failed: Option<String>,
+    /// The contact of a dial the daemon could not start yet because the hybrid
+    /// key exchange with that contact had not finished (`not_ready`). The screen
+    /// holds it, shows a "securing" line, and redials once through the idle
+    /// discovery poll; `None` when nothing waits. The retry is an ordinary
+    /// `Dial` that the daemon gates again; nothing is sent in the classical
+    /// session.
+    pending_redial: Option<String>,
 }
 
 impl Default for CallUi {
@@ -125,6 +156,8 @@ impl Default for CallUi {
             camera_unavailable: false,
             screen_permission_needed: false,
             mic_permission_needed: false,
+            dial_failed: None,
+            pending_redial: None,
         }
     }
 }
@@ -156,11 +189,63 @@ impl CallUi {
     }
 
     /// Record that we started dialing a contact: a call of ours now exists.
+    ///
+    /// This only shows the "calling" line; whether the daemon actually accepted
+    /// the dial is reported later through [`CallUi::on_dial_accepted`] (which
+    /// clears any earlier failure) or [`CallUi::on_dial_refused`] /
+    /// [`CallUi::on_dial_not_ready`]. Any earlier dial failure is cleared here so
+    /// a fresh attempt starts clean.
     pub fn on_dial(&mut self) {
         self.active = true;
         self.state = "calling".to_owned();
         self.connected_ms = None;
         self.muted = false;
+        self.dial_failed = None;
+        self.pending_redial = None;
+    }
+
+    /// The daemon accepted the dial (`Ok`): nothing to show beyond the state the
+    /// next `Status` will carry. Any earlier failure word is cleared.
+    pub fn on_dial_accepted(&mut self) {
+        self.dial_failed = None;
+    }
+
+    /// The daemon turned the dial away for a reason that will not fix itself
+    /// (`refused`, `not_allowed`, `busy`, `unavailable`): end the call we
+    /// optimistically showed and record the reason word so the caller shows a
+    /// short, clear line instead of an ordinary "calling".
+    pub fn on_dial_refused(&mut self, reason: &str) {
+        self.end();
+        self.dial_failed = Some(reason.to_owned());
+    }
+
+    /// The daemon could not start the dial yet because the hybrid key exchange
+    /// with `contact` had not finished (`not_ready`). End the optimistic call,
+    /// show the "securing" line, and hold the contact so the idle discovery poll
+    /// redials once the gate may be ready.
+    pub fn on_dial_not_ready(&mut self, contact: &str) {
+        self.end();
+        self.dial_failed = Some("not_ready".to_owned());
+        self.pending_redial = Some(contact.to_owned());
+    }
+
+    /// The reason word of a dial the daemon did not accept, or `None`.
+    pub fn dial_failed(&self) -> Option<&str> {
+        self.dial_failed.as_deref()
+    }
+
+    /// Dismiss the dial-failure line the caller showed. Clears the reason word so
+    /// the banner goes away, and drops any held redial so a dial the user has
+    /// given up on is not retried behind their back.
+    pub fn clear_dial_failed(&mut self) {
+        self.dial_failed = None;
+        self.pending_redial = None;
+    }
+
+    /// Take the contact of a held dial to redial, if one waits. Clears it so the
+    /// retry goes out exactly once per hold.
+    pub fn take_redial(&mut self) -> Option<String> {
+        self.pending_redial.take()
     }
 
     /// Apply a fresh `Status` from the daemon at time `now_ms`.
@@ -169,6 +254,8 @@ impl CallUi {
     /// starts the duration clock. A state of `idle` means no call: the screen is reset.
     pub fn on_status(&mut self, status: &CallStatusDto, now_ms: u64) {
         self.pending_token = status.pending_token;
+        // A real status word supersedes any earlier dial-refusal line.
+        self.dial_failed = None;
         if status.state == "idle" {
             self.end();
             return;
@@ -285,9 +372,11 @@ impl CallUi {
         self.exists() && now_ms.saturating_sub(self.last_poll_ms) >= POLL_INTERVAL_MS
     }
 
-    /// Whether an idle discovery poll is due.
+    /// Whether an idle discovery poll is due. Kept short so a dial on the other
+    /// side, and a held redial of ours (see [`CallUi::take_redial`]), are noticed
+    /// within a couple of seconds rather than up to five.
     pub fn discovery_due(&self, now_ms: u64) -> bool {
-        !self.exists() && now_ms.saturating_sub(self.last_poll_ms) >= 5_000
+        !self.exists() && now_ms.saturating_sub(self.last_poll_ms) >= 2_000
     }
 
     /// Record that a poll went out at `now_ms`, so the next one waits a full interval.
@@ -520,8 +609,8 @@ mod tests {
         let mut ui = CallUi::default();
         // No call: never poll, whatever the time.
         assert!(!ui.should_poll(1_000_000));
-        assert!(!ui.discovery_due(4_999));
-        assert!(ui.discovery_due(5_000));
+        assert!(!ui.discovery_due(1_999));
+        assert!(ui.discovery_due(2_000));
         ui.on_dial();
         // First poll is due immediately (last_poll is 0).
         assert!(ui.should_poll(POLL_INTERVAL_MS));
@@ -718,5 +807,86 @@ mod tests {
         assert!(ui.remote_frame().is_some());
         ui.on_status(&status("idle", None), 3_000);
         assert!(ui.remote_frame().is_none());
+    }
+
+    #[test]
+    fn a_refused_dial_ends_the_call_and_records_the_reason_word() {
+        // The daemon turned the dial away for good: the optimistic "calling" is dropped and the
+        // reason word is held so the caller shows a short line instead of an endless "calling".
+        let mut ui = CallUi::default();
+        ui.on_dial();
+        assert_eq!(ui.state(), "calling");
+        ui.on_dial_refused("busy");
+        assert!(!ui.exists());
+        assert_eq!(ui.state(), "");
+        assert_eq!(ui.dial_failed(), Some("busy"));
+        // No redial is held for a refusal that will not fix itself.
+        assert!(ui.take_redial().is_none());
+        // A fresh dial clears the earlier reason.
+        ui.on_dial();
+        assert!(ui.dial_failed().is_none());
+    }
+
+    #[test]
+    fn a_not_ready_dial_holds_the_contact_for_one_redial_and_shows_securing() {
+        // The secure connection with the contact is not set up yet: the dial is held, the
+        // "securing" reason is shown, and the contact is handed back exactly once so the idle
+        // discovery poll redials it when the gate may be ready.
+        let mut ui = CallUi::default();
+        ui.on_dial();
+        ui.on_dial_not_ready("alice");
+        assert!(!ui.exists());
+        assert_eq!(ui.dial_failed(), Some("not_ready"));
+        // Taken exactly once per hold.
+        assert_eq!(ui.take_redial().as_deref(), Some("alice"));
+        assert!(ui.take_redial().is_none());
+    }
+
+    #[test]
+    fn an_accepted_dial_and_a_status_both_clear_the_failure_line() {
+        let mut ui = CallUi::default();
+        ui.on_dial();
+        ui.on_dial_refused("refused");
+        assert_eq!(ui.dial_failed(), Some("refused"));
+        // An explicit accept clears it.
+        ui.on_dial_accepted();
+        assert!(ui.dial_failed().is_none());
+        // And so does a real status word that arrives afterwards.
+        ui.on_dial();
+        ui.on_dial_refused("not_allowed");
+        assert_eq!(ui.dial_failed(), Some("not_allowed"));
+        ui.on_status(&status("calling", None), 1_000);
+        assert!(ui.dial_failed().is_none());
+    }
+
+    #[test]
+    fn the_dial_failure_line_covers_every_reason_word_in_every_language() {
+        for lang in Locale::ALL {
+            let c = call_strings(lang);
+            assert_eq!(dial_failed_text(c, "busy"), c.dial_busy);
+            assert_eq!(dial_failed_text(c, "not_ready"), c.dial_securing);
+            assert_eq!(dial_failed_text(c, "unavailable"), c.unavailable);
+            assert_eq!(dial_failed_text(c, "not_allowed"), c.dial_refused);
+            assert_eq!(dial_failed_text(c, "refused"), c.dial_refused);
+            // An unknown word falls back to the neutral refused line, never to empty.
+            assert_eq!(dial_failed_text(c, "surprise"), c.dial_refused);
+            assert!(!dial_failed_text(c, "surprise").is_empty());
+        }
+    }
+
+    #[test]
+    fn idle_discovery_is_due_within_two_seconds_so_a_new_offer_is_noticed_quickly() {
+        // With no call of ours, the idle discovery poll must come due a couple of seconds after
+        // the last poll in every tab, so a dial from the other side (and a held redial of ours)
+        // is found within a few seconds rather than up to five.
+        let mut ui = CallUi::default();
+        assert!(!ui.discovery_due(1_999));
+        assert!(ui.discovery_due(2_000));
+        ui.mark_polled(10_000);
+        assert!(!ui.discovery_due(11_999));
+        assert!(ui.discovery_due(12_000));
+        // While a call of ours exists, idle discovery does not run (the active poll does).
+        ui.on_dial();
+        assert!(!ui.discovery_due(1_000_000));
     }
 }
