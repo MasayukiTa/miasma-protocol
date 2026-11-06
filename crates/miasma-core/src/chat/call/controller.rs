@@ -224,7 +224,9 @@ mod inbound_tests {
     }
 
     #[test]
-    fn media_gate_controls_offers() {
+    fn media_gate_controls_outbound_dials() {
+        // An outbound dial is still gated: a pending gate holds the dial and a
+        // refused gate turns it away, so nothing leaves until the gate is ready.
         for (gate, error) in [
             (MediaGate::Pending, CallError::NotReady),
             (MediaGate::Refused, CallError::Refused),
@@ -233,10 +235,6 @@ mod inbound_tests {
             c.ports.gate = gate;
             assert_eq!(c.dial([1; 32]), Err(error));
             assert!(c.take_sends().is_empty());
-            c.on_inbound(inbound([1; 32], offer([1; 16], 2000)));
-            assert_eq!(c.status().state, State::Idle);
-            assert!(c.take_notices().0.is_empty());
-            assert_eq!(c.dropped_offers(), 0);
         }
         let mut c = controller();
         assert_eq!(c.dial([1; 32]), Ok(()));
@@ -244,6 +242,36 @@ mod inbound_tests {
             Record::decode(&c.drain_encoded()[0].1),
             Ok(Record::Offer { .. })
         ));
+    }
+
+    #[test]
+    fn an_inbound_offer_rings_while_the_gate_is_still_pending() {
+        // The bug this guards: a contact dials while our hybrid message gate is
+        // not yet ready (the exchange is in flight, or the pair turned hybrid
+        // moments before). The call has its own media keys and does not use the
+        // hybrid message key, so the offer must ring rather than be dropped in
+        // silence. The caller showed "calling"; before the fix we showed
+        // nothing at all.
+        let mut c = controller();
+        c.ports.gate = MediaGate::Pending;
+        c.on_inbound(inbound([1; 32], offer([1; 16], 2000)));
+        assert_eq!(c.status().state, State::Ringing);
+        assert!(c.status().pending_token.is_some());
+        assert_eq!(c.take_notices().0, vec![CallNotice::IncomingRinging]);
+        assert_eq!(c.dropped_offers(), 0);
+    }
+
+    #[test]
+    fn an_inbound_offer_is_dropped_only_when_the_gate_refuses() {
+        // A refused gate (classical or failed under a policy that forbids the
+        // call) is the one state that still suppresses the ring: no state
+        // change and no notice, as before.
+        let mut c = controller();
+        c.ports.gate = MediaGate::Refused;
+        c.on_inbound(inbound([1; 32], offer([1; 16], 2000)));
+        assert_eq!(c.status().state, State::Idle);
+        assert!(c.take_notices().0.is_empty());
+        assert_eq!(c.dropped_offers(), 0);
     }
 
     #[test]
@@ -802,8 +830,17 @@ impl<P: CallPorts> CallController<P> {
                 capabilities,
                 ..
             } => {
+                // An offer from an allowed contact must ring whether or not the
+                // hybrid message gate has finished. The call derives its own
+                // media roots from the offer/answer shares (see
+                // `take_media_roots`) and never uses the hybrid message key, so
+                // a gate that is still `Pending` (the exchange is in flight, or
+                // the pair turned hybrid moments before the dial) must not
+                // silence an incoming call. Only an explicit `Refused` decision
+                // (classical/failed under a policy that forbids the call)
+                // suppresses the ring.
                 let from_contact = self.ports.is_contact_allowed(&peer)
-                    && self.ports.media_gate(&peer) == MediaGate::Ready;
+                    && self.ports.media_gate(&peer) != MediaGate::Refused;
                 if from_contact && !self.offer_limiter.allow(peer, now) {
                     self.dropped_offers = self.dropped_offers.saturating_add(1);
                     return;
