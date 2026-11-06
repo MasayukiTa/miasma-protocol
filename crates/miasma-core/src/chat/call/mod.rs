@@ -21,6 +21,7 @@ pub mod device;
 pub mod frame;
 pub mod inbound;
 pub mod jitter;
+pub mod mac_permissions;
 pub mod media;
 #[cfg(feature = "iroh")]
 pub mod media_task;

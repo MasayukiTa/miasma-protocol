@@ -110,6 +110,17 @@ pub struct CallUi {
     /// panel shows the "camera unavailable" notice. Cleared once the camera is
     /// in use (a later start succeeded) and when the call ends.
     camera_unavailable: bool,
+    /// True after the daemon answered a screen-share start with
+    /// `screen_permission`, so the panel shows a notice that the Screen
+    /// Recording permission must be allowed. Cleared once screen sharing is in
+    /// use (a later start succeeded) and when the call ends.
+    screen_permission_needed: bool,
+    /// True while a connected call's status reports that the macOS Microphone
+    /// permission is not granted, so the panel shows a notice that says where
+    /// to allow it. Driven straight from the call status each poll (the mic is
+    /// opened when the call connects, not by a button), and cleared when the
+    /// call ends. Always false on Windows and Linux.
+    mic_permission_needed: bool,
     /// The stable reason word of a dial the daemon did not accept (`refused`,
     /// `not_allowed`, `busy`, or `unavailable`), or `None` when the last dial
     /// was accepted or none has been made. Set from the daemon's answer to a
@@ -143,6 +154,8 @@ impl Default for CallUi {
             device_select_pending: false,
             remote_frame: None,
             camera_unavailable: false,
+            screen_permission_needed: false,
+            mic_permission_needed: false,
             dial_failed: None,
             pending_redial: None,
         }
@@ -257,6 +270,16 @@ impl CallUi {
         if status.camera_in_use {
             self.camera_unavailable = false;
         }
+        // Screen sharing is in use now, so a start succeeded: drop any earlier
+        // "screen permission" notice.
+        if status.screen_sharing {
+            self.screen_permission_needed = false;
+        }
+        // The microphone permission notice follows the call status directly: the
+        // mic is opened when the call connects (not by a button), so the daemon
+        // reports whether macOS withheld the permission. On Windows and Linux
+        // this is always false, so nothing shows there.
+        self.mic_permission_needed = status.mic_permission_needed;
         self.status = Some(status.clone());
     }
 
@@ -271,6 +294,8 @@ impl CallUi {
         self.status = None;
         self.remote_frame = None;
         self.camera_unavailable = false;
+        self.screen_permission_needed = false;
+        self.mic_permission_needed = false;
     }
 
     pub fn status(&self) -> Option<&CallStatusDto> {
@@ -299,6 +324,25 @@ impl CallUi {
     /// Whether the "camera unavailable" notice should be shown.
     pub fn camera_unavailable(&self) -> bool {
         self.camera_unavailable
+    }
+
+    /// Note that the daemon could not start screen sharing because the Screen
+    /// Recording permission is not granted (`screen_permission`): the panel
+    /// shows a notice until screen sharing comes into use or the call ends.
+    pub fn set_screen_permission_needed(&mut self) {
+        self.screen_permission_needed = true;
+    }
+
+    /// Whether the "screen recording permission" notice should be shown.
+    pub fn screen_permission_needed(&self) -> bool {
+        self.screen_permission_needed
+    }
+
+    /// Whether the "microphone permission" notice should be shown: true while a
+    /// connected call reports the macOS Microphone permission is not granted.
+    /// Always false on Windows and Linux.
+    pub fn mic_permission_needed(&self) -> bool {
+        self.mic_permission_needed
     }
 
     /// The elapsed seconds of a connected call at `now_ms`, or `None` when not connected yet.
@@ -648,6 +692,27 @@ mod tests {
         assert!(ui.camera_unavailable());
         ui.end();
         assert!(!ui.camera_unavailable());
+    }
+
+    #[test]
+    fn a_mic_permission_status_shows_the_notice_until_it_clears_or_the_call_ends() {
+        let mut ui = CallUi::default();
+        assert!(!ui.mic_permission_needed());
+        // A connected status reporting the mic permission is not granted shows the notice.
+        let mut dto = status("connected", None);
+        dto.mic_permission_needed = true;
+        ui.on_status(&dto, 1_000);
+        assert!(ui.mic_permission_needed());
+        // A later status with the permission granted (the flag false) drops the notice.
+        ui.on_status(&status("connected", None), 2_000);
+        assert!(!ui.mic_permission_needed());
+        // Set again, then end the call: the notice is cleared with the rest of the call state.
+        let mut dto = status("connected", None);
+        dto.mic_permission_needed = true;
+        ui.on_status(&dto, 3_000);
+        assert!(ui.mic_permission_needed());
+        ui.end();
+        assert!(!ui.mic_permission_needed());
     }
 
     fn device_list() -> AudioDeviceListDto {
