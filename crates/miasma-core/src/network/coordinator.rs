@@ -163,6 +163,22 @@ impl PublishOptions {
             min_remote_distinct_shards: params.data_shards,
         }
     }
+
+    /// The default for the daemon's own publish path: require at least one
+    /// distinct remote holder acknowledgement before a publish is reported as
+    /// done. Unlike [`PublishOptions::strict`] this asks for a single remote
+    /// copy, not `data_shards` of them, so a small contact set still lets a
+    /// publish succeed; unlike [`PublishOptions::default`] (which accepts zero
+    /// remote copies) it never reports success for content that lives only on
+    /// the publisher. When fewer than one remote copy is acknowledged the call
+    /// fails with `MiasmaError::InsufficientShares` and no `DhtRecord` is
+    /// published, so the caller can tell the user the content is stored only on
+    /// this device rather than claiming it was delivered.
+    pub fn network_default() -> Self {
+        Self {
+            min_remote_distinct_shards: 1,
+        }
+    }
 }
 
 /// Outcome of a `dissolve_and_publish*_with_options` call.

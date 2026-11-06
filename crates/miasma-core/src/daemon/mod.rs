@@ -1341,7 +1341,7 @@ async fn process_request_inner(
                         .dissolve_and_publish_file_with_format(
                             path,
                             params,
-                            crate::network::PublishOptions::default(),
+                            crate::network::PublishOptions::network_default(),
                             object_format,
                         )
                         .await
@@ -1352,7 +1352,7 @@ async fn process_request_inner(
                 Ok(mid) => ControlResponse::Published {
                     mid: mid.to_string(),
                 },
-                Err(e) => ControlResponse::Error(e.to_string()),
+                Err(e) => ControlResponse::Error(publish_error_text(e)),
             }
         }
 
@@ -1375,7 +1375,7 @@ async fn process_request_inner(
                 .dissolve_and_publish_file_protected_with_format(
                     path,
                     params,
-                    crate::network::PublishOptions::default(),
+                    crate::network::PublishOptions::network_default(),
                     password.as_str(),
                     object_format,
                 )
@@ -1384,7 +1384,7 @@ async fn process_request_inner(
                 Ok(report) => ControlResponse::Published {
                     mid: report.mid.to_string(),
                 },
-                Err(e) => ControlResponse::Error(e.to_string()),
+                Err(e) => ControlResponse::Error(publish_error_text(e)),
             }
         }
 
@@ -2345,6 +2345,32 @@ async fn process_request_inner(
 }
 
 // ─── Directed sharing helpers ────────────────────────────────────────────────
+
+/// Turn a publish error into the message the daemon returns to the client.
+///
+/// The daemon publishes with [`crate::network::PublishOptions::network_default`],
+/// which fails with `InsufficientShares` when not even one remote holder
+/// acknowledged a copy. That is not a normal error to paper over: the content
+/// is stored only on this device and would not be recoverable once this device
+/// goes offline, so the client must be told exactly that instead of a bare
+/// share count.
+fn publish_error_text(e: MiasmaError) -> String {
+    match e {
+        MiasmaError::InsufficientShares { got: 0, .. } => {
+            "stored only on this device: no remote holder acknowledged a copy, \
+             so this content is not recoverable if this device goes offline. \
+             Connect to at least one reachable contact and try again."
+                .to_string()
+        }
+        MiasmaError::InsufficientShares { need, got } => format!(
+            "stored only partially off this device: {got} of {need} remote \
+             copies were acknowledged, which is not enough to recover this \
+             content without this device. Connect to more reachable contacts \
+             and try again."
+        ),
+        other => other.to_string(),
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 async fn process_directed_send(
