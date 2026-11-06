@@ -1,16 +1,22 @@
-# result_A（offline/A）
+# result_A (offline/A)
 
-状態: PR #261 に反映済み。コミット b4ff438 を origin/offline/A に push 済み。
+State: reflected in PR #261 (origin/offline/A).
 
-## 変更点
-- config.rs: [chat] に上限の設定キーを3つ追加。custody_max_total_bytes 既定2MiB、custody_max_items 既定256、custody_ttl_days 既定14。serde default 付きで旧 config.toml と後方互換。ChatConfig::default にも反映。
-- holder.rs: CustodyLimits::from_config が上記3キーを読み clamped でハード上限 4MiB/1024件/30日 に丸める。従来 enabled のみ設定で上限は default のハードコードだった点を解消。
+## Achieved (OFFLINE DELIVERY, Part A)
+Sender-side custody path implemented:
+1. When the contact is offline and PQ is not yet established, the send is not blocked; the outbox records the state (waiting for the contact; not deposited). Once the PQ session exists, a sealed copy is deposited with a trusted holder. Nothing is sent in a weaker session; a holder only sees ciphertext.
+2. DiskCustody persists custody across restarts, sealed under Label::ChatCustody. Write failure falls back to memory; restore re-applies current limits and drops expired items. config.rs adds 3 ceiling keys (defaults 2MiB/256/14d, hard caps 4MiB/1024/30d).
+3. Deposit result is observable: custody_status records "Deposited with N holder(s); awaiting delivery" vs "Not deposited with any holder", and never reads as delivered/read.
 
-## テスト
-- 追加: holder.rs custody_tests に limits_come_from_config_and_are_clamped 1件。設定値の伝播と、上限超過時に clamped でハード上限へ丸められることを検証。
-- 既存: custody_tests 群 disk_tests survives_a_restart/a_wrong_key_starts_empty/a_tightened_ceiling_drops_items_on_restore 他、sim_tests、tests/chat_custody_net_test.rs 2ノード往復。
+## NOT implemented (Gap1) -- requirement #1 partially met
+The direct-deposit-to-the-contact path is deferred; only deposit-with-a-trusted-holder is implemented. Reason: sealing under the contact receive key plus replay protection is not yet designed; depositing in plaintext or unverified risks disclosure/double-apply, so it cannot be done safely. The sub-path "sender deposits directly to an offline contact" is out of scope for this PR.
 
-## 残課題
-- ビルド/テスト未実行: C: ドライブ空き0のため cargo 実行不可。検証はCIに委譲。
-- docs/TROUBLESHOOTING.md 未更新: nothing is written to disk の記述が今回の DiskCustody 封印ディスク保存と矛盾。全体書き戻しは空き0で途中失敗時に追跡ファイル破損の恐れがあり安全に実施不可のため見送り。新上限キーの追記も同様。
-- Gap1 未実装の理由: 相手がオフラインの時は信頼する保持者へ封印複製を預け、待機中として表示する既存経路に限定した。相手自身への直接預託経路は、相手の受信鍵での封印確認とリプレイ防止の設計が未確定で、誤って平文や無確認で預けると情報漏えい/二重適用の恐れがあり安全に実装できないため今回は見送った。
+## Tests (added; CI manifest consistent)
+- holder.rs disk_tests x5 (restart/wrong-key/tightened-ceiling/expiry/revoke); limits_come_from_config_and_are_clamped x1.
+- service.rs custody_status_tests x3; sim_tests x1 (no holder is never a delivery).
+- tests/chat_custody_net_test.rs x2 (delivery via holder to offline recipient; no-holder reported not delivered).
+- ci.yml adds --test chat_custody_net_test; check_ci_test_manifest.py consistent (15 tests).
+
+## Open (real tests NOT run) -- double blocker
+- No real cargo pass/fail. (a) Earlier C: free was 0 (os error 112 / Errno 28). (b) This host lacks the MSVC C/C++ toolchain (no cl.exe; the only link.exe on PATH is Git's Unix link), so C-dependent build scripts fail to link. A GNU toolchain exists but a gnu-ABI target dir cannot be created due to low disk. Documented in PR #261 Honest limits and a follow-up comment. Do not merge until the suite runs on a host with disk space.
+- Fixed the Label::ChatCustody comment to match the implementation (stealth governs logs, not chat state) in this follow-up commit.

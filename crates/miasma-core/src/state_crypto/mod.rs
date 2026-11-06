@@ -94,8 +94,9 @@ pub enum Label {
     /// The record kept outside the data folder that tells whether a chat session file is the latest one written.
     ChatAnchor,
     /// Sealed envelopes a holder keeps on disk for trusted contacts who are
-    /// offline (one document for the whole store). Only written when custody
-    /// is on and the node is not in stealth mode.
+    /// offline (one document for the whole store). Written when custody is on;
+    /// stealth mode governs logs, not chat state (like the outbox and session
+    /// state), so this is sealed to disk alongside the rest of chat state.
     ChatCustody,
 }
 
