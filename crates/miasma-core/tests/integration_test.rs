@@ -2242,6 +2242,66 @@ async fn dissolve_and_publish_strict_fails_without_enough_remote_peers() {
     result.expect("dissolve_and_publish_strict_fails_without_enough_remote_peers timed out (15s)");
 }
 
+/// The daemon's own publish default (`PublishOptions::network_default`) must
+/// require at least one *distinct remote* holder acknowledgement before a
+/// publish is reported as done. With no peers connected at all, a publish made
+/// with that default must fail loudly with `InsufficientShares{need:1,got:0}`
+/// and publish no DHT record -- it must never report success for content that
+/// lives only on this device. The pre-2.1 `default()` (zero remote copies
+/// accepted) must still succeed in the same zero-peer situation, proving only
+/// the daemon default was tightened, not the backward-compatible lenient path.
+#[tokio::test(flavor = "multi_thread")]
+async fn dissolve_and_publish_network_default_fails_without_a_remote_copy() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let result = timeout(Duration::from_secs(15), async {
+        let (coord_a, _store_a) = spawn_phase21_node(0xA4, 0).await;
+
+        let content = b"network-default publish with zero peers must not report success";
+        let params = DissolutionParams {
+            data_shards: 2,
+            total_shards: 3,
+        };
+
+        // The daemon default: at least one distinct remote acknowledgement.
+        let result = coord_a
+            .dissolve_and_publish_with_options(
+                content,
+                params,
+                PublishOptions::network_default(),
+            )
+            .await;
+
+        match result {
+            Err(MiasmaError::InsufficientShares { need, got }) => {
+                // network_default asks for exactly one remote copy, and with no
+                // peers connected zero were acknowledged.
+                assert_eq!(need, 1, "network_default must require one remote copy");
+                assert_eq!(got, 0, "no peers were connected, so none acknowledged");
+            }
+            other => panic!(
+                "expected InsufficientShares{{need:1,got:0}} for a zero-peer \
+                 network-default publish, got: {other:?}"
+            ),
+        }
+
+        // The lenient (pre-2.1-compatible) default must still succeed in the
+        // exact same zero-peer situation -- only the daemon default was
+        // tightened, the backward-compatible path is unchanged.
+        let mid = coord_a
+            .dissolve_and_publish(content, params)
+            .await
+            .expect("lenient (default) publish must still succeed with zero peers connected");
+        assert_ne!(mid.as_bytes(), &[0u8; 32]);
+
+        coord_a.shutdown().await;
+    })
+    .await;
+
+    result.expect("dissolve_and_publish_network_default_fails_without_a_remote_copy timed out (15s)");
+}
+
 // Note: the inbound `Store` authorization gate itself (unverified peer
 // rejected, tampered share rejected, verified peer with a valid share
 // accepted) is unit-tested directly against `MiasmaNode::handle_inbound_store`
