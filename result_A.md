@@ -17,6 +17,9 @@ The direct-deposit-to-the-contact path is deferred; only deposit-with-a-trusted-
 - tests/chat_custody_net_test.rs x2 (delivery via holder to offline recipient; no-holder reported not delivered).
 - ci.yml adds --test chat_custody_net_test; check_ci_test_manifest.py consistent (15 tests).
 
-## Open (real tests NOT run) -- double blocker
-- No real cargo pass/fail. (a) Earlier C: free was 0 (os error 112 / Errno 28). (b) This host lacks the MSVC C/C++ toolchain (no cl.exe; the only link.exe on PATH is Git's Unix link), so C-dependent build scripts fail to link. A GNU toolchain exists but a gnu-ABI target dir cannot be created due to low disk. Documented in PR #261 Honest limits and a follow-up comment. Do not merge until the suite runs on a host with disk space.
+## Open (real tests NOT run) -- build blocked on this host (re-verified 2026-11-07)
+No real cargo pass/fail counts could be produced on this host. Both available toolchains were tried and both fail before any test binary links:
+- MSVC (default, x86_64-pc-windows-msvc): no MSVC C/C++ toolchain present. `where cl` returns nothing, so C-dependent build scripts (aws-lc-sys etc.) cannot link.
+- GNU (x86_64-pc-windows-gnu): disk was no longer the blocker (C: had ~5.6 GiB free this run). With MinGW gcc 16.2.0 on PATH and a dedicated CARGO_TARGET_DIR, `cargo +stable-x86_64-pc-windows-gnu test -p miasma-core --locked --lib chat::mailbox::holder` compiled the full dependency graph but failed to link `aws-lc-rs`: "undefined reference to `__security_cookie`" (collect2/ld, exit 1); cargo exit 101. This is a known GNU-ABI vs aws-lc incompatibility, not a disk or code problem; the crate graph compiles up to the final link.
+Net: the cryptography dependency (aws-lc-rs) does not link under either toolchain available here, so `-p miasma-core` test binaries cannot be built on this machine. The Part A changes themselves were not the cause (they compiled). Documented in PR #261 Honest limits. Do not merge until the suite runs on a host with a working MSVC toolchain (or an aws-lc/GNU-compatible setup).
 - Fixed the Label::ChatCustody comment to match the implementation (stealth governs logs, not chat state) in this follow-up commit.
