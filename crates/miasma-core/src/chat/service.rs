@@ -1520,7 +1520,10 @@ mod custody_status_tests {
     #[test]
     fn reports_deposit_count_without_claiming_delivery() {
         assert_eq!(custody_status(0), "Not deposited with any holder");
-        assert_eq!(custody_status(2), "Deposited with 2 holder(s); awaiting delivery");
+        assert_eq!(
+            custody_status(2),
+            "Deposited with 2 holder(s); awaiting delivery"
+        );
     }
 
     // A deposit is never a delivery. Whatever the holder count, the status

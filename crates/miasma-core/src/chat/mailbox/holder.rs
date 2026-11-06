@@ -306,10 +306,7 @@ impl MemoryCustody {
             // Honour the current limits and skip anything already expired, so a
             // snapshot made under looser settings cannot push the store over a
             // tightened ceiling after a restart.
-            if expires_ms <= now_ms
-                || blob.is_empty()
-                || blob.len() > self.limits.max_item_bytes
-            {
+            if expires_ms <= now_ms || blob.is_empty() || blob.len() > self.limits.max_item_bytes {
                 continue;
             }
             let (n, b) = g.per_depositor.get(&from).copied().unwrap_or((0, 0));
@@ -481,9 +478,11 @@ impl DiskCustody {
     ) -> Self {
         let mem = MemoryCustody::new(limits);
         if path.exists() {
-            if let Ok(plain) =
-                crate::state_crypto::doc::read_document(&keys, crate::state_crypto::Label::ChatCustody, &path)
-            {
+            if let Ok(plain) = crate::state_crypto::doc::read_document(
+                &keys,
+                crate::state_crypto::Label::ChatCustody,
+                &path,
+            ) {
                 mem.restore(&plain, now_ms);
             }
         }
@@ -900,7 +899,10 @@ mod disk_tests {
         s.trust(B);
         assert_eq!(s.stats().items, 1);
         assert_eq!(s.list(&B, tag(), 0).unwrap(), vec![id(1)]);
-        assert_eq!(s.fetch(&B, tag(), id(1), 0).unwrap(), Some(b"sealed".to_vec()));
+        assert_eq!(
+            s.fetch(&B, tag(), id(1), 0).unwrap(),
+            Some(b"sealed".to_vec())
+        );
     }
 
     // The file is sealed: a store opened with a different master key cannot read
@@ -951,12 +953,28 @@ mod disk_tests {
         let path = dir.path().join("custody.doc");
         let k = keys(7);
         {
-            let s = DiskCustody::open(CustodyLimits { ttl_ms: 1000, ..on() }, k.clone(), path.clone(), 0);
+            let s = DiskCustody::open(
+                CustodyLimits {
+                    ttl_ms: 1000,
+                    ..on()
+                },
+                k.clone(),
+                path.clone(),
+                0,
+            );
             s.trust(A);
             s.deposit(&A, tag(), id(1), b"x", 0).unwrap();
         }
         // Re-open after the item's expiry: it is swept on restore.
-        let s = DiskCustody::open(CustodyLimits { ttl_ms: 1000, ..on() }, k, path, 2000);
+        let s = DiskCustody::open(
+            CustodyLimits {
+                ttl_ms: 1000,
+                ..on()
+            },
+            k,
+            path,
+            2000,
+        );
         s.trust(A);
         assert_eq!(s.stats().items, 0);
     }
