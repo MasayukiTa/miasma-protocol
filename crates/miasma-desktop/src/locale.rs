@@ -3425,6 +3425,11 @@ call_strings! {
     // the button drives the real start/stop screen-share request; `a11y_screen_share` is its
     // screen-reader name.
     screen_on, screen_off, a11y_screen_share,
+    // Notices shown when a macOS capture permission is not granted: `screen_permission` when
+    // screen recording is not allowed, `mic_permission` when the microphone is not allowed. Each
+    // says where to allow it (System Settings > Privacy & Security). Empty on Windows and Linux
+    // builds, where the daemon never sends these codes.
+    screen_permission, mic_permission,
     // The safety-code area (the code itself is not ready yet, so a neutral line stands in).
     safety_heading, safety_pending, safety_explain,
     // The always-on line shown while the microphone is in use during a call.
@@ -3440,6 +3445,11 @@ call_strings! {
     window_hint, in_a_call, self_camera_tile, self_screen_tile,
     // Screen-reader name of the custom-painted remote video area in the call window.
     a11y_video,
+    // The line shown instead of "calling" when the daemon did not accept the dial. `dial_busy`
+    // for a contact already in a call, `dial_securing` while the secure connection with the
+    // contact is still being set up (the call is retried on its own), and `dial_refused` for a
+    // dial the contact or the app turned away for good. `dial_dismiss` closes that banner.
+    dial_busy, dial_securing, dial_refused, dial_dismiss,
 }
 
 pub fn call_strings(locale: Locale) -> &'static CallStrings {
@@ -3478,6 +3488,8 @@ static CALL_EN: CallStrings = CallStrings {
     screen_on: "Screen on",
     screen_off: "Screen off",
     a11y_screen_share: "Share your screen",
+    screen_permission: "Screen sharing needs permission. Allow Miasma in System Settings > Privacy & Security > Screen Recording, then try again.",
+    mic_permission: "The microphone needs permission. Allow Miasma in System Settings > Privacy & Security > Microphone.",
     safety_heading: "Safety code",
     safety_pending: "The safety code is not ready yet.",
     safety_explain:
@@ -3496,6 +3508,10 @@ static CALL_EN: CallStrings = CallStrings {
     self_camera_tile: "Your camera",
     self_screen_tile: "Sharing your screen",
     a11y_video: "Video from the other person",
+    dial_busy: "That contact is already in a call.",
+    dial_securing: "Setting up a secure connection, then calling...",
+    dial_refused: "The call could not be placed.",
+    dial_dismiss: "OK",
 };
 
 static CALL_JA: CallStrings = CallStrings {
@@ -3526,6 +3542,8 @@ static CALL_JA: CallStrings = CallStrings {
     screen_on: "画面共有をオン",
     screen_off: "画面共有をオフ",
     a11y_screen_share: "画面を共有する",
+    screen_permission: "画面共有には許可が必要です。「システム設定」＞「プライバシーとセキュリティ」＞「画面収録」で Miasma を許可してから、もう一度お試しください。",
+    mic_permission: "マイクには許可が必要です。「システム設定」＞「プライバシーとセキュリティ」＞「マイク」で Miasma を許可してください。",
     safety_heading: "安全確認コード",
     safety_pending: "安全確認コードはまだ準備できていません。",
     safety_explain:
@@ -3544,6 +3562,10 @@ static CALL_JA: CallStrings = CallStrings {
     self_camera_tile: "自分のカメラ",
     self_screen_tile: "自分の画面を共有中",
     a11y_video: "相手の映像",
+    dial_busy: "お相手は現在ほかの通話中です。",
+    dial_securing: "安全な接続を準備してから発信します...",
+    dial_refused: "発信できませんでした。",
+    dial_dismiss: "閉じる",
 };
 
 // zh-CN: a first translation; to be reviewed by a native speaker before it is called finished.
@@ -3575,6 +3597,9 @@ static CALL_ZH_CN: CallStrings = CallStrings {
     screen_on: "开启共享屏幕",
     screen_off: "关闭共享屏幕",
     a11y_screen_share: "共享你的屏幕",
+    screen_permission:
+        "共享屏幕需要权限。请在“系统设置”＞“隐私与安全性”＞“屏幕录制”中允许 Miasma，然后重试。",
+    mic_permission: "麦克风需要权限。请在“系统设置”＞“隐私与安全性”＞“麦克风”中允许 Miasma。",
     safety_heading: "安全码",
     safety_pending: "安全码尚未就绪。",
     safety_explain: "请向对方读出此安全码；如果双方的安全码不同，请结束通话。",
@@ -3592,6 +3617,10 @@ static CALL_ZH_CN: CallStrings = CallStrings {
     self_camera_tile: "你的摄像头",
     self_screen_tile: "正在共享你的屏幕",
     a11y_video: "对方的视频",
+    dial_busy: "对方正在通话中。",
+    dial_securing: "正在建立安全连接，随后呼叫...",
+    dial_refused: "无法发起通话。",
+    dial_dismiss: "关闭",
 };
 
 // ─── Logs (memory-only logging, opt-in diagnostic logging) ──────────────────

@@ -644,6 +644,14 @@ impl ChatUi {
                     self.out.push_back(ChatRequest::Call(CallRequest::Events {
                         since: self.call.events_since(),
                     }));
+                } else if let Some(contact) = self.call.take_redial() {
+                    // A dial the daemon held with `not_ready` (the secure connection with the
+                    // contact was not set up yet): retry it once now that a discovery interval
+                    // has passed and the gate may be ready. A still-pending gate answers
+                    // `not_ready` again and holds it once more; a ready gate sends the offer.
+                    self.out
+                        .push_back(ChatRequest::Call(crate::call::dial(&contact)));
+                    self.call.on_dial();
                 }
             }
             // While a call is connected, poll the newest decoded remote frame on a faster
@@ -987,12 +995,39 @@ impl ChatUi {
             // Call answers update the call screen state. `now_ms` starts the duration clock.
             #[cfg(feature = "pqc")]
             ChatResponse::Call(resp) => {
-                if let (
-                    ChatRequest::Call(miasma_core::chat::ipc::CallRequest::SetMuted { muted }),
-                    miasma_core::chat::ipc::CallResponse::Ok,
-                ) = (req, &resp)
-                {
-                    self.call.set_muted(*muted);
+                use miasma_core::chat::ipc::{CallRequest, CallResponse};
+                if let ChatRequest::Call(CallRequest::SetMuted { muted }) = req {
+                    if matches!(&resp, CallResponse::Ok) {
+                        self.call.set_muted(*muted);
+                    }
+                }
+                // A `Dial` answer decides the optimistic "calling" we showed on the press: the
+                // daemon either accepted it, held it until the secure connection with the contact
+                // is ready (`not_ready`, retried on its own), or turned it away for good. Without
+                // this the caller kept a "calling" line for a dial that never left, and the other
+                // side showed nothing because no offer was ever sent.
+                if let ChatRequest::Call(CallRequest::Dial { contact }) = req {
+                    match &resp {
+                        CallResponse::Ok => {
+                            self.call.on_dial_accepted();
+                            return;
+                        }
+                        CallResponse::Error(reason) if reason == "not_ready" => {
+                            self.call.on_dial_not_ready(contact);
+                            return;
+                        }
+                        CallResponse::Error(reason) => {
+                            self.call.on_dial_refused(reason);
+                            self.free_call_video_texture();
+                            return;
+                        }
+                        CallResponse::Unavailable => {
+                            self.call.on_dial_refused("unavailable");
+                            self.free_call_video_texture();
+                            return;
+                        }
+                        _ => {}
+                    }
                 }
                 self.on_call_answer(resp)
             }
@@ -1047,6 +1082,12 @@ impl ChatUi {
             // `Unavailable` or `Error` changes nothing: the next `Status` reports the real state.
             CallResponse::Error(code) if code == "no_camera" => {
                 self.call.set_camera_unavailable();
+            }
+            // The screen-share answer `screen_permission` means the Screen Recording permission is
+            // not granted (macOS); show the notice that says where to allow it. On Windows and
+            // Linux the daemon never sends this code.
+            CallResponse::Error(code) if code == "screen_permission" => {
+                self.call.set_screen_permission_needed();
             }
             CallResponse::Ok | CallResponse::Unavailable | CallResponse::Error(_) => {}
         }
@@ -1422,6 +1463,16 @@ impl ChatUi {
         if outcome.close_requested {
             self.on_call_window_closed();
             return;
+        }
+        // A dial the daemon did not accept shows its reason here, over whatever screen is open,
+        // once the optimistic call has ended. `not_ready` shows the "securing" line while the
+        // redial waits; the others are final. Dismiss clears only the line, never the redial.
+        if !self.call.exists() {
+            if let Some(reason) = self.call.dial_failed().map(str::to_owned) {
+                if crate::call_ui::dial_failed_banner(ui, cc, &reason) {
+                    self.call.clear_dial_failed();
+                }
+            }
         }
         self.apply_call_action(outcome.action);
     }
@@ -3293,12 +3344,14 @@ mod tests {
 
     #[cfg(feature = "pqc")]
     #[test]
-    fn idle_call_status_is_polled_every_five_seconds() {
+    fn idle_call_status_is_polled_every_two_seconds() {
         use miasma_core::chat::ipc::CallRequest;
 
+        // Idle discovery was slowed to a couple of seconds (down from five) so a dial from the
+        // other side, and a held `not_ready` redial of ours, are noticed within a few seconds.
         let mut ui = ready();
         ui.last_events = Instant::now();
-        for (now_ms, expected) in [(5_000, true), (9_999, false), (10_000, true)] {
+        for (now_ms, expected) in [(2_000, true), (3_999, false), (4_000, true)] {
             ui.clock_override = Some(Clock {
                 now_ms,
                 utc_offset_secs: 0,
@@ -3315,6 +3368,106 @@ mod tests {
                 assert!(calls.is_empty());
             }
         }
+    }
+
+    #[cfg(feature = "pqc")]
+    fn dial_req(contact: &str) -> ChatRequest {
+        use miasma_core::chat::ipc::CallRequest;
+        ChatRequest::Call(CallRequest::Dial {
+            contact: contact.into(),
+        })
+    }
+
+    #[cfg(feature = "pqc")]
+    fn call_resp(resp: miasma_core::chat::ipc::CallResponse) -> Result<ChatResponse, ChatFail> {
+        Ok(ChatResponse::Call(resp))
+    }
+
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn a_not_ready_dial_answer_holds_the_redial_and_shows_securing() {
+        use miasma_core::chat::ipc::CallResponse;
+        // The daemon held the dial because the hybrid key exchange with the contact was not set up
+        // yet (`not_ready`): the optimistic "calling" ends, the "securing" reason is shown, and the
+        // contact is held so the idle discovery poll redials it once.
+        let mut ui = ready();
+        ui.call.on_dial();
+        assert_eq!(ui.call.state(), "calling");
+        ui.on_reply(
+            c(),
+            dial_req("alice"),
+            call_resp(CallResponse::Error("not_ready".into())),
+        );
+        assert!(!ui.call.exists());
+        assert_eq!(ui.call.dial_failed(), Some("not_ready"));
+        // The idle discovery poll, once due, redials the held contact exactly once.
+        ui.last_events = Instant::now();
+        ui.clock_override = Some(Clock {
+            now_ms: 2_000,
+            utc_offset_secs: 0,
+        });
+        ui.tick(false, true);
+        let dials: Vec<_> = requests(&mut ui)
+            .into_iter()
+            .filter(|r| {
+                matches!(
+                    r,
+                    ChatRequest::Call(miasma_core::chat::ipc::CallRequest::Dial { .. })
+                )
+            })
+            .collect();
+        assert_eq!(dials.len(), 1);
+        assert_eq!(ui.call.state(), "calling");
+    }
+
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn a_refused_dial_answer_ends_the_call_and_holds_no_redial() {
+        use miasma_core::chat::ipc::CallResponse;
+        // A dial turned away for good (`refused`, `busy`, `not_allowed`) ends the optimistic call
+        // and shows its reason, but holds no redial.
+        for word in ["refused", "busy", "not_allowed"] {
+            let mut ui = ready();
+            ui.call.on_dial();
+            ui.on_reply(
+                c(),
+                dial_req("bob"),
+                call_resp(CallResponse::Error(word.into())),
+            );
+            assert!(!ui.call.exists());
+            assert_eq!(ui.call.dial_failed(), Some(word));
+            assert!(ui.call.take_redial().is_none());
+        }
+    }
+
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn an_unavailable_dial_answer_ends_the_call_with_the_unavailable_reason() {
+        use miasma_core::chat::ipc::CallResponse;
+        let mut ui = ready();
+        ui.call.on_dial();
+        ui.on_reply(c(), dial_req("bob"), call_resp(CallResponse::Unavailable));
+        assert!(!ui.call.exists());
+        assert_eq!(ui.call.dial_failed(), Some("unavailable"));
+    }
+
+    #[cfg(feature = "pqc")]
+    #[test]
+    fn an_accepted_dial_answer_clears_any_failure_line() {
+        use miasma_core::chat::ipc::CallResponse;
+        let mut ui = ready();
+        ui.call.on_dial();
+        // A first dial was refused, leaving a reason line.
+        ui.on_reply(
+            c(),
+            dial_req("bob"),
+            call_resp(CallResponse::Error("busy".into())),
+        );
+        assert_eq!(ui.call.dial_failed(), Some("busy"));
+        // A later accepted dial clears it.
+        ui.call.on_dial();
+        ui.on_reply(c(), dial_req("bob"), call_resp(CallResponse::Ok));
+        assert!(ui.call.dial_failed().is_none());
     }
 
     #[test]
@@ -4475,6 +4628,7 @@ mod tests {
             media_frames_played: 0,
             media_video_frames_sent: 0,
             media_video_frames_played: 0,
+            mic_permission_needed: false,
         };
         rig.chat.call.on_status(&ringing, 1_000);
         rig.frame_with_call_screens();
@@ -4495,6 +4649,7 @@ mod tests {
             media_frames_played: 0,
             media_video_frames_sent: 0,
             media_video_frames_played: 0,
+            mic_permission_needed: false,
         };
         rig.chat.call.on_status(&connected, 2_000);
         rig.frame_with_call_screens();

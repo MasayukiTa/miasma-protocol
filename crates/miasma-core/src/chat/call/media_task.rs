@@ -44,6 +44,11 @@ pub struct MediaStats {
     pub video_frames_played: Arc<AtomicU64>,
     pub camera_in_use: Arc<AtomicBool>,
     pub screen_sharing: Arc<AtomicBool>,
+    /// Set true when the macOS microphone preflight found the permission not
+    /// granted, so the call status can report a neutral `mic_permission`
+    /// reason to the UI. Never set on Windows or Linux, where the preflight
+    /// reports granted.
+    pub mic_permission_needed: Arc<AtomicBool>,
     pub(super) control: Arc<Mutex<Option<mpsc::Sender<MediaControl>>>>,
     /// Set true to mute the local microphone mid-call. The media task reads it
     /// each tick and tells the capture source; with no input device it has no
@@ -321,6 +326,13 @@ async fn run_media(
         };
         match build_real_audio(&selection) {
             Ok((source, sink)) => {
+                // Carry the microphone preflight result to the call status, so
+                // the UI can show the `mic_permission` reason when macOS has
+                // not granted the permission. On Windows and Linux the
+                // preflight always reports granted, so this stays false.
+                stats
+                    .mic_permission_needed
+                    .store(source.mic_permission_needed(), Ordering::SeqCst);
                 return drive_session(
                     roots,
                     call_id,

@@ -107,6 +107,23 @@ pub fn incoming_banner(
     action
 }
 
+/// The dial-failure banner, shown over whatever screen is open when the daemon did not accept a
+/// dial. It turns the stable reason word into one plain line (see [`call::dial_failed_text`]) and
+/// offers a single dismiss button; no peer id or technical word is ever drawn. `not_ready` is
+/// shown too, as a "securing, then calling" line, while the dial is retried on its own. Returns
+/// true when the dismiss button was pressed.
+pub fn dial_failed_banner(ui: &mut egui::Ui, c: &CallStrings, reason: &str) -> bool {
+    let mut dismissed = false;
+    kit::surface(ui, |ui| {
+        kit::notice(ui, Level::Warn, call::dial_failed_text(c, reason));
+        ui.add_space(kit::SP_2);
+        if ui.add(kit::secondary_button(c.dial_dismiss)).clicked() {
+            dismissed = true;
+        }
+    });
+    dismissed
+}
+
 /// Draw the remote video frame, scaled to fit the available width while keeping its aspect
 /// ratio. `texture` is the egui texture the caller uploaded from the newest RGBA frame, and
 /// `size` its pixel dimensions. Nothing is drawn for a zero-sized frame. Audio-only calls pass
@@ -229,6 +246,18 @@ pub fn in_call_panel(
         // could not be turned on. It clears when the camera comes into use or the call ends.
         if state.camera_unavailable() {
             kit::notice(ui, Level::Warn, c.camera_unavailable);
+        }
+        // The daemon answered a screen-share start with `screen_permission`: the Screen Recording
+        // permission is not granted. The notice says where to allow it; it clears when screen
+        // sharing comes into use or the call ends.
+        if state.screen_permission_needed() {
+            kit::notice(ui, Level::Warn, c.screen_permission);
+        }
+        // The call status reports the macOS Microphone permission is not granted (the mic opens
+        // when the call connects, not on a button). The notice says where to allow it; it clears
+        // when the call ends. Never shown on Windows or Linux.
+        if state.mic_permission_needed() {
+            kit::notice(ui, Level::Warn, c.mic_permission);
         }
         if state.mic_in_use() {
             ui.add_space(kit::SP_2);

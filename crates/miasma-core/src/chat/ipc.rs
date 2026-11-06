@@ -174,6 +174,11 @@ pub struct CallStatusDto {
     pub camera_in_use: bool,
     #[serde(default)]
     pub screen_sharing: bool,
+    /// True when the macOS microphone permission is not granted during a
+    /// connected call, so the UI shows the `mic_permission` reason. Always
+    /// false on Windows and Linux. Older daemons omit it.
+    #[serde(default)]
+    pub mic_permission_needed: bool,
     #[serde(default)]
     pub media_frames_sent: u64,
     #[serde(default)]
@@ -836,6 +841,7 @@ mod tests {
                 muted: false,
                 camera_in_use: false,
                 screen_sharing: false,
+                mic_permission_needed: false,
                 media_frames_sent: 0,
                 media_frames_played: 0,
                 media_video_frames_sent: 0,
@@ -898,6 +904,8 @@ mod tests {
         .unwrap();
         assert!(old_status.safety_code.is_none());
         assert!(!old_status.muted && !old_status.camera_in_use && !old_status.screen_sharing);
+        // The mic-permission flag also defaults to false for an old client.
+        assert!(!old_status.mic_permission_needed);
         assert_eq!(old_status.media_frames_sent, 0);
         assert_eq!(old_status.media_frames_played, 0);
         // New video counters also default when an old client omits them.
