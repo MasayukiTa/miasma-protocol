@@ -359,7 +359,7 @@ impl CallRuntime {
                         Some(inbound) => { let mut state = task_inner.lock().unwrap_or_else(|e| e.into_inner()); state.controller.on_inbound(inbound); state.collect(); }
                         None => break,
                     },
-                    _ = interval.tick() => { let mut state = task_inner.lock().unwrap_or_else(|e| e.into_inner()); state.controller.on_tick(); state.collect(); },
+                    _ = interval.tick() => { let mut state = task_inner.lock().unwrap_or_else(|e| e.into_inner()); let last = state.media_stats.as_ref().map_or(0, |s| s.last_received_ms.load(Ordering::Relaxed)); if last != 0 { state.controller.on_peer_media(last); } state.controller.on_tick(); state.collect(); },
                     _ = task_wake.notified() => {},
                     result = sending.join_next(), if !sending.is_empty() => {
                         if let Some(Ok((ticket, ok))) = result {
@@ -681,6 +681,7 @@ fn notice_word(notice: CallNotice) -> &'static str {
         CallNotice::NoAnswer => "no_answer",
         CallNotice::Connected => "connected",
         CallNotice::CallEnded => "call_ended",
+        CallNotice::PeerLost => "peer_lost",
         CallNotice::EstablishmentFailed => "establishment_failed",
         CallNotice::ClearIncoming => "clear_incoming",
         CallNotice::SendFailed => "send_failed",
@@ -1291,7 +1292,7 @@ mod tests {
         assert!(matches!(response, CallResponse::Ok));
         assert!(source.is_none());
     }
-    struct CountedSource(Arc<AtomicUsize>);
+    struct CountedSource(Arc<AtomicUsize>, bool);
     impl Drop for CountedSource {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::SeqCst);
@@ -1302,17 +1303,22 @@ mod tests {
             true
         }
         fn next_picture(&mut self) -> Option<super::super::video::RawPicture> {
+            let (width, height, size) = if self.1 {
+                (160, 120, 160 * 120 * 3 / 2)
+            } else {
+                (2, 2, 4)
+            };
             Some(super::super::video::RawPicture {
-                width: 2,
-                height: 2,
-                pixels: vec![1; 4],
+                width,
+                height,
+                pixels: vec![128; size],
             })
         }
     }
-    struct CountedFactory(Arc<AtomicUsize>);
+    struct CountedFactory(Arc<AtomicUsize>, bool);
     impl ScreenSourceFactory for CountedFactory {
         fn create(&self) -> Option<Box<dyn super::super::video::VideoSource + Send>> {
-            Some(Box::new(CountedSource(self.0.clone())))
+            Some(Box::new(CountedSource(self.0.clone(), self.1)))
         }
     }
     fn packet_counts(queue: &Arc<Mutex<VecDeque<Vec<u8>>>>) -> [usize; 3] {
@@ -1351,8 +1357,8 @@ mod tests {
         );
         let camera_drops = Arc::new(AtomicUsize::new(0));
         let screen_drops = Arc::new(AtomicUsize::new(0));
-        let camera = CountedFactory(camera_drops.clone());
-        let screen = CountedFactory(screen_drops.clone());
+        let camera = CountedFactory(camera_drops.clone(), true);
+        let screen = CountedFactory(screen_drops.clone(), false);
         assert!(send_media_control(
             &stats,
             MediaControl::AttachCamera(camera.create().unwrap())

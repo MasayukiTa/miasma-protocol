@@ -75,9 +75,10 @@ iroh-mdns-address-lookup = { version = "0.6", optional = true }
 ml-kem = { version = "0.3.3", default-features = false, features = ["zeroize"], optional = true }
 rand_core_pqc = { package = "rand_core", version = "0.10", default-features = false, optional = true }
 
-[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"], optional = true }
 zune-jpeg = { version = "0.5.15", default-features = false, optional = true }
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 # Real call audio (see src/chat/call/audio_device.rs and codec.rs). Both are
 # optional, desktop-only, and gated by the `call-audio` feature.
 # cpal: capture and playback on Windows and macOS through the

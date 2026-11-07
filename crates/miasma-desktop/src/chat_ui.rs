@@ -1059,7 +1059,10 @@ impl ChatUi {
             }
             CallResponse::Events { next, notices, .. } => {
                 self.call.set_events_since(next);
-                if notices.iter().any(|n| n.code == "call_ended") {
+                if notices.iter().any(|n| n.code == "peer_lost") {
+                    self.call.on_dial_refused("peer_lost");
+                    self.free_call_video_texture();
+                } else if notices.iter().any(|n| n.code == "call_ended") {
                     self.call.end();
                     self.free_call_video_texture();
                 }
@@ -4697,6 +4700,7 @@ mod tests {
             media_frames_played: 0,
             media_video_frames_sent: 0,
             media_video_frames_played: 0,
+            mic_permission_needed: false,
         };
         rig.chat.call.on_status(&connected, 1_000);
         assert!(rig.chat.call.exists(), "the call is up before the close");

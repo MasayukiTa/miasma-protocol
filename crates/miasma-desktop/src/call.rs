@@ -41,6 +41,7 @@ pub fn call_state_text(c: &CallStrings, state: &str) -> &'static str {
 /// the caller never sees a blank where a reason belongs.
 pub fn dial_failed_text(c: &CallStrings, reason: &str) -> &'static str {
     match reason {
+        "peer_lost" => c.peer_lost,
         "busy" => c.dial_busy,
         "not_ready" => c.dial_securing,
         "unavailable" => c.unavailable,
@@ -254,12 +255,11 @@ impl CallUi {
     /// starts the duration clock. A state of `idle` means no call: the screen is reset.
     pub fn on_status(&mut self, status: &CallStatusDto, now_ms: u64) {
         self.pending_token = status.pending_token;
-        // A real status word supersedes any earlier dial-refusal line.
-        self.dial_failed = None;
         if status.state == "idle" {
             self.end();
             return;
         }
+        self.dial_failed = None;
         self.active = true;
         if status.state == "connected" && self.connected_ms.is_none() {
             self.connected_ms = Some(now_ms);

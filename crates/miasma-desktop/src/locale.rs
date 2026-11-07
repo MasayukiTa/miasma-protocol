@@ -3438,7 +3438,7 @@ call_strings! {
     // that stands for the host's own default device.
     device_heading, device_input_label, device_output_label, device_default,
     // Short notices.
-    ended, unavailable,
+    ended, unavailable, peer_lost,
     // The separate call window: a line that says closing the window ends the call, the marker
     // shown on the header Call button while a call exists, and the labels for the small tile that
     // shows what you are sending (your camera, or your screen) while it is active.
@@ -3502,6 +3502,7 @@ static CALL_EN: CallStrings = CallStrings {
     device_output_label: "Speaker",
     device_default: "Default device",
     ended: "Call ended",
+    peer_lost: "The connection to the other person was lost.",
     unavailable: "Calls are not available right now.",
     window_hint: "Closing this window ends the call.",
     in_a_call: "In a call",
@@ -3515,6 +3516,7 @@ static CALL_EN: CallStrings = CallStrings {
 };
 
 static CALL_JA: CallStrings = CallStrings {
+    peer_lost: "相手との接続が失われました。",
     call: "通話",
     a11y_call: "この相手に通話を発信する",
     incoming_title: "着信中",
@@ -3570,6 +3572,7 @@ static CALL_JA: CallStrings = CallStrings {
 
 // zh-CN: a first translation; to be reviewed by a native speaker before it is called finished.
 static CALL_ZH_CN: CallStrings = CallStrings {
+    peer_lost: "与对方的连接已断开。",
     call: "通话",
     a11y_call: "向此联系人发起通话",
     incoming_title: "来电",

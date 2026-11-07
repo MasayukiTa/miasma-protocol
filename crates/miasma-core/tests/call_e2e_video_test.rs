@@ -465,3 +465,122 @@ async fn video_frames_survive_the_wire_in_both_directions() {
     .await
     .expect("wire-survival scenario timed out");
 }
+
+/// Two encrypted media sessions over a bounded, delayed in-process link. A
+/// 550 ms one-way delay models the measured 1.1 s round trip; nine packets
+/// per 20 ms admit the audio packet and the paced video fragments. The link
+/// serializes packets at 3 ms each (about 240 kbit/s at 90 bytes per packet).
+#[cfg(feature = "call-video")]
+#[test]
+fn jpeg_video_arrives_over_delayed_bounded_link() {
+    use miasma_core::chat::call::{
+        device::{RecordingSink, ToneSource},
+        media::Direction,
+        session::{DatagramLink, MediaSession},
+        video::{DiscardVideoSink, VideoDriver, VideoSource},
+        video_codec::{JpegDecoder, JpegEncoder, VIDEO_HEIGHT, VIDEO_WIDTH},
+    };
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use zeroize::Zeroizing;
+
+    type Queue = Arc<Mutex<VecDeque<(u64, Vec<u8>)>>>;
+    struct Link {
+        rx: Queue,
+        tx: Queue,
+        now: Arc<AtomicU64>,
+        next_send_ms: u64,
+    }
+    impl DatagramLink for Link {
+        fn max_len(&self) -> usize {
+            1200
+        }
+        fn send(&mut self, packet: &[u8]) -> bool {
+            let mut q = self.tx.lock().unwrap();
+            if q.len() >= 512 {
+                return false;
+            }
+            let start = self.now.load(Ordering::Relaxed).max(self.next_send_ms);
+            self.next_send_ms = start + 3;
+            q.push_back((self.next_send_ms + 550, packet.to_vec()));
+            true
+        }
+        fn try_recv(&mut self) -> Option<Vec<u8>> {
+            let mut q = self.rx.lock().unwrap();
+            if q.front()
+                .map_or(false, |(at, _)| *at <= self.now.load(Ordering::Relaxed))
+            {
+                q.pop_front().map(|(_, p)| p)
+            } else {
+                None
+            }
+        }
+    }
+    struct Camera;
+    impl VideoSource for Camera {
+        fn next_picture(&mut self) -> Option<RawPicture> {
+            let len = usize::from(VIDEO_WIDTH) * usize::from(VIDEO_HEIGHT) * 3 / 2;
+            Some(RawPicture {
+                width: VIDEO_WIDTH,
+                height: VIDEO_HEIGHT,
+                pixels: vec![128; len],
+            })
+        }
+    }
+    let clock = Arc::new(AtomicU64::new(0));
+    let ab: Queue = Arc::new(Mutex::new(VecDeque::new()));
+    let ba: Queue = Arc::new(Mutex::new(VecDeque::new()));
+    let link_a = Link {
+        rx: ba.clone(),
+        tx: ab.clone(),
+        now: clock.clone(),
+        next_send_ms: 0,
+    };
+    let link_b = Link {
+        rx: ab,
+        tx: ba,
+        now: clock.clone(),
+        next_send_ms: 0,
+    };
+    let root = Zeroizing::new([42u8; 32]);
+    let mut a = MediaSession::new(
+        &root,
+        [1; 16],
+        Direction::Caller,
+        0,
+        ToneSource::new(),
+        RecordingSink::new(),
+        link_a,
+    )
+    .unwrap();
+    let mut b = MediaSession::new(
+        &root,
+        [1; 16],
+        Direction::Callee,
+        0,
+        ToneSource::new(),
+        RecordingSink::new(),
+        link_b,
+    )
+    .unwrap();
+    let driver = || {
+        VideoDriver::new(
+            Camera,
+            DiscardVideoSink,
+            JpegEncoder::new(VIDEO_WIDTH, VIDEO_HEIGHT).unwrap(),
+            JpegDecoder::new(VIDEO_WIDTH, VIDEO_HEIGHT).unwrap(),
+            200,
+        )
+    };
+    let mut av = driver();
+    let mut bv = driver();
+    for now in (0..10_000).step_by(20) {
+        clock.store(now, Ordering::Relaxed);
+        let packets = av.tick(now);
+        a.tick_with_video(now, &packets, |body, time| av.receive(body, time));
+        let packets = bv.tick(now);
+        b.tick_with_video(now, &packets, |body, time| bv.receive(body, time));
+    }
+    assert!(av.frames_sent > 0 && bv.frames_sent > 0);
+    assert!(av.frames_played > 0 && bv.frames_played > 0);
+}
