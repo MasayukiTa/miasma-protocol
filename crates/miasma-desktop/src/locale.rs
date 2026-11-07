@@ -3439,6 +3439,12 @@ call_strings! {
     device_heading, device_input_label, device_output_label, device_default,
     // Short notices.
     ended, unavailable, peer_lost,
+    // The separate call window: a line that says closing the window ends the call, the marker
+    // shown on the header Call button while a call exists, and the labels for the small tile that
+    // shows what you are sending (your camera, or your screen) while it is active.
+    window_hint, in_a_call, self_camera_tile, self_screen_tile,
+    // Screen-reader name of the custom-painted remote video area in the call window.
+    a11y_video,
     // The line shown instead of "calling" when the daemon did not accept the dial. `dial_busy`
     // for a contact already in a call, `dial_securing` while the secure connection with the
     // contact is still being set up (the call is retried on its own), and `dial_refused` for a
@@ -3498,6 +3504,11 @@ static CALL_EN: CallStrings = CallStrings {
     ended: "Call ended",
     peer_lost: "The connection to the other person was lost.",
     unavailable: "Calls are not available right now.",
+    window_hint: "Closing this window ends the call.",
+    in_a_call: "In a call",
+    self_camera_tile: "Your camera",
+    self_screen_tile: "Sharing your screen",
+    a11y_video: "Video from the other person",
     dial_busy: "That contact is already in a call.",
     dial_securing: "Setting up a secure connection, then calling...",
     dial_refused: "The call could not be placed.",
@@ -3548,6 +3559,11 @@ static CALL_JA: CallStrings = CallStrings {
     device_default: "既定のデバイス",
     ended: "通話を終了しました",
     unavailable: "通話はいま使えない状態です。",
+    window_hint: "このウィンドウを閉じると通話が終了します。",
+    in_a_call: "通話中",
+    self_camera_tile: "自分のカメラ",
+    self_screen_tile: "自分の画面を共有中",
+    a11y_video: "相手の映像",
     dial_busy: "お相手は現在ほかの通話中です。",
     dial_securing: "安全な接続を準備してから発信します...",
     dial_refused: "発信できませんでした。",
@@ -3599,6 +3615,11 @@ static CALL_ZH_CN: CallStrings = CallStrings {
     device_default: "默认设备",
     ended: "通话已结束",
     unavailable: "通话目前不可用。",
+    window_hint: "关闭此窗口将结束通话。",
+    in_a_call: "通话中",
+    self_camera_tile: "你的摄像头",
+    self_screen_tile: "正在共享你的屏幕",
+    a11y_video: "对方的视频",
     dial_busy: "对方正在通话中。",
     dial_securing: "正在建立安全连接，随后呼叫...",
     dial_refused: "无法发起通话。",

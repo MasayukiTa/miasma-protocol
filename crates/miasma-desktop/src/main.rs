@@ -28,6 +28,8 @@ mod buildinfo;
 mod call;
 #[cfg(feature = "pqc")]
 mod call_ui;
+#[cfg(feature = "pqc")]
+mod call_window;
 mod chat;
 mod chat_ui;
 mod contacts;
