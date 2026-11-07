@@ -2354,12 +2354,23 @@ async fn replication_retries_after_peer_join() {
         let queue_a = server_a.queue();
         tokio::spawn(server_a.run());
 
-        // ── Node B: join and bootstrap to A BEFORE A publishes ────────────────
-        // Under the daemon's network_default policy a peerless publish is
-        // refused ("stored only on this device"), so B must be connected for the
-        // publish to land a remote copy. The replication queue then keeps the
-        // record and the retry/topology machinery continues to reconcile it,
-        // which is what this test ultimately asserts via replicated_count.
+        let content = b"replication-retry test: publish before peers exist";
+        let req = ControlRequest::Publish {
+            data: content.to_vec(),
+            data_shards: 2,
+            total_shards: 3,
+        };
+        let mid_str = match daemon_request(&dir_a_path, req).await.unwrap() {
+            ControlResponse::Published { mid } => mid,
+            other => panic!("unexpected: {other:?}"),
+        };
+        println!("[retry] Published MID: {mid_str} (no peers yet)");
+
+        // Immediately after publish: pending_replication = 1, replicated = 0.
+        assert_eq!(queue_a.lock().unwrap().pending_count(), 1);
+        assert_eq!(queue_a.lock().unwrap().replicated_count(), 0);
+
+        // ── Node B: join and bootstrap to A ───────────────────────────────────
         let dir_b = tempfile::tempdir().unwrap();
         let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
         let node_b =
@@ -2392,26 +2403,12 @@ async fn replication_retries_after_peer_join() {
         server_b.bootstrap_dht().await.unwrap();
         tokio::spawn(server_b.run());
 
-        // Wait for the B → A connection to be established.
-        tokio::time::sleep(Duration::from_millis(2000)).await;
+        // Wait for connection to be established.
+        tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let content = b"replication-retry test: publish with a reachable peer";
-        let req = ControlRequest::Publish {
-            data: content.to_vec(),
-            data_shards: 2,
-            total_shards: 3,
-        };
-        let mid_str = match daemon_request(&dir_a_path, req).await.unwrap() {
-            ControlResponse::Published { mid } => mid,
-            other => panic!("unexpected: {other:?}"),
-        };
-        println!("[retry] Published MID: {mid_str}");
-
-        // The record is queued for ongoing replication reconciliation.
-        assert!(queue_a.lock().unwrap().pending_count() >= 1);
-
-        // Wait for replication to be confirmed by the remote peer. The retry
-        // timer fires every 5s, so wait up to 7s for at least one confirmation.
+        // Re-read server_a via IPC: trigger replication retry now that A has a peer.
+        // In production this happens via the 5-second timer; here we just wait for it.
+        // The timer fires every 5s, so wait up to 7s for at least one retry.
         let mut replicated = false;
         for _ in 0..14 {
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -2497,12 +2494,22 @@ fn topology_event_triggers_replication() {
             let queue_a = server_a.queue();
             tokio::spawn(server_a.run());
 
-            // ── Node B: join and connect BEFORE A publishes ───────────────
-            // The daemon's network_default publish policy refuses a peerless
-            // publish, so B must be reachable for the publish to land a remote
-            // copy. Replication is still confirmed well within the 5s window and
-            // far below the 60s fallback timer, so the event-driven path (not
-            // the fallback timer) is what reconciles the queue.
+            let content = b"topology-event-driven replication test";
+            let req = ControlRequest::Publish {
+                data: content.to_vec(),
+                data_shards: 2,
+                total_shards: 3,
+            };
+            match daemon_request(&dir_a_path, req).await.unwrap() {
+                ControlResponse::Published { mid } => {
+                    println!("[topo] Published MID: {mid}");
+                }
+                other => panic!("unexpected: {other:?}"),
+            };
+
+            assert_eq!(queue_a.lock().unwrap().pending_count(), 1);
+
+            // ── Node B: join — PeerConnected should trigger replication ───
             let dir_b = tempfile::tempdir().unwrap();
             let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
             let node_b =
@@ -2533,32 +2540,16 @@ fn topology_event_triggers_replication() {
             server_b.bootstrap_dht().await.unwrap();
             tokio::spawn(server_b.run());
 
-            // Let the B → A connection come up.
-            tokio::time::sleep(Duration::from_millis(2000)).await;
-
-            let content = b"topology-event-driven replication test";
-            let req = ControlRequest::Publish {
-                data: content.to_vec(),
-                data_shards: 2,
-                total_shards: 3,
-            };
-            match daemon_request(&dir_a_path, req).await.unwrap() {
-                ControlResponse::Published { mid } => {
-                    println!("[topo] Published MID: {mid}");
-                }
-                other => panic!("unexpected: {other:?}"),
-            };
-
             // Wait for replication to be confirmed.
             // Fallback timer is 60s; if this completes in <5s it proves
-            // the event-driven path drove the replication.
+            // the topology-event path drove the replication.
             tokio::time::sleep(Duration::from_secs(5)).await;
             let rc = queue_a.lock().unwrap().replicated_count();
             let pc = queue_a.lock().unwrap().pending_count();
             println!("[topo] replicated={rc}, pending={pc}");
             assert!(
                 rc > 0,
-                "replication should be driven by the topology event, not the fallback timer"
+                "replication should be driven by topology event, not fallback timer"
             );
         })
         .await
