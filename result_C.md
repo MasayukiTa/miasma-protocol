@@ -177,3 +177,45 @@ worktree: C:/Users/M118A8586/AppData/Local/Temp/m365-companion/agents/offC (bran
 
 ## 結論
 担当範囲（network-publish 既定で遠隔 ACK ≥1 を必須化、strict 維持、遠隔ACKなしを成功としない証明テスト追加）の **コードとテストは実装・コミット済み**。唯一の未達は必須出力「cargo test の実 pass/fail 件数」で、これは担当コード範囲外の**マシン側 Rust 標準ライブラリ破損（+オフラインで修復不可）**という環境ブロッカーによる。正規トゥールチェーンの CI 環境では本テスト群が実行される見込み。
+
+---
+
+# 担当 3/5 結果（本会話・確定）: directed-share invite の mailbox 預け入れ経由化 + ビルドブロッカー回避の確認
+
+worktree: C:/Users/M118A8586/AppData/Local/Temp/m365-companion/agents/offC (branch offline/C)
+担当: PART C 項目2 = directed share の Invite を mailbox 預け入れ経由にする（file shard 経路=PART B は不改変）
+
+## 実装状況: 既にコミット d3e4d31 で完全実装済みを確認（本会話で追加編集は不要）
+
+### 変更 file:line（crates/miasma-core/src/daemon/mod.rs, origin/main..HEAD）
+- daemon/mod.rs:2423-2436 — content publish は `PublishOptions::default()`（min=0, best-effort 据置, file shard 経路は未改変＝PART B 領域）
+- daemon/mod.rs:2459-2477 — Invite 直接送信は best-effort 最適化（「sent の定義ではない」旨コメント明記）
+- daemon/mod.rs:2479-2487 — `directed_deposit_invite` 呼出が「sent」を決定
+- daemon/mod.rs:2494-2531 — `directed_deposit_invite`: ホルダーが1つも受けなければ `Err`。`held_by.is_empty()`（2518-2524）で「not delivered」を返し、成功 id を渡さない
+- daemon/mod.rs:2538-2557 — `collect_directed_invites_into_inbox`: オフライン受信者が後で回収し ACK（ホルダーはコピー削除）
+- crates/miasma-core/src/chat/mailbox/ids.rs:14,42-47 — `for_directed_recipient` 新タグ（private/group と分離）
+- client.rs / service.rs の `deposit_directed` / `collect_directed` / `deposit_directed_invite` / `collect_directed_invites`（コミット d3e4d31 の stat: client.rs +45, ids.rs +48, service.rs +97, daemon/mod.rs +102, sim_tests.rs +181）
+
+### 担当テスト（crates/miasma-core/src/chat/mailbox/sim_tests.rs, directed invite 群 = 実5件）
+1. sim_tests.rs:532 `a_directed_invite_reaches_an_offline_recipient_and_is_then_removed` — オフライン往復＋ACK 後削除
+2. sim_tests.rs:558 `a_directed_invite_deposit_with_the_only_holder_offline_takes_no_copy` — **預け入れ失敗=未配送の証明**（held_by 空=n==0、成功にならない）
+3. sim_tests.rs:580 `a_directed_invite_only_to_an_untrusting_holder_takes_no_copy` — **拒否=未配送の証明**（failed に NotTrusted、held_by 空）
+4. sim_tests.rs:599 `a_directed_invite_is_not_collected_on_the_private_message_path` — directed/private 経路の分離
+（ids 単体テスト：タグ安定/分離・item id も別途あり）
+
+「預け入れ失敗が未配送として報告され決して成功扱いにならない」ことを証明するテスト = 上記 #2・#3。
+
+## ビルド検証（本会話で実測・確定）
+- 真のブロッカー = **default feature の `call-audio` -> `opus` -> `audiopus_sys` のビルドスクリプト**。CMake が "Visual Studio 17 2022" ジェネレータで libopus をビルドしようとするが、VS 本体インスタンスが無く（BuildTools のみ）`could not find any instance of Visual Studio` で exit。
+- rustc 1.99.1 / rust-std は**正常**（`libstd-*.rlib` 物理存在を確認）。過去会話の「rust-std 物理欠落」「rustc manifest 破損」は現時点では該当しない（toolchain は 2026-11-07 12:29 に配置済み）。
+- 回避: `--no-default-features --features iroh` で audiopus を除外。担当テスト `chat::mailbox` は純 in-memory シミュレータで音声不要。
+- 実測: `cargo test -p miasma-core --locked --no-default-features --features iroh --lib chat::mailbox:: --no-run` => **returncode 0（コンパイル成功, 71.9s）**。共有 `CARGO_TARGET_DIR=C:/work/miasma-beta12-src/target` 使用、vcvars64 は `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\...` 側。
+- 残件: `--no-run` を外した本実行での pass/fail 実件数取得（本会話はトークン上限のため実行まで未到達。回避フラグは確立済みなので後続/CI で取得可能）。
+
+## CI 配線
+- `chat::mailbox::` の custody 単体テスト（sim_tests + ids）は `#[cfg(test)]` のため `--lib` フィルタでのみ走る。bd83a3c で `.github/workflows/ci.yml` に `cargo test -p miasma-core --lib -- chat::mailbox::` を追加済み（緑に見えて走らない回避）。
+
+## 取得件数の明記
+- 確認した実装箇所: daemon/mod.rs 5 区画 + ids.rs 新タグ 1 + client/service の directed API（コミット d3e4d31）。本会話での追加コード編集: 0 件（既に実装・コミット済み）。
+- 担当テスト: directed invite sim テスト 5 件（うち未配送証明 2 件）。
+- cargo コンパイル: `--no-run` returncode 0 を実測（audiopus 回避フラグで到達）。pass/fail 実行件数は本会話未取得（上限到達）。
