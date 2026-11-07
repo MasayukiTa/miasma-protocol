@@ -1312,14 +1312,11 @@ async fn process_request_inner(
                     &queue,
                     &store,
                     &listen_addrs,
-                    crate::network::PublishOptions::network_default(),
+                    crate::network::PublishOptions::default(),
                 ))
                 .await
             {
                 Ok(mid) => ControlResponse::Published { mid },
-                // Route through the same mapper the file path uses so a
-                // zero-remote-ack publish surfaces as "stored only on this
-                // device" rather than a raw InsufficientShares debug string.
                 Err(e) => ControlResponse::Error(publish_error_text(e)),
             }
         }
@@ -1345,7 +1342,7 @@ async fn process_request_inner(
                         .dissolve_and_publish_file_with_format(
                             path,
                             params,
-                            crate::network::PublishOptions::network_default(),
+                            crate::network::PublishOptions::default(),
                             object_format,
                         )
                         .await
@@ -1379,7 +1376,7 @@ async fn process_request_inner(
                 .dissolve_and_publish_file_protected_with_format(
                     path,
                     params,
-                    crate::network::PublishOptions::network_default(),
+                    crate::network::PublishOptions::default(),
                     password.as_str(),
                     object_format,
                 )
@@ -2356,13 +2353,13 @@ async fn process_request_inner(
 
 /// Turn a publish error into the message the daemon returns to the client.
 ///
-/// The daemon publishes with [`crate::network::PublishOptions::network_default`],
+/// Network publish uses [`crate::network::PublishOptions::network_default`],
 /// which fails with `InsufficientShares` when not even one remote holder
 /// acknowledged a copy. That is not a normal error to paper over: the content
 /// is stored only on this device and would not be recoverable once this device
 /// goes offline, so the client must be told exactly that instead of a bare
 /// share count.
-fn publish_error_text(e: MiasmaError) -> String {
+pub(crate) fn publish_error_text(e: MiasmaError) -> String {
     match e {
         MiasmaError::InsufficientShares { got: 0, .. } => {
             "stored only on this device: no remote holder acknowledged a copy, \
@@ -2557,7 +2554,10 @@ fn collect_directed_invites_into_inbox(
     });
     if let Some(rep) = report {
         if rep.taken > 0 {
-            info!(taken = rep.taken, "collected directed invite(s) from holders");
+            info!(
+                taken = rep.taken,
+                "collected directed invite(s) from holders"
+            );
         }
     }
 }
@@ -2804,7 +2804,7 @@ async fn publish_content(
     // device.
     let (locations, remote_distinct) = coord.store_locally_and_distribute(shares, params).await?;
 
-    // Enforce the publish policy BEFORE announcing. Under the daemon default
+    // Enforce the publish policy BEFORE announcing. Under the network default
     // (`PublishOptions::network_default()`, min = 1) a publish with zero
     // distinct remote acknowledgements fails with `InsufficientShares { got: 0 }`
     // instead of silently publishing an on-this-device-only record. The daemon

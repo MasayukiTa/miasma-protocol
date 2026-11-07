@@ -540,7 +540,10 @@ fn a_directed_invite_reaches_an_offline_recipient_and_is_then_removed() {
     let item = ItemId([42; 16]);
     let ca = client(&net, a.id(), 1);
     let n = deposit_directed_invite(&ca, &a.id(), &b.id(), item, invite, &[c.id()], 1_000);
-    assert_eq!(n, 1, "the invite is deposited with the one reachable holder");
+    assert_eq!(
+        n, 1,
+        "the invite is deposited with the one reachable holder"
+    );
     assert_eq!(net.holder(&c.id()).stats().items, 1);
     // The sender goes away; the recipient comes back and collects.
     net.set_offline(b.id(), false);
@@ -586,7 +589,14 @@ fn a_directed_invite_only_to_an_untrusting_holder_takes_no_copy() {
     // C trusts only B, not the sender A.
     net.add_holder(c.id(), on(), &[b.id()]);
     let ca = client(&net, a.id(), 1);
-    let rep = ca.deposit_directed(&[c.id()], &a.id(), &b.id(), ItemId([8; 16]), b"invite", 1_000);
+    let rep = ca.deposit_directed(
+        &[c.id()],
+        &a.id(),
+        &b.id(),
+        ItemId([8; 16]),
+        b"invite",
+        1_000,
+    );
     assert!(rep.held_by.is_empty(), "an untrusting holder takes no copy");
     assert_eq!(rep.failed.len(), 1);
     assert_eq!(

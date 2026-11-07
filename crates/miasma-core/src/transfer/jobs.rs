@@ -247,7 +247,7 @@ impl TransferRegistry {
         let spec = PublishSpec {
             file_path,
             params,
-            options: PublishOptions::default(),
+            options: PublishOptions::network_default(),
             password,
             journal_dir: Some(self.journal_dir()),
             restart,
