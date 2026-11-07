@@ -2714,8 +2714,7 @@ async fn publish_content(
     // never attempted remote distribution, and published unconditionally --
     // so an offline publish reported success even though nothing left the
     // device.
-    let (locations, remote_distinct) =
-        coord.store_locally_and_distribute(shares, params).await?;
+    let (locations, remote_distinct) = coord.store_locally_and_distribute(shares, params).await?;
 
     // Enforce the publish policy BEFORE announcing. Under the daemon default
     // (`PublishOptions::network_default()`, min = 1) a publish with zero
@@ -2724,8 +2723,11 @@ async fn publish_content(
     // maps that to the "stored only on this device" message (see
     // `publish_error_text`). Callers that must preserve the legacy best-effort
     // behaviour pass `PublishOptions::default()` (min = 0).
-    if let Err((need, got)) = options.accepts(remote_distinct) {
-        return Err(MiasmaError::InsufficientShares { need, got });
+    if remote_distinct < options.min_remote_distinct_shards {
+        return Err(MiasmaError::InsufficientShares {
+            need: options.min_remote_distinct_shards,
+            got: remote_distinct,
+        });
     }
 
     let record = DhtRecord {
@@ -3098,7 +3100,11 @@ mod publish_content_remote_ack_tests {
 
     async fn single_offline_node(
         dir: &std::path::Path,
-    ) -> (MiasmaCoordinator, Arc<Mutex<ReplicationQueue>>, Arc<crate::LocalShareStore>) {
+    ) -> (
+        MiasmaCoordinator,
+        Arc<Mutex<ReplicationQueue>>,
+        Arc<crate::LocalShareStore>,
+    ) {
         crate::state_crypto::provision_master_key(dir).unwrap();
         let store = Arc::new(crate::LocalShareStore::open(dir, 1000).unwrap());
         let queue = Arc::new(Mutex::new(ReplicationQueue::load_or_create(dir).unwrap()));
