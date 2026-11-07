@@ -119,14 +119,10 @@ impl<T: VideoDecoder + ?Sized> VideoDecoder for Box<T> {
 }
 /// At most this many video fragments ride alongside one audio packet per tick.
 ///
-/// Derivation: audio paces one 90-byte packet per 20 ms tick (50 packets/s).
-/// A reasonable call video target is about 1.5 Mbps peak. At 50 ticks/s that
-/// is 1_500_000 / 8 / 50 = 3750 bytes per tick of video; each fragment carries
-/// `FRAGMENT_PAYLOAD_LEN` (51) bitstream bytes, so 3750 / 51 驕ｶ霈斐・70 fragments.
-/// We round to a named ceiling that keeps the combined rate bounded and
-/// constant: audio (1) + video (`MAX_VIDEO_FRAGMENTS_PER_TICK`) packets per
-/// tick, never more. Raising it raises the peak bit-rate linearly.
-pub const MAX_VIDEO_FRAGMENTS_PER_TICK: usize = 70;
+/// Eight 90-byte packets per 20 ms cap video near 288 kbit/s, leaving
+/// headroom on relayed links and remaining below the receiver limit of 64
+/// packets per tick even with the accompanying audio packet.
+pub const MAX_VIDEO_FRAGMENTS_PER_TICK: usize = 8;
 
 /// Default memory budget for the reassembly buffer, in bytes. It bounds how
 /// much partially-received video the receiver holds at once. Chosen so a
@@ -591,7 +587,9 @@ impl<S: VideoSource, K: VideoSink, E: VideoEncoder, D: VideoDecoder> VideoDriver
             encoder,
             decoder,
             scheduler: SendScheduler::new(),
-            reassembly: ReassemblyBuffer::new(DEFAULT_REASSEMBLY_BUDGET_BYTES, 500),
+            // A maximum-sized frame takes 1.28 s at eight fragments per 20 ms;
+            // three seconds leaves room for relay jitter and short stalls.
+            reassembly: ReassemblyBuffer::new(DEFAULT_REASSEMBLY_BUDGET_BYTES, 3_000),
             frame_interval_ms: frame_interval_ms.max(20),
             next_frame_ms: 0,
             frame_number: 0,
@@ -765,14 +763,14 @@ mod tests {
         for packet in lost.iter().skip(1) {
             b.receive(packet, 20);
         }
-        for packet in b.tick(520) {
-            a.receive(&packet, 520);
+        for packet in b.tick(3_020) {
+            a.receive(&packet, 3_020);
         }
-        let next = a.tick(520);
+        let next = a.tick(3_020);
         assert!(!next.is_empty());
         assert!(parse_fragment(&next[0]).unwrap().0.keyframe);
         for packet in &next {
-            b.receive(packet, 520);
+            b.receive(packet, 3_020);
         }
         assert_eq!(a.frames_sent, 3);
         assert_eq!(b.frames_played, 2);
@@ -914,7 +912,7 @@ mod tests {
     // Default ceiling derivation stays a sane, bounded constant.
     #[test]
     fn default_ceiling_is_bounded() {
-        assert_eq!(MAX_VIDEO_FRAGMENTS_PER_TICK, 70);
+        assert_eq!(MAX_VIDEO_FRAGMENTS_PER_TICK, 8);
     }
 
     // The pseudo codec + fragmentation form an end-to-end moving-pattern path:

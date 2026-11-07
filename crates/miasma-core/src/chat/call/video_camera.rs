@@ -217,10 +217,10 @@ impl VideoSource for CameraSource {
             return None;
         }
         let frame = self.slot.try_lock().ok()?.take()?;
-        let pixels = convert(&frame, 320, 240)?;
+        let pixels = convert(&frame, 160, 120)?;
         Some(RawPicture {
-            width: 320,
-            height: 240,
+            width: 160,
+            height: 120,
             pixels,
         })
     }

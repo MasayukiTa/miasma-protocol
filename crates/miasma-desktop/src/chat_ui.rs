@@ -1056,7 +1056,10 @@ impl ChatUi {
             }
             CallResponse::Events { next, notices, .. } => {
                 self.call.set_events_since(next);
-                if notices.iter().any(|n| n.code == "call_ended") {
+                if notices.iter().any(|n| n.code == "peer_lost") {
+                    self.call.on_dial_refused("peer_lost");
+                    self.free_call_video_texture();
+                } else if notices.iter().any(|n| n.code == "call_ended") {
                     self.call.end();
                     self.free_call_video_texture();
                 }
@@ -1079,6 +1082,12 @@ impl ChatUi {
             // `Unavailable` or `Error` changes nothing: the next `Status` reports the real state.
             CallResponse::Error(code) if code == "no_camera" => {
                 self.call.set_camera_unavailable();
+            }
+            // The screen-share answer `screen_permission` means the Screen Recording permission is
+            // not granted (macOS); show the notice that says where to allow it. On Windows and
+            // Linux the daemon never sends this code.
+            CallResponse::Error(code) if code == "screen_permission" => {
+                self.call.set_screen_permission_needed();
             }
             CallResponse::Ok | CallResponse::Unavailable | CallResponse::Error(_) => {}
         }
@@ -4613,6 +4622,7 @@ mod tests {
             media_frames_played: 0,
             media_video_frames_sent: 0,
             media_video_frames_played: 0,
+            mic_permission_needed: false,
         };
         rig.chat.call.on_status(&ringing, 1_000);
         rig.frame_with_call_screens();
@@ -4633,6 +4643,7 @@ mod tests {
             media_frames_played: 0,
             media_video_frames_sent: 0,
             media_video_frames_played: 0,
+            mic_permission_needed: false,
         };
         rig.chat.call.on_status(&connected, 2_000);
         rig.frame_with_call_screens();

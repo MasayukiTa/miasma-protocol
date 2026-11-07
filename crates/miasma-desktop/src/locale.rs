@@ -3425,6 +3425,11 @@ call_strings! {
     // the button drives the real start/stop screen-share request; `a11y_screen_share` is its
     // screen-reader name.
     screen_on, screen_off, a11y_screen_share,
+    // Notices shown when a macOS capture permission is not granted: `screen_permission` when
+    // screen recording is not allowed, `mic_permission` when the microphone is not allowed. Each
+    // says where to allow it (System Settings > Privacy & Security). Empty on Windows and Linux
+    // builds, where the daemon never sends these codes.
+    screen_permission, mic_permission,
     // The safety-code area (the code itself is not ready yet, so a neutral line stands in).
     safety_heading, safety_pending, safety_explain,
     // The always-on line shown while the microphone is in use during a call.
@@ -3433,7 +3438,7 @@ call_strings! {
     // that stands for the host's own default device.
     device_heading, device_input_label, device_output_label, device_default,
     // Short notices.
-    ended, unavailable,
+    ended, unavailable, peer_lost,
     // The line shown instead of "calling" when the daemon did not accept the dial. `dial_busy`
     // for a contact already in a call, `dial_securing` while the secure connection with the
     // contact is still being set up (the call is retried on its own), and `dial_refused` for a
@@ -3477,6 +3482,8 @@ static CALL_EN: CallStrings = CallStrings {
     screen_on: "Screen on",
     screen_off: "Screen off",
     a11y_screen_share: "Share your screen",
+    screen_permission: "Screen sharing needs permission. Allow Miasma in System Settings > Privacy & Security > Screen Recording, then try again.",
+    mic_permission: "The microphone needs permission. Allow Miasma in System Settings > Privacy & Security > Microphone.",
     safety_heading: "Safety code",
     safety_pending: "The safety code is not ready yet.",
     safety_explain:
@@ -3489,6 +3496,7 @@ static CALL_EN: CallStrings = CallStrings {
     device_output_label: "Speaker",
     device_default: "Default device",
     ended: "Call ended",
+    peer_lost: "The connection to the other person was lost.",
     unavailable: "Calls are not available right now.",
     dial_busy: "That contact is already in a call.",
     dial_securing: "Setting up a secure connection, then calling...",
@@ -3497,6 +3505,7 @@ static CALL_EN: CallStrings = CallStrings {
 };
 
 static CALL_JA: CallStrings = CallStrings {
+    peer_lost: "相手との接続が失われました。",
     call: "通話",
     a11y_call: "この相手に通話を発信する",
     incoming_title: "着信中",
@@ -3524,6 +3533,8 @@ static CALL_JA: CallStrings = CallStrings {
     screen_on: "画面共有をオン",
     screen_off: "画面共有をオフ",
     a11y_screen_share: "画面を共有する",
+    screen_permission: "画面共有には許可が必要です。「システム設定」＞「プライバシーとセキュリティ」＞「画面収録」で Miasma を許可してから、もう一度お試しください。",
+    mic_permission: "マイクには許可が必要です。「システム設定」＞「プライバシーとセキュリティ」＞「マイク」で Miasma を許可してください。",
     safety_heading: "安全確認コード",
     safety_pending: "安全確認コードはまだ準備できていません。",
     safety_explain:
@@ -3545,6 +3556,7 @@ static CALL_JA: CallStrings = CallStrings {
 
 // zh-CN: a first translation; to be reviewed by a native speaker before it is called finished.
 static CALL_ZH_CN: CallStrings = CallStrings {
+    peer_lost: "与对方的连接已断开。",
     call: "通话",
     a11y_call: "向此联系人发起通话",
     incoming_title: "来电",
@@ -3572,6 +3584,9 @@ static CALL_ZH_CN: CallStrings = CallStrings {
     screen_on: "开启共享屏幕",
     screen_off: "关闭共享屏幕",
     a11y_screen_share: "共享你的屏幕",
+    screen_permission:
+        "共享屏幕需要权限。请在“系统设置”＞“隐私与安全性”＞“屏幕录制”中允许 Miasma，然后重试。",
+    mic_permission: "麦克风需要权限。请在“系统设置”＞“隐私与安全性”＞“麦克风”中允许 Miasma。",
     safety_heading: "安全码",
     safety_pending: "安全码尚未就绪。",
     safety_explain: "请向对方读出此安全码；如果双方的安全码不同，请结束通话。",
