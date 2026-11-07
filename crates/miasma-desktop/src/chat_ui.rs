@@ -1056,7 +1056,10 @@ impl ChatUi {
             }
             CallResponse::Events { next, notices, .. } => {
                 self.call.set_events_since(next);
-                if notices.iter().any(|n| n.code == "call_ended") {
+                if notices.iter().any(|n| n.code == "peer_lost") {
+                    self.call.on_dial_refused("peer_lost");
+                    self.free_call_video_texture();
+                } else if notices.iter().any(|n| n.code == "call_ended") {
                     self.call.end();
                     self.free_call_video_texture();
                 }
