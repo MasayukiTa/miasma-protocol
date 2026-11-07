@@ -67,6 +67,7 @@ const PIC_SIZE: usize = (PIC_WIDTH as usize) * (PIC_HEIGHT as usize);
 struct FakeSource {
     open: Arc<AtomicBool>,
     drops: Arc<AtomicUsize>,
+    camera: bool,
 }
 
 impl Drop for FakeSource {
@@ -80,10 +81,15 @@ impl VideoSource for FakeSource {
         self.open.load(Ordering::Relaxed)
     }
     fn next_picture(&mut self) -> Option<RawPicture> {
+        let (width, height, size) = if self.camera {
+            (160, 120, 160 * 120 * 3 / 2)
+        } else {
+            (PIC_WIDTH, PIC_HEIGHT, PIC_SIZE)
+        };
         Some(RawPicture {
-            width: PIC_WIDTH,
-            height: PIC_HEIGHT,
-            pixels: vec![0u8; PIC_SIZE],
+            width,
+            height,
+            pixels: vec![128u8; size],
         })
     }
 }
@@ -94,6 +100,7 @@ impl VideoSource for FakeSource {
 struct FakeFactory {
     creates: Arc<AtomicUsize>,
     drops: Arc<AtomicUsize>,
+    camera: bool,
 }
 
 impl ScreenSourceFactory for FakeFactory {
@@ -102,6 +109,7 @@ impl ScreenSourceFactory for FakeFactory {
         Some(Box::new(FakeSource {
             open: Arc::new(AtomicBool::new(true)),
             drops: self.drops.clone(),
+            camera: self.camera,
         }))
     }
 }
@@ -121,10 +129,11 @@ impl Counters {
             drops: Arc::new(AtomicUsize::new(0)),
         }
     }
-    fn factory(&self) -> Arc<dyn ScreenSourceFactory> {
+    fn factory(&self, camera: bool) -> Arc<dyn ScreenSourceFactory> {
         Arc::new(FakeFactory {
             creates: self.creates.clone(),
             drops: self.drops.clone(),
+            camera,
         })
     }
     fn created(&self) -> usize {
@@ -229,8 +238,8 @@ async fn peer(relay: &Relay) -> Peer {
     let runtime = CallRuntime::start_with_factories(
         svc.clone(),
         provider,
-        camera.factory(),
-        screen.factory(),
+        camera.factory(true),
+        screen.factory(false),
     );
     register_runtime(dir.path(), runtime.clone());
     Peer {
@@ -392,11 +401,7 @@ async fn start_camera_reaches_a_decoded_frame_on_the_peer() {
             CallResponse::Ok
         ));
         assert_eq!(a.camera.created(), 1, "A opened one camera source");
-        // B presses too, so B's media task has a video driver to decode into.
-        assert!(matches!(
-            call(&b, CallRequest::StartCamera),
-            CallResponse::Ok
-        ));
+        // B receives without starting its own camera.
 
         // B decodes at least one remote video frame that crossed the wire, read
         // through the IPC RemoteFrame request, and the video-played counter
