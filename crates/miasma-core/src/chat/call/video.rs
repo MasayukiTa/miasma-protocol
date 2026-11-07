@@ -763,14 +763,14 @@ mod tests {
         for packet in lost.iter().skip(1) {
             b.receive(packet, 20);
         }
-        for packet in b.tick(520) {
-            a.receive(&packet, 520);
+        for packet in b.tick(3_020) {
+            a.receive(&packet, 3_020);
         }
-        let next = a.tick(520);
+        let next = a.tick(3_020);
         assert!(!next.is_empty());
         assert!(parse_fragment(&next[0]).unwrap().0.keyframe);
         for packet in &next {
-            b.receive(packet, 520);
+            b.receive(packet, 3_020);
         }
         assert_eq!(a.frames_sent, 3);
         assert_eq!(b.frames_played, 2);
