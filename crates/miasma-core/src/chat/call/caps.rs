@@ -8,7 +8,11 @@ pub const MEDIA_VIDEO: u8 = 1 << 1;
 pub const MEDIA_SCREEN: u8 = 1 << 2;
 /// The first supported audio codec bit; its concrete codec is selected later.
 pub const AUDIO_CODEC_DEFAULT: u8 = 1 << 0;
-/// The first supported video codec bit; its concrete codec is selected later.
+/// JPEG uses a distinct bit from the legacy raw-passthrough codec. Peers
+/// without a common codec negotiate audio only instead of misreading frames.
+#[cfg(feature = "call-video")]
+pub const VIDEO_CODEC_DEFAULT: u8 = 1 << 1;
+#[cfg(not(feature = "call-video"))]
 pub const VIDEO_CODEC_DEFAULT: u8 = 1 << 0;
 
 const KNOWN_MEDIA: u8 = MEDIA_AUDIO | MEDIA_VIDEO | MEDIA_SCREEN;
@@ -192,7 +196,7 @@ mod tests {
         mismatch.media_types &= !MEDIA_AUDIO;
         assert_eq!(negotiate(&full, &mismatch), Err(CapsError::NoCommonMedia));
         mismatch = full;
-        mismatch.video_codecs = 2;
+        mismatch.video_codecs = if VIDEO_CODEC_DEFAULT == 1 { 2 } else { 1 };
         assert_eq!(negotiate(&full, &mismatch), negotiate(&full, &audio));
         mismatch.version = 2;
         assert_eq!(
