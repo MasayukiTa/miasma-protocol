@@ -271,14 +271,21 @@ pub async fn run(data_dir: &Path, json: bool) -> Result<()> {
     }
 
     println!("Miasma Offline-Delivery Self-Check");
-    println!("  Bootstrap reachability:     {}", bootstrap_line(report.bootstrap));
+    println!(
+        "  Bootstrap reachability:     {}",
+        bootstrap_line(report.bootstrap)
+    );
     match report.peer_count {
         Some(n) => println!("  Connected peers (libp2p):   {n}"),
         None => println!("  Connected peers (libp2p):   unknown (daemon not running)"),
     }
     println!(
         "  iroh relay connected:       {}",
-        if report.iroh_relay_connected { "yes" } else { "no" }
+        if report.iroh_relay_connected {
+            "yes"
+        } else {
+            "no"
+        }
     );
     println!("  Holders reachable via iroh: {}", report.holders_reachable);
     println!(
@@ -313,14 +320,31 @@ mod tests {
 
     #[test]
     fn ipv4_private_ranges_are_nonroutable() {
-        for ip in ["10.0.0.1", "172.16.0.1", "172.31.255.255", "192.168.1.1", "127.0.0.1", "169.254.1.1", "100.64.0.1", "0.0.0.0"] {
+        for ip in [
+            "10.0.0.1",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "127.0.0.1",
+            "169.254.1.1",
+            "100.64.0.1",
+            "0.0.0.0",
+        ] {
             assert!(ipv4_is_nonroutable(ip), "{ip} should be non-routable");
         }
     }
 
     #[test]
     fn ipv4_public_literals_are_routable() {
-        for ip in ["8.8.8.8", "1.1.1.1", "172.15.0.1", "172.32.0.1", "192.169.0.1", "100.63.0.1", "100.128.0.1"] {
+        for ip in [
+            "8.8.8.8",
+            "1.1.1.1",
+            "172.15.0.1",
+            "172.32.0.1",
+            "192.169.0.1",
+            "100.63.0.1",
+            "100.128.0.1",
+        ] {
             assert!(!ipv4_is_nonroutable(ip), "{ip} should be routable");
         }
     }
@@ -393,7 +417,10 @@ mod tests {
         let r = evaluate(&i);
         assert_eq!(r.deposit, DepositVerdict::No);
         assert_eq!(r.deposit_reason, "iroh relay not connected");
-        assert_eq!(r.holders_reachable, 0, "no holders are counted when the relay is down");
+        assert_eq!(
+            r.holders_reachable, 0,
+            "no holders are counted when the relay is down"
+        );
     }
 
     #[test]

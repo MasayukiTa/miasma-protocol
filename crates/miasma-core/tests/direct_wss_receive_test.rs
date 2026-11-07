@@ -154,7 +154,6 @@ fn pw(s: &str) -> Option<Zeroizing<String>> {
 struct Daemon {
     dir: TempDir,
     shutdown: tokio::sync::mpsc::Sender<()>,
-    wss_port: u16,
 }
 
 async fn start_daemon(key: u8) -> Daemon {
@@ -165,14 +164,9 @@ async fn start_daemon(key: u8) -> Daemon {
     let server = DaemonServer::start(node, store, dir.path().to_path_buf())
         .await
         .unwrap();
-    let wss_port = server.wss_port();
     let shutdown = server.shutdown_handle();
     tokio::spawn(server.run());
-    Daemon {
-        dir,
-        shutdown,
-        wss_port,
-    }
+    Daemon { dir, shutdown }
 }
 
 async fn status(d: &Daemon, id: &str) -> TransferStatus {
@@ -223,35 +217,18 @@ async fn start_receive(
 #[tokio::test(flavor = "multi_thread")]
 async fn a_protected_multi_segment_transfer_is_received_through_a_daemon_with_only_a_via_url() {
     timeout(Duration::from_secs(400), async {
-        // Sender daemon: plain WS server on 127.0.0.1, its own record store.
-        let a = start_daemon(0x61).await;
-        let src_dir = tempfile::tempdir().unwrap();
+        // A local-only sender fixture serves the record and pieces over WS.
+        // The daemon's network publish policy separately requires a remote copy.
+        let a = Sender::plain(0x61).await;
         let data = content(TWO_SEGMENT_LEN);
-        let src = write_payload(&src_dir, &data);
         let password = random_password();
-        let mid = match daemon_request(
-            a.dir.path(),
-            ControlRequest::PublishFileProtected {
-                file_path: src.to_string_lossy().into_owned(),
-                data_shards: 2,
-                total_shards: 3,
-                password: password.clone(),
-                object_format: None,
-            },
-        )
-        .await
-        .unwrap()
-        {
-            ControlResponse::Published { mid } => mid,
-            other => panic!("unexpected: {other:?}"),
-        };
-        assert!(a.wss_port != 0);
+        let mid = a.publish(&data, Some(&password)).await.to_string();
 
         // Receiver daemon: no bootstrap, no peer. The DHT cannot help it.
         let b = start_daemon(0x62).await;
         let out_dir = tempfile::tempdir().unwrap();
         let out = out_dir.path().join("got.bin");
-        let url = format!("ws://127.0.0.1:{}", a.wss_port);
+        let url = a.ws_url();
 
         // Wrong password: refused before any piece is fetched.
         let id = match start_receive(&b, &mid, &out, Some(&random_password()), vec![url.clone()])
@@ -298,7 +275,6 @@ async fn a_protected_multi_segment_transfer_is_received_through_a_daemon_with_on
         assert_eq!(s.bytes_done, data.len() as u64);
         assert!(std::fs::read(&out).unwrap() == data, "byte-identical");
 
-        let _ = a.shutdown.send(()).await;
         let _ = b.shutdown.send(()).await;
     })
     .await

@@ -2266,11 +2266,7 @@ async fn dissolve_and_publish_network_default_fails_without_a_remote_copy() {
 
         // The daemon default: at least one distinct remote acknowledgement.
         let result = coord_a
-            .dissolve_and_publish_with_options(
-                content,
-                params,
-                PublishOptions::network_default(),
-            )
+            .dissolve_and_publish_with_options(content, params, PublishOptions::network_default())
             .await;
 
         match result {
@@ -2299,7 +2295,8 @@ async fn dissolve_and_publish_network_default_fails_without_a_remote_copy() {
     })
     .await;
 
-    result.expect("dissolve_and_publish_network_default_fails_without_a_remote_copy timed out (15s)");
+    result
+        .expect("dissolve_and_publish_network_default_fails_without_a_remote_copy timed out (15s)");
 }
 
 // Note: the inbound `Store` authorization gate itself (unverified peer
