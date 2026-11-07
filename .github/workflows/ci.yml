@@ -74,7 +74,7 @@ jobs:
       # not-delivered verdict are actually exercised, not green by never
       # running. Platform-neutral (pure simulator, no network).
       - name: Test mailbox custody (private and directed invite)
-        run: cargo test -p miasma-core --lib --locked -- chat::mailbox::
+        run: cargo test -p miasma-core --lib --locked -- "chat::mailbox::"
 
       # The history hand-over wire test (ADR-012) is named here explicitly so a
       # regression in it fails this job by name, not only through the
