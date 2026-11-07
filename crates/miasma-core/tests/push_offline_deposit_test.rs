@@ -270,3 +270,96 @@ fn a_deposit_that_misses_the_threshold_is_not_reported_as_delivered() {
         other => panic!("expected NotDeposited, got {other:?}"),
     }
 }
+
+/// Corrupt a fetched chunk while leaving the encrypted manifest intact.
+struct TamperChunk(Node);
+
+impl MailboxTransport for TamperChunk {
+    fn deposit(
+        &self,
+        holder: &[u8; 32],
+        tag: RecipientTag,
+        item: ItemId,
+        blob: &[u8],
+        now_ms: u64,
+    ) -> Result<DepositOutcome, MailboxError> {
+        self.0.deposit(holder, tag, item, blob, now_ms)
+    }
+    fn list(
+        &self,
+        holder: &[u8; 32],
+        tag: RecipientTag,
+        now_ms: u64,
+    ) -> Result<Vec<ItemId>, MailboxError> {
+        self.0.list(holder, tag, now_ms)
+    }
+    fn fetch(
+        &self,
+        holder: &[u8; 32],
+        tag: RecipientTag,
+        item: ItemId,
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, MailboxError> {
+        let mut blob = self.0.fetch(holder, tag, item, now_ms)?;
+        // The manifest is 68 bytes plus its AEAD tag; use a full-sized chunk
+        // so it is distinguishable without relying on its opaque item ID.
+        if let Some(bytes) = &mut blob {
+            if bytes.len() > 84 {
+                bytes[0] ^= 1;
+            }
+        }
+        Ok(blob)
+    }
+    fn delete(
+        &self,
+        holder: &[u8; 32],
+        tag: RecipientTag,
+        item: ItemId,
+    ) -> Result<bool, MailboxError> {
+        self.0.delete(holder, tag, item)
+    }
+}
+
+#[test]
+fn altered_chunk_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sender = Identity::from_seed(&[11u8; 32]);
+    let recipient = Identity::from_seed(&[22u8; 32]);
+    let holder_id = [7u8; 32];
+    let store = file_holder(&tmp.path().join("holder"), sender.id(), recipient.id());
+    let salt = rand::random();
+    let tx = Node {
+        holders: vec![(holder_id, store.clone())],
+        who: sender.id(),
+    };
+    deposit_file(
+        &tx,
+        &[holder_id],
+        &dh_secret(&[11u8; 32]),
+        Some(&[42u8; 32]),
+        &sender.id(),
+        &recipient.id(),
+        salt,
+        &vec![1u8; 20 * 1024][..],
+        0,
+        1,
+    )
+    .unwrap();
+    let rx = TamperChunk(Node {
+        holders: vec![(holder_id, store)],
+        who: recipient.id(),
+    });
+    let err = fetch_file(
+        &rx,
+        &[holder_id],
+        &dh_secret(&[22u8; 32]),
+        Some(&[42u8; 32]),
+        &sender.id(),
+        &recipient.id(),
+        salt,
+        Vec::new(),
+        1,
+    )
+    .unwrap_err();
+    assert_eq!(err, DepositError::Corrupt);
+}
