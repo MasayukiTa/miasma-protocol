@@ -761,7 +761,7 @@ mod tests {
             None,
             &sender.id(),
             &recipient.id(),
-            [1; 16],
+            rand::random(),
             &b"secret"[..],
             0,
             1,
@@ -783,7 +783,7 @@ mod tests {
         let (sender, recipient) = ids();
         let holder = [7u8; 32];
         let store = file_holder(sender.id(), recipient.id());
-        let salt = [3; 16];
+        let salt = rand::random();
         let tx = InProcess {
             holders: vec![(holder, store.clone())],
             who: sender.id(),
