@@ -147,6 +147,51 @@ impl<T: MailboxTransport> MailboxClient<T> {
         )
     }
 
+    /// As [`Self::deposit`], but for a directed-share invite: the copy is kept
+    /// under the directed tag of `recipient` so an offline recipient collects
+    /// it through the directed path, never as a private chat message. Returns
+    /// the deposit report; an empty `held_by` means no holder took a copy and
+    /// the caller must treat the invite as not delivered.
+    #[allow(clippy::too_many_arguments)]
+    pub fn deposit_directed(
+        &self,
+        holders: &[[u8; 32]],
+        sender: &[u8; 32],
+        recipient: &[u8; 32],
+        item: ItemId,
+        wire: &[u8],
+        now_ms: u64,
+    ) -> DepositReport {
+        self.deposit_tagged(
+            RecipientTag::for_directed_recipient(recipient),
+            holders,
+            sender,
+            recipient,
+            item,
+            wire,
+            now_ms,
+        )
+    }
+
+    /// As [`Self::collect`], but for directed-share invites kept under the
+    /// directed tag of `me`. Each invite is applied through the directed path
+    /// by `take`; a taken invite is removed from the holders that have it.
+    pub fn collect_directed(
+        &self,
+        holders: &[[u8; 32]],
+        me: &[u8; 32],
+        now_ms: u64,
+        take: impl FnMut(&[u8; 32], &[u8]) -> bool,
+    ) -> CollectReport {
+        self.collect_tagged(
+            RecipientTag::for_directed_recipient(me),
+            holders,
+            me,
+            now_ms,
+            take,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn deposit_tagged(
         &self,

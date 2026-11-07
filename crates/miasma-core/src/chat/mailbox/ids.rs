@@ -8,6 +8,10 @@ const TAG_CONTEXT: &str = "miasma chat custody recipient tag v1";
 /// collects and applies them through the group path, never as a private
 /// message (ADR-012 step 5).
 const GROUP_TAG_CONTEXT: &str = "miasma chat custody group recipient tag v1";
+/// Directed-share invites are kept under a tag of their own so an offline
+/// recipient collects them through the directed path, never mixed with a
+/// private chat message or a group hand-over.
+const DIRECTED_TAG_CONTEXT: &str = "miasma directed invite custody recipient tag v1";
 
 /// The short name of a recipient under which items for it are kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -31,6 +35,16 @@ impl RecipientTag {
         t.copy_from_slice(&k[..16]);
         Self(t)
     }
+
+    /// The tag under which a directed-share invite for `recipient` is kept,
+    /// distinct from the private and group tags so an offline recipient
+    /// collects it through the directed path only.
+    pub fn for_directed_recipient(recipient: &[u8; 32]) -> Self {
+        let k = blake3::derive_key(DIRECTED_TAG_CONTEXT, recipient);
+        let mut t = [0u8; 16];
+        t.copy_from_slice(&k[..16]);
+        Self(t)
+    }
 }
 
 /// One held item: the ID of the sealed envelope in it.
@@ -40,6 +54,15 @@ pub struct ItemId(pub [u8; 16]);
 /// The item ID of a sealed envelope, or `None` when the bytes are not one.
 pub fn item_id_of(wire: &[u8]) -> Option<ItemId> {
     Envelope::decode(wire).ok().map(|e| ItemId(e.id))
+}
+
+/// The item ID of a directed-share invite, taken from the random 32-byte
+/// envelope id. Two different invites keep different ids because the
+/// envelope id is generated at random per envelope.
+pub fn item_id_for_directed(envelope_id: &[u8; 32]) -> ItemId {
+    let mut t = [0u8; 16];
+    t.copy_from_slice(&envelope_id[..16]);
+    ItemId(t)
 }
 
 #[cfg(test)]
@@ -67,5 +90,30 @@ mod tests {
     fn junk_has_no_item_id() {
         assert!(item_id_of(&[]).is_none());
         assert!(item_id_of(&[7; 40]).is_none());
+    }
+
+    #[test]
+    fn directed_tags_are_stable_and_differ_from_private_and_group() {
+        let d = RecipientTag::for_directed_recipient(&[1; 32]);
+        assert_eq!(d, RecipientTag::for_directed_recipient(&[1; 32]));
+        assert_ne!(d, RecipientTag::for_directed_recipient(&[2; 32]));
+        // A directed invite never shares a tag with a private message or a
+        // group hand-over for the same recipient, so the collect paths stay
+        // separate.
+        assert_ne!(d, RecipientTag::for_recipient(&[1; 32]));
+        assert_ne!(d, RecipientTag::for_group_recipient(&[1; 32]));
+    }
+
+    #[test]
+    fn directed_item_id_is_the_first_16_bytes_of_the_envelope_id() {
+        let mut eid = [0u8; 32];
+        for (i, b) in eid.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let item = item_id_for_directed(&eid);
+        assert_eq!(item.0, eid[..16]);
+        // A different envelope id gives a different item id.
+        let other = item_id_for_directed(&[9u8; 32]);
+        assert_ne!(item, other);
     }
 }

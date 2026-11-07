@@ -2001,3 +2001,120 @@ mod transfer_object_format_tests {
         assert_eq!(c.transfer.object_format, ObjectFormat::Compat);
     }
 }
+
+/// Classify a bootstrap multiaddr's IPv4 literal as non-routable for the
+/// public internet. A shipped default bootstrap list that contains such an
+/// address cannot help a node at another site reach a holder, so the default
+/// must never contain one. This is a pure string check over the `/ip4/A.B.C.D`
+/// component of a libp2p multiaddr; it does not resolve DNS and deliberately
+/// ignores `/dns4/...` and `/ip6/...` forms (the default list is empty, and any
+/// future public entry is expected to be a routable literal or a hostname).
+#[cfg(test)]
+fn multiaddr_has_nonroutable_ipv4(addr: &str) -> bool {
+    // Find the octets that follow an `/ip4/` segment.
+    let mut parts = addr.split('/').peekable();
+    while let Some(seg) = parts.next() {
+        if seg == "ip4" {
+            if let Some(ip) = parts.next() {
+                return ipv4_is_nonroutable(ip);
+            }
+        }
+    }
+    false
+}
+
+/// True for RFC1918 private, loopback, link-local and CGNAT (RFC6598) IPv4
+/// literals, plus `0.0.0.0`. Anything that does not parse as four octets is
+/// treated as routable (it is not a private literal we are guarding against).
+#[cfg(test)]
+fn ipv4_is_nonroutable(ip: &str) -> bool {
+    let o: Vec<u8> = ip.split('.').filter_map(|p| p.parse::<u8>().ok()).collect();
+    if o.len() != 4 {
+        return false;
+    }
+    let (a, b) = (o[0], o[1]);
+    // 10.0.0.0/8
+    if a == 10 {
+        return true;
+    }
+    // 172.16.0.0/12
+    if a == 172 && (16..=31).contains(&b) {
+        return true;
+    }
+    // 192.168.0.0/16
+    if a == 192 && b == 168 {
+        return true;
+    }
+    // 127.0.0.0/8 loopback
+    if a == 127 {
+        return true;
+    }
+    // 169.254.0.0/16 link-local
+    if a == 169 && b == 254 {
+        return true;
+    }
+    // 100.64.0.0/10 CGNAT (RFC6598)
+    if a == 100 && (64..=127).contains(&b) {
+        return true;
+    }
+    // 0.0.0.0/8 "this host"
+    if a == 0 {
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod default_bootstrap_reachability_tests {
+    use super::*;
+
+    // The shipped default must not ship a bootstrap peer that only a single
+    // private LAN can reach: such an address cannot introduce a node at another
+    // site to any holder, which is exactly the offline-delivery failure mode.
+    // The default list is empty today; this test keeps it from regressing to a
+    // private-range literal.
+    #[test]
+    fn the_default_bootstrap_list_has_no_private_range_address() {
+        for addr in NodeConfig::default().network.bootstrap_peers {
+            assert!(
+                !multiaddr_has_nonroutable_ipv4(&addr),
+                "default bootstrap peer must be publicly routable, got {addr}"
+            );
+        }
+        for packaged in [true, false] {
+            for addr in NodeConfig::default_for(packaged).network.bootstrap_peers {
+                assert!(
+                    !multiaddr_has_nonroutable_ipv4(&addr),
+                    "default_for({packaged}) bootstrap peer must be routable, got {addr}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_classifier_flags_the_known_private_ranges() {
+        for a in [
+            "/ip4/172.24.51.174/udp/19900/quic-v1",
+            "/ip4/10.0.0.1/tcp/1",
+            "/ip4/192.168.1.1/udp/1/quic-v1",
+            "/ip4/127.0.0.1/tcp/1",
+            "/ip4/169.254.0.5/tcp/1",
+            "/ip4/100.70.0.1/udp/1/quic-v1",
+            "/ip4/0.0.0.0/udp/0/quic-v1",
+        ] {
+            assert!(multiaddr_has_nonroutable_ipv4(a), "should flag {a}");
+        }
+    }
+
+    #[test]
+    fn the_classifier_allows_public_and_hostname_addresses() {
+        for a in [
+            "/ip4/203.0.113.9/udp/19900/quic-v1",
+            "/ip4/8.8.8.8/tcp/443",
+            "/dns4/bootstrap.example.org/udp/19900/quic-v1",
+            "/ip6/2001:db8::1/udp/1/quic-v1",
+        ] {
+            assert!(!multiaddr_has_nonroutable_ipv4(a), "should allow {a}");
+        }
+    }
+}

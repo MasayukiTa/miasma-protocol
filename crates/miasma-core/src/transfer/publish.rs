@@ -113,6 +113,7 @@ impl MiasmaCoordinator {
             .as_ref()
             .map(|d| publish_journal_path(d, &spec.file_path));
 
+        let network_publish = spec.options.min_remote_distinct_shards > 0;
         let result = self.run_publish(spec, &progress).await;
         let journal_kept = journal.as_ref().is_some_and(|p| p.exists());
         match &result {
@@ -125,7 +126,18 @@ impl MiasmaCoordinator {
             Ok(PublishOutcome::Cancelled { .. }) => {
                 progress.set_state(TransferState::Cancelled, None, journal_kept)
             }
-            Err(e) => progress.set_state(TransferState::Failed, Some(e.to_string()), journal_kept),
+            Err(e) => {
+                let message = match e {
+                    MiasmaError::InsufficientShares { need, got } if network_publish => {
+                        crate::daemon::publish_error_text(MiasmaError::InsufficientShares {
+                            need: *need,
+                            got: *got,
+                        })
+                    }
+                    _ => e.to_string(),
+                };
+                progress.set_state(TransferState::Failed, Some(message), journal_kept)
+            }
         }
         result
     }
@@ -318,6 +330,12 @@ impl MiasmaCoordinator {
         let mut offset: u64 = 0;
         if let Some(r) = &resumed {
             for rec in &r.records {
+                if rec.remote.len() < options.min_remote_distinct_shards {
+                    return Err(MiasmaError::InsufficientShares {
+                        need: options.min_remote_distinct_shards,
+                        got: rec.remote.len(),
+                    });
+                }
                 manifest.push_segment(rec.entry.clone())?;
                 all_locations.extend(self.locations_for_segment(rec, params));
                 remote_distinct_per_segment.push(rec.remote.len());

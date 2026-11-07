@@ -1292,6 +1292,7 @@ async fn process_request_inner(
             return ControlResponse::Error(format!("output path rejected: {e}"));
         }
     }
+    let network_publish = matches!(&req, ControlRequest::TransferStartNetworkPublish { .. });
     match req {
         ControlRequest::Publish {
             data,
@@ -1312,11 +1313,12 @@ async fn process_request_inner(
                     &queue,
                     &store,
                     &listen_addrs,
+                    crate::network::PublishOptions::default(),
                 ))
                 .await
             {
                 Ok(mid) => ControlResponse::Published { mid },
-                Err(e) => ControlResponse::Error(e.to_string()),
+                Err(e) => ControlResponse::Error(publish_error_text(e)),
             }
         }
 
@@ -1352,7 +1354,7 @@ async fn process_request_inner(
                 Ok(mid) => ControlResponse::Published {
                     mid: mid.to_string(),
                 },
-                Err(e) => ControlResponse::Error(e.to_string()),
+                Err(e) => ControlResponse::Error(publish_error_text(e)),
             }
         }
 
@@ -1384,7 +1386,7 @@ async fn process_request_inner(
                 Ok(report) => ControlResponse::Published {
                     mid: report.mid.to_string(),
                 },
-                Err(e) => ControlResponse::Error(e.to_string()),
+                Err(e) => ControlResponse::Error(publish_error_text(e)),
             }
         }
 
@@ -1474,6 +1476,14 @@ async fn process_request_inner(
             password,
             restart,
             object_format,
+        }
+        | ControlRequest::TransferStartNetworkPublish {
+            file_path,
+            data_shards,
+            total_shards,
+            password,
+            restart,
+            object_format,
         } => {
             let password = password.map(Zeroizing::new);
             let params = DissolutionParams {
@@ -1492,6 +1502,7 @@ async fn process_request_inner(
                 password,
                 restart,
                 object_format,
+                network_publish,
             );
             ControlResponse::TransferStarted { id }
         }
@@ -2327,6 +2338,10 @@ async fn process_request_inner(
                 Ok(i) => i,
                 Err(e) => return ControlResponse::Error(format!("inbox open failed: {e}")),
             };
+            // Collect any directed invites a holder kept for us while we were
+            // offline, saving each into the inbox and acknowledging it (the
+            // holder removes its copy) so a later send does not hand it back.
+            collect_directed_invites_into_inbox(&sharing_pubkey, &inbox, &data_dir);
             let now = now_secs();
             inbox.expire_all(now);
             ControlResponse::DirectedInboxList(inbox.list_incoming())
@@ -2345,6 +2360,32 @@ async fn process_request_inner(
 }
 
 // ─── Directed sharing helpers ────────────────────────────────────────────────
+
+/// Turn a publish error into the message the daemon returns to the client.
+///
+/// Network publish uses [`crate::network::PublishOptions::network_default`],
+/// which fails with `InsufficientShares` when not even one remote holder
+/// acknowledged a copy. That is not a normal error to paper over: the content
+/// is stored only on this device and would not be recoverable once this device
+/// goes offline, so the client must be told exactly that instead of a bare
+/// share count.
+pub(crate) fn publish_error_text(e: MiasmaError) -> String {
+    match e {
+        MiasmaError::InsufficientShares { got: 0, .. } => {
+            "stored only on this device: no remote holder acknowledged a copy, \
+             so this content is not recoverable if this device goes offline. \
+             Connect to at least one reachable contact and try again."
+                .to_string()
+        }
+        MiasmaError::InsufficientShares { need, got } => format!(
+            "stored only partially off this device: {got} of {need} remote \
+             copies were acknowledged, which is not enough to recover this \
+             content without this device. Connect to more reachable contacts \
+             and try again."
+        ),
+        other => other.to_string(),
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 async fn process_directed_send(
@@ -2386,8 +2427,20 @@ async fn process_directed_send(
         data_shards: 10,
         total_shards: 20,
     };
-    let mid_str =
-        publish_content(&protected_data, params, coord, queue, store, listen_addrs).await?;
+    // Directed send keeps its own legacy best-effort content publish: its
+    // "sent" decision is the invite-deposit acknowledgement below, handled by
+    // the directed-send path (separate scope), not the remote-shard ACK count.
+    // Passing the min=0 default preserves that behaviour unchanged.
+    let mid_str = publish_content(
+        &protected_data,
+        params,
+        coord,
+        queue,
+        store,
+        listen_addrs,
+        crate::network::PublishOptions::default(),
+    )
+    .await?;
 
     // Finalize envelope with the MID.
     directed::finalize_envelope(&mut envelope, &envelope_key, &mid_str, 10, 20)?;
@@ -2401,12 +2454,14 @@ async fn process_directed_send(
         .save_outgoing(&envelope)
         .map_err(|e| MiasmaError::Storage(format!("save outgoing: {e}")))?;
 
-    // Deliver envelope to recipient via P2P (best-effort).
+    // Record the recipient PeerId alongside the outgoing envelope for later
+    // confirm (unchanged), and best-effort deliver the invite directly in
+    // case the recipient is online now. A direct delivery is an optimisation,
+    // not the definition of "sent": that is the mailbox deposit below, so an
+    // offline recipient still receives the invite later from a holder.
     let recipient_peer_id_str = directed::parse_sharing_contact(recipient_contact)
         .map(|(_, pid)| pid)
         .unwrap_or_default();
-
-    // Store recipient PeerId alongside outgoing envelope for later confirm.
     inbox.save_outgoing_peer_id(&envelope_id_hex, &recipient_peer_id_str);
     if let Ok(peer_id) = recipient_peer_id_str.parse::<libp2p::PeerId>() {
         let invite_req = directed::DirectedRequest::Invite {
@@ -2417,19 +2472,104 @@ async fn process_directed_send(
             .await
         {
             Ok(directed::DirectedResponse::InviteAccepted { .. }) => {
-                info!(envelope_id = %envelope_id_hex, "directed invite delivered to recipient");
+                info!(envelope_id = %envelope_id_hex, "directed invite delivered directly to recipient");
             }
             Ok(other) => {
-                warn!(envelope_id = %envelope_id_hex, ?other, "directed invite: unexpected response");
+                warn!(envelope_id = %envelope_id_hex, ?other, "directed invite: unexpected direct response");
             }
             Err(e) => {
-                warn!(envelope_id = %envelope_id_hex, %e, "directed invite delivery failed (recipient may be offline)");
+                warn!(envelope_id = %envelope_id_hex, %e, "directed invite direct delivery failed (recipient may be offline), relying on mailbox deposit");
             }
         }
     }
 
-    info!(envelope_id = %envelope_id_hex, "directed share created and published");
+    // Deposit the invite with trusted holders so an offline recipient receives
+    // it later. This deposit, not the best-effort direct send above, decides
+    // whether the share counts as sent: if no holder takes a copy, the invite
+    // is not delivered and the sender is told so instead of getting a success
+    // id for a share nobody can ever receive.
+    directed_deposit_invite(&envelope, &recipient_pubkey, data_dir)?;
+
+    info!(envelope_id = %envelope_id_hex, "directed share created, published and deposited with holders");
     Ok(envelope_id_hex)
+}
+
+/// Deposit a directed-share invite with trusted holders and decide whether it
+/// counts as delivered. Returns `Ok(())` only when at least one holder took a
+/// copy; otherwise it returns an error so the caller never reports a share as
+/// sent when no holder can ever hand the invite to an offline recipient.
+fn directed_deposit_invite(
+    envelope: &directed::DirectedEnvelope,
+    recipient_pubkey: &[u8; 32],
+    data_dir: &std::path::Path,
+) -> Result<(), MiasmaError> {
+    let service = crate::chat::service::service_for(data_dir).ok_or_else(|| {
+        MiasmaError::Storage(
+            "directed invite not delivered: custody (chat mailbox) is not running, so no holder \
+             can keep the invite for an offline recipient"
+                .into(),
+        )
+    })?;
+    let wire = bincode::serialize(envelope)
+        .map_err(|e| MiasmaError::Storage(format!("serialize invite for deposit: {e}")))?;
+    let item = crate::chat::mailbox::ids::item_id_for_directed(&envelope.envelope_id);
+    let report = service
+        .deposit_directed_invite(recipient_pubkey, item, &wire)
+        .ok_or_else(|| {
+            MiasmaError::Storage(
+                "directed invite not delivered: custody is off or no trusted holder is reachable \
+                 to keep the invite for an offline recipient"
+                    .into(),
+            )
+        })?;
+    if report.held_by.is_empty() {
+        return Err(MiasmaError::Storage(format!(
+            "directed invite not delivered: no holder accepted a copy ({} holder(s) failed), so an \
+             offline recipient could never receive it",
+            report.failed.len()
+        )));
+    }
+    info!(
+        envelope_id = %envelope.id_hex(),
+        holders = report.held_by.len(),
+        "directed invite deposited with holder(s)"
+    );
+    Ok(())
+}
+
+/// Collect directed-share invites that trusted holders kept for us while we
+/// were offline, save each into the directed inbox, and acknowledge it so the
+/// holder drops its copy. Best-effort: custody off, no holder, or an
+/// unreadable copy simply leaves nothing collected. `me` is our own directed
+/// sharing key.
+fn collect_directed_invites_into_inbox(
+    me: &[u8; 32],
+    inbox: &DirectedInbox,
+    data_dir: &std::path::Path,
+) {
+    let Some(service) = crate::chat::service::service_for(data_dir) else {
+        return;
+    };
+    let report = service.collect_directed_invites(me, |_sender, wire| {
+        // Only take (and thereby acknowledge) an invite we can decode and that
+        // is actually bound to us; anything else is left for its holder to
+        // expire rather than silently dropped.
+        let Ok(envelope) = bincode::deserialize::<directed::DirectedEnvelope>(wire) else {
+            return false;
+        };
+        if envelope.recipient_pubkey != *me {
+            return false;
+        }
+        inbox.save_incoming(&envelope).is_ok()
+    });
+    if let Some(rep) = report {
+        if rep.taken > 0 {
+            info!(
+                taken = rep.taken,
+                "collected directed invite(s) from holders"
+            );
+        }
+    }
 }
 
 async fn process_directed_confirm(
@@ -2657,28 +2797,36 @@ async fn publish_content(
     params: DissolutionParams,
     coord: &MiasmaCoordinator,
     queue: &Arc<Mutex<ReplicationQueue>>,
-    store: &LocalShareStore,
-    listen_addrs: &[String],
+    _store: &LocalShareStore,
+    _listen_addrs: &[String],
+    options: crate::network::PublishOptions,
 ) -> Result<String, MiasmaError> {
     // Dissolve into shares.
     let (mid, shares) = dissolve(data, params)?;
 
-    // Store shares locally.
-    for share in &shares {
-        store.put(share)?;
-    }
+    // Store the shares locally AND try to push distinct shards to real remote
+    // holders, exactly like the file publish path. `remote_distinct` is the
+    // number of *distinct* shards a remote peer acknowledged holding; the
+    // returned `locations` already reflect remote placements where they
+    // succeeded. Previously this path stored every shard only on this node,
+    // never attempted remote distribution, and published unconditionally --
+    // so an offline publish reported success even though nothing left the
+    // device.
+    let (locations, remote_distinct) = coord.store_locally_and_distribute(shares, params).await?;
 
-    // Build the DhtRecord (needed both for DHT PUT and the replication queue).
-    let peer_bytes = coord.peer_id().to_bytes();
-    let locations: Vec<ShardLocation> = shares
-        .iter()
-        .map(|s| ShardLocation {
-            peer_id_bytes: peer_bytes.clone(),
-            shard_index: s.slot_index,
-            segment_index: s.segment_index,
-            addrs: listen_addrs.to_vec(),
-        })
-        .collect();
+    // Enforce the publish policy BEFORE announcing. Under the network default
+    // (`PublishOptions::network_default()`, min = 1) a publish with zero
+    // distinct remote acknowledgements fails with `InsufficientShares { got: 0 }`
+    // instead of silently publishing an on-this-device-only record. The daemon
+    // maps that to the "stored only on this device" message (see
+    // `publish_error_text`). Callers that must preserve the legacy best-effort
+    // behaviour pass `PublishOptions::default()` (min = 0).
+    if remote_distinct < options.min_remote_distinct_shards {
+        return Err(MiasmaError::InsufficientShares {
+            need: options.min_remote_distinct_shards,
+            got: remote_distinct,
+        });
+    }
 
     let record = DhtRecord {
         mid_digest: *mid.as_bytes(),
@@ -3031,5 +3179,93 @@ mod large_file_stream_integrity_tests {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"tampered");
         assert_ne!(finalize_streamed_mid(hasher, params), expected);
+    }
+}
+
+#[cfg(test)]
+mod publish_content_remote_ack_tests {
+    //! The raw-data publish path (`ControlRequest::Publish` -> `publish_content`)
+    //! must honour the same "at least one distinct remote holder" default that
+    //! the file publish path does. These tests stand up a single real node with
+    //! NO peers, so `store_locally_and_distribute` can never record a remote
+    //! acknowledgement (remote_distinct == 0), and assert:
+    //!   - under the daemon default (`network_default`, min = 1) the publish is
+    //!     reported as a failure (`InsufficientShares { got: 0 }`), never as a
+    //!     success, and
+    //!   - under the opt-in legacy default (`PublishOptions::default`, min = 0)
+    //!     the same offline publish still succeeds (back-compat preserved).
+    use super::*;
+
+    async fn single_offline_node(
+        dir: &std::path::Path,
+    ) -> (
+        MiasmaCoordinator,
+        Arc<Mutex<ReplicationQueue>>,
+        Arc<crate::LocalShareStore>,
+    ) {
+        crate::state_crypto::provision_master_key(dir).unwrap();
+        let store = Arc::new(crate::LocalShareStore::open(dir, 1000).unwrap());
+        let queue = Arc::new(Mutex::new(ReplicationQueue::load_or_create(dir).unwrap()));
+        let key: [u8; 32] = rand::random();
+        let mut node =
+            crate::MiasmaNode::new(&key, crate::NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let addrs = node.collect_listen_addrs(400).await;
+        let coord = MiasmaCoordinator::start(node, store.clone(), vec![addrs[0].to_string()]).await;
+        (coord, queue, store)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn raw_publish_default_requires_a_remote_ack_and_reports_failure_when_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let (coord, queue, store) = single_offline_node(dir.path()).await;
+        let listen = coord.listen_addrs().to_vec();
+
+        let result = publish_content(
+            b"offline raw publish must not be reported as done",
+            DissolutionParams::default(),
+            &coord,
+            &queue,
+            &store,
+            &listen,
+            crate::network::PublishOptions::network_default(),
+        )
+        .await;
+
+        match result {
+            Err(MiasmaError::InsufficientShares { need, got }) => {
+                assert_eq!(got, 0, "no peers means zero remote acknowledgements");
+                assert_eq!(need, 1, "the daemon default must demand one remote copy");
+            }
+            other => panic!(
+                "offline raw publish under the default must fail with InsufficientShares, got: {other:?}"
+            ),
+        }
+
+        // And the user-facing text is the "stored only on this device" message.
+        let msg = publish_error_text(MiasmaError::InsufficientShares { need: 1, got: 0 });
+        assert!(msg.contains("stored only on this device"), "got: {msg}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn raw_publish_legacy_default_still_succeeds_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let (coord, queue, store) = single_offline_node(dir.path()).await;
+        let listen = coord.listen_addrs().to_vec();
+
+        let result = publish_content(
+            b"legacy best-effort publish still returns a mid",
+            DissolutionParams::default(),
+            &coord,
+            &queue,
+            &store,
+            &listen,
+            crate::network::PublishOptions::default(),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "legacy min=0 publish must still succeed offline, got: {result:?}"
+        );
     }
 }

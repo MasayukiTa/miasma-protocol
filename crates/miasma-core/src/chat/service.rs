@@ -701,11 +701,23 @@ impl ChatService {
                         if let Ok((wire, _)) = self.core.prepare_wire(&entry.id) {
                             let me = self.clone();
                             let peer = peer;
-                            tokio::task::spawn_blocking(move || {
+                            let deposited = tokio::task::spawn_blocking(move || {
                                 me.deposit_with_holders(&peer, &wire)
                             })
                             .await
-                            .ok();
+                            .unwrap_or(false);
+                            // A deposit that reached no holder leaves the
+                            // message collectable nowhere while we cannot reach
+                            // the contact: record it as not delivered rather
+                            // than letting the earlier "waits" reason stand, so
+                            // status never implies the copy is safe with a
+                            // holder when it is not.
+                            if !deposited {
+                                self.core.outbox.update(&entry.id, |e| {
+                                    e.last_error =
+                                        Some("not delivered: no holder took a copy".to_owned());
+                                });
+                            }
                         }
                     }
                     // A wake means the contact is here: start the schedule over.
@@ -1014,19 +1026,24 @@ impl ChatService {
     }
 
     /// Leave a copy of the sealed envelope for `peer` with trusted holders,
-    /// after a direct send could not go through. Does nothing when custody is
-    /// off or there is no holder to ask. The envelope is the same bytes the
-    /// direct send would have used, so the recipient drops a duplicate.
-    fn deposit_with_holders(&self, peer: &[u8; 32], wire: &[u8]) {
+    /// after a direct send could not go through. The envelope is the same bytes
+    /// the direct send would have used, so the recipient drops a duplicate.
+    ///
+    /// Returns `true` only when at least one reachable holder took a copy, so
+    /// the caller can tell a real deposit from a failure. `false` means the
+    /// message was *not* left anywhere a recipient could later collect it
+    /// (custody is off, there is no holder to ask, or every holder was
+    /// unreachable or refused); the caller must not treat that as delivered.
+    fn deposit_with_holders(&self, peer: &[u8; 32], wire: &[u8]) -> bool {
         if self.custody.is_none() {
-            return;
+            return false;
         }
         let Some(item) = super::mailbox::ids::item_id_of(wire) else {
-            return;
+            return false;
         };
         let holders = self.holders_for(peer);
         if holders.is_empty() {
-            return;
+            return false;
         }
         let client = super::mailbox::client::MailboxClient::new(
             super::mailbox::transport::ChatMailboxTransport::new(self.node.clone()),
@@ -1040,6 +1057,7 @@ impl ChatService {
                 "left a copy with {} holder(s)", rep.held_by.len()
             );
         }
+        !rep.held_by.is_empty()
     }
 
     /// Collect from trusted holders whatever waits for us, applying each item
@@ -1074,6 +1092,67 @@ impl ChatService {
         if let Some(g) = self.groups.get() {
             g.collect_hist_offers();
         }
+    }
+
+    /// Leave a directed-share invite `wire` (for the recipient whose directed
+    /// sharing key is `recipient`) with trusted holders, so an offline
+    /// recipient receives it later. Returns the deposit report. `None` means
+    /// custody is off or there is no holder to ask, which the caller must
+    /// treat as not delivered; an empty `held_by` in the report means no
+    /// holder took a copy and is likewise not delivered.
+    pub fn deposit_directed_invite(
+        &self,
+        recipient: &[u8; 32],
+        item: super::mailbox::ids::ItemId,
+        wire: &[u8],
+    ) -> Option<super::mailbox::client::DepositReport> {
+        if self.custody.is_none() {
+            return None;
+        }
+        let holders: Vec<[u8; 32]> = self
+            .contacts
+            .list()
+            .into_iter()
+            .filter_map(|c| c.endpoint_bytes())
+            .filter(|id| id != recipient)
+            .collect();
+        if holders.is_empty() {
+            return None;
+        }
+        let client = super::mailbox::client::MailboxClient::new(
+            super::mailbox::transport::ChatMailboxTransport::new(self.node.clone()),
+            self.settings.custody_copies,
+        );
+        let me = self.core.own_id();
+        Some(client.deposit_directed(&holders, &me, recipient, item, wire, now_ms()))
+    }
+
+    /// Collect directed-share invites waiting for `me` (our own directed
+    /// sharing key) from trusted holders, handing each one to `take` as
+    /// (sender, invite wire). A taken invite is removed from the holders.
+    /// `None` means custody is off or there is no holder to ask.
+    pub fn collect_directed_invites(
+        &self,
+        me: &[u8; 32],
+        take: impl FnMut(&[u8; 32], &[u8]) -> bool,
+    ) -> Option<super::mailbox::client::CollectReport> {
+        if self.custody.is_none() {
+            return None;
+        }
+        let holders: Vec<[u8; 32]> = self
+            .contacts
+            .list()
+            .into_iter()
+            .filter_map(|c| c.endpoint_bytes())
+            .collect();
+        if holders.is_empty() {
+            return None;
+        }
+        let client = super::mailbox::client::MailboxClient::new(
+            super::mailbox::transport::ChatMailboxTransport::new(self.node.clone()),
+            self.settings.custody_copies,
+        );
+        Some(client.collect_directed(&holders, me, now_ms(), take))
     }
 
     // ── Receiving ────────────────────────────────────────────────────────────
