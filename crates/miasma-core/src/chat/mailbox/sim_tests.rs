@@ -486,3 +486,168 @@ fn a_deposit_that_reaches_no_holder_is_never_a_delivery() {
     assert!(st.is_empty());
     assert!(b.received(&a.id()).is_empty());
 }
+
+#[test]
+fn a_deposit_only_to_an_untrusting_holder_takes_no_copy() {
+    // The sender's single candidate holder does not trust the sender, so it
+    // refuses. `held_by` is empty and `failed` records the refusal: not
+    // delivered, and distinguishable from success.
+    let (a, b, c) = (side(), side(), side());
+    let net = Arc::new(Net::default());
+    // C trusts only B, not the sender A.
+    net.add_holder(c.id(), on(), &[b.id()]);
+    a.core.enqueue(&b.id(), "refused everywhere", 1).unwrap();
+    let ca = client(&net, a.id(), 1);
+    let (_item, n) = deposit_oldest(&ca, &a, &b, &[c.id()], 1_000);
+    assert_eq!(n, 0, "an untrusting holder takes no copy");
+    assert_eq!(net.holder(&c.id()).stats().items, 0);
+    let cb = client(&net, b.id(), 1);
+    let (rep, _st) = collect_into(&cb, &b, &[c.id()], 2_000);
+    assert_eq!(rep.offered, 0);
+    assert!(b.received(&a.id()).is_empty());
+}
+
+// ── Directed-share invite custody ────────────────────────────────────────────
+//
+// A directed-share invite is an opaque blob (not a chat envelope), kept under
+// a directed tag of its own so it never mixes with a private message or a
+// group hand-over. The sender deposits it with a holder while the recipient is
+// offline; the recipient collects it later and the copy is then removed. A
+// deposit that no holder takes leaves `held_by` empty, which the caller treats
+// as not delivered.
+
+/// Deposit a directed invite `wire` from `from` for `to` with `holders`,
+/// returning how many holders now hold a copy.
+fn deposit_directed_invite(
+    c: &MailboxClient<SimTransport>,
+    from: &[u8; 32],
+    to: &[u8; 32],
+    item: ItemId,
+    wire: &[u8],
+    holders: &[[u8; 32]],
+    now: u64,
+) -> usize {
+    c.deposit_directed(holders, from, to, item, wire, now)
+        .held_by
+        .len()
+}
+
+/// Collect directed invites for `me`, returning the report and each invite
+/// wire taken.
+fn collect_directed_into(
+    c: &MailboxClient<SimTransport>,
+    me: &[u8; 32],
+    holders: &[[u8; 32]],
+    now: u64,
+) -> (super::client::CollectReport, Vec<Vec<u8>>) {
+    let mut taken = Vec::new();
+    let rep = c.collect_directed(holders, me, now, |_sender, wire| {
+        taken.push(wire.to_vec());
+        true
+    });
+    (rep, taken)
+}
+
+#[test]
+fn a_directed_invite_reaches_an_offline_recipient_and_is_then_removed() {
+    let (a, b, c) = (side(), side(), side());
+    let net = Arc::new(Net::default());
+    // C holds for its contacts A and B; the recipient B is offline.
+    net.add_holder(c.id(), on(), &[a.id(), b.id()]);
+    net.set_offline(b.id(), true);
+    let invite = b"directed-invite-envelope-bytes-for-B";
+    let item = ItemId([42; 16]);
+    let ca = client(&net, a.id(), 1);
+    let n = deposit_directed_invite(&ca, &a.id(), &b.id(), item, invite, &[c.id()], 1_000);
+    assert_eq!(
+        n, 1,
+        "the invite is deposited with the one reachable holder"
+    );
+    assert_eq!(net.holder(&c.id()).stats().items, 1);
+    // The sender goes away; the recipient comes back and collects.
+    net.set_offline(b.id(), false);
+    let cb = client(&net, b.id(), 1);
+    let (rep, taken) = collect_directed_into(&cb, &b.id(), &[c.id()], 2_000);
+    assert_eq!((rep.offered, rep.taken), (1, 1));
+    assert_eq!(taken, vec![invite.to_vec()]);
+    // The holder let go of the acknowledged invite.
+    assert_eq!(net.holder(&c.id()).stats().items, 0);
+    // Collecting again finds nothing.
+    let (rep, _) = collect_directed_into(&cb, &b.id(), &[c.id()], 3_000);
+    assert_eq!(rep.offered, 0);
+}
+
+#[test]
+fn a_directed_invite_deposit_with_the_only_holder_offline_takes_no_copy() {
+    // The only trusted holder is unreachable: nothing is held, held_by is
+    // empty, and the caller must treat this as not delivered.
+    let (a, b, c) = (side(), side(), side());
+    let net = Arc::new(Net::default());
+    net.add_holder(c.id(), on(), &[a.id(), b.id()]);
+    net.set_offline(c.id(), true);
+    let ca = client(&net, a.id(), 1);
+    let n = deposit_directed_invite(
+        &ca,
+        &a.id(),
+        &b.id(),
+        ItemId([7; 16]),
+        b"invite",
+        &[c.id()],
+        1_000,
+    );
+    assert_eq!(n, 0, "no reachable holder: the invite is not delivered");
+    assert_eq!(net.holder(&c.id()).stats().items, 0);
+}
+
+#[test]
+fn a_directed_invite_only_to_an_untrusting_holder_takes_no_copy() {
+    // The candidate holder does not trust the sender, so it refuses: held_by
+    // empty, failed records the refusal, not delivered.
+    let (a, b, c) = (side(), side(), side());
+    let net = Arc::new(Net::default());
+    // C trusts only B, not the sender A.
+    net.add_holder(c.id(), on(), &[b.id()]);
+    let ca = client(&net, a.id(), 1);
+    let rep = ca.deposit_directed(
+        &[c.id()],
+        &a.id(),
+        &b.id(),
+        ItemId([8; 16]),
+        b"invite",
+        1_000,
+    );
+    assert!(rep.held_by.is_empty(), "an untrusting holder takes no copy");
+    assert_eq!(rep.failed.len(), 1);
+    assert_eq!(
+        rep.failed[0].1,
+        MailboxError::Refused(CustodyError::NotTrusted)
+    );
+    assert_eq!(net.holder(&c.id()).stats().items, 0);
+}
+
+#[test]
+fn a_directed_invite_is_not_collected_on_the_private_message_path() {
+    // A directed invite is kept under the directed tag, so a private-message
+    // collect never picks it up, and a directed collect never picks up a
+    // private message. The two paths stay separate.
+    let (a, b, c) = (side(), side(), side());
+    let net = Arc::new(Net::default());
+    net.add_holder(c.id(), on(), &[a.id(), b.id()]);
+    let ca = client(&net, a.id(), 1);
+    // A directed invite for B, and a private chat message for B, both held.
+    ca.deposit_directed(&[c.id()], &a.id(), &b.id(), ItemId([1; 16]), b"invite", 1);
+    a.core.enqueue(&b.id(), "a private message", 1).unwrap();
+    deposit_oldest(&ca, &a, &b, &[c.id()], 1);
+    assert_eq!(net.holder(&c.id()).stats().items, 2);
+    let cb = client(&net, b.id(), 1);
+    // The private-message collect takes only the private message.
+    let (prep, _st) = collect_into(&cb, &b, &[c.id()], 2);
+    assert_eq!(prep.taken, 1);
+    assert_eq!(b.received(&a.id()), ["a private message"]);
+    // The directed invite is still held, and a directed collect takes it.
+    assert_eq!(net.holder(&c.id()).stats().items, 1);
+    let (drep, taken) = collect_directed_into(&cb, &b.id(), &[c.id()], 3);
+    assert_eq!(drep.taken, 1);
+    assert_eq!(taken, vec![b"invite".to_vec()]);
+    assert_eq!(net.holder(&c.id()).stats().items, 0);
+}

@@ -24,7 +24,7 @@ use super::media::{self, Direction};
 use super::signal::{self, Record};
 use super::state::{
     CallId, CallMachine, Control, Effect, Event, Notice, Offer, PeerId, Reason, Role, State,
-    OFFER_TTL_MS,
+    MEDIA_SILENCE_MS, OFFER_TTL_MS,
 };
 
 pub trait CallSender {
@@ -625,6 +625,7 @@ pub enum CallNotice {
     NoAnswer,
     Connected,
     CallEnded,
+    PeerLost,
     EstablishmentFailed,
     ClearIncoming,
     /// The caller failed to send a control message (e.g. transport down).
@@ -646,6 +647,7 @@ impl From<Notice> for CallNotice {
             Notice::NoAnswer => CallNotice::NoAnswer,
             Notice::Connected => CallNotice::Connected,
             Notice::CallEnded => CallNotice::CallEnded,
+            Notice::PeerLost => CallNotice::PeerLost,
             Notice::EstablishmentFailed => CallNotice::EstablishmentFailed,
             Notice::ClearIncoming => CallNotice::ClearIncoming,
         }
@@ -749,6 +751,7 @@ pub struct CallController<P: CallPorts> {
     safety_code: OnceLock<String>,
     negotiated_media: u8,
     entered_at_ms: Option<u64>,
+    last_peer_activity_ms: Option<u64>,
     offer_limiter: OfferLimiter,
     dropped_offers: u64,
     // Whether this endpoint offers video in its own capabilities. Production
@@ -781,6 +784,7 @@ impl<P: CallPorts> CallController<P> {
             safety_code: OnceLock::new(),
             negotiated_media: 0,
             entered_at_ms: None,
+            last_peer_activity_ms: None,
             offer_limiter: OfferLimiter::new(),
             dropped_offers: 0,
             local_offers_video: true,
@@ -812,6 +816,14 @@ impl<P: CallPorts> CallController<P> {
         let now = self.ports.now_ms();
         let old_state = self.machine.state();
         let peer = inbound.peer;
+        if old_state == State::Connected
+            && self.peer == Some(peer)
+            && self
+                .machine
+                .matches_active(&CallId(*inbound.signal.call_id()))
+        {
+            self.on_peer_media(now);
+        }
         let mut incoming_context = None;
         let offer_hash = if matches!(&inbound.signal, Record::Offer { .. }) {
             match inbound.signal.encode_zeroizing() {
@@ -935,7 +947,15 @@ impl<P: CallPorts> CallController<P> {
         }
     }
 
-    /// Inject the offer timeout after more than 45 seconds in Calling or Ringing.
+    /// Record authenticated media received for the current call.
+    pub fn on_peer_media(&mut self, received_at_ms: u64) {
+        if self.machine.state() == State::Connected {
+            self.last_peer_activity_ms =
+                Some(self.last_peer_activity_ms.unwrap_or(0).max(received_at_ms));
+        }
+    }
+
+    /// Inject offer and connected peer-silence timeouts.
     pub fn on_tick(&mut self) {
         let now = self.ports.now_ms();
         if matches!(self.machine.state(), State::Calling | State::Ringing)
@@ -944,6 +964,13 @@ impl<P: CallPorts> CallController<P> {
                 .map_or(false, |entered| now.saturating_sub(entered) > OFFER_TTL_MS)
         {
             self.apply_event(Event::Timeout, now);
+        }
+        if self.machine.state() == State::Connected
+            && self
+                .last_peer_activity_ms
+                .map_or(false, |last| now.saturating_sub(last) >= MEDIA_SILENCE_MS)
+        {
+            self.apply_event(Event::MediaSilence, now);
         }
     }
 
@@ -1190,6 +1217,7 @@ impl<P: CallPorts> CallController<P> {
         let old_state = self.machine.state();
         let transition = self.machine.step(event, now);
         if transition.next != old_state {
+            self.last_peer_activity_ms = (transition.next == State::Connected).then_some(now);
             self.entered_at_ms = if matches!(transition.next, State::Calling | State::Ringing) {
                 Some(now)
             } else {
@@ -1459,6 +1487,29 @@ mod tests {
             signal,
             received_at_ms: 1_000,
         }
+    }
+
+    #[test]
+    fn connected_peer_silence_ends_call_after_last_activity() {
+        let mut a = controller();
+        let mut b = controller();
+        a.dial([2; 32]).unwrap();
+        deliver(&mut b, [1; 32], &a.drain_encoded().remove(0).1);
+        assert!(b.accept(b.status().pending_token.unwrap()));
+        deliver(&mut a, [2; 32], &b.drain_encoded().remove(0).1);
+        assert_eq!(a.status().state, State::Connected);
+        a.take_notices();
+        a.ports.now += MEDIA_SILENCE_MS - 1;
+        a.on_tick();
+        assert_eq!(a.status().state, State::Connected);
+        a.on_peer_media(a.ports.now);
+        a.ports.now += MEDIA_SILENCE_MS - 1;
+        a.on_tick();
+        assert_eq!(a.status().state, State::Connected);
+        a.ports.now += 1;
+        a.on_tick();
+        assert_eq!(a.status().state, State::Idle);
+        assert!(a.take_notices().0.contains(&CallNotice::PeerLost));
     }
 
     #[test]

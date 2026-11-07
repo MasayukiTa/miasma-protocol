@@ -359,7 +359,7 @@ impl CallRuntime {
                         Some(inbound) => { let mut state = task_inner.lock().unwrap_or_else(|e| e.into_inner()); state.controller.on_inbound(inbound); state.collect(); }
                         None => break,
                     },
-                    _ = interval.tick() => { let mut state = task_inner.lock().unwrap_or_else(|e| e.into_inner()); state.controller.on_tick(); state.collect(); },
+                    _ = interval.tick() => { let mut state = task_inner.lock().unwrap_or_else(|e| e.into_inner()); let last = state.media_stats.as_ref().map_or(0, |s| s.last_received_ms.load(Ordering::Relaxed)); if last != 0 { state.controller.on_peer_media(last); } state.controller.on_tick(); state.collect(); },
                     _ = task_wake.notified() => {},
                     result = sending.join_next(), if !sending.is_empty() => {
                         if let Some(Ok((ticket, ok))) = result {
@@ -498,10 +498,19 @@ impl CallRuntime {
                 CallResponse::Status(dto)
             }
             CallRequest::StartScreenShare => {
+                // On macOS screen capture needs the Screen Recording permission.
+                // Preflight it before opening a source: when it is not granted,
+                // the preflight raises the one-time system prompt and this press
+                // reports a stable reason the UI can explain. On Windows and
+                // Linux the preflight always reports granted, so nothing changes.
                 if !state.controller.negotiated_video() {
                     CallResponse::Error("not_ready".into())
                 } else if state.screen_sharing {
                     CallResponse::Ok
+                } else if let Some(reason) = super::mac_permissions::screen_reason(
+                    super::mac_permissions::preflight_screen(),
+                ) {
+                    CallResponse::Error(reason.into())
                 } else if let Some(source) = state.screen_factory.create() {
                     if send_media_control(&state.media_stats, MediaControl::AttachScreen(source)) {
                         state.screen_sharing = true;
@@ -636,6 +645,10 @@ fn status_dto<P: CallPorts>(
         media_frames_sent: stats.map_or(0, |s| s.frames_sent.load(Ordering::Relaxed)),
         media_frames_played: stats.map_or(0, |s| s.frames_played.load(Ordering::Relaxed)),
         camera_in_use: stats.map_or(false, |s| s.camera_in_use.load(Ordering::Relaxed)),
+        // Only ever true inside a connected call, when the macOS mic preflight
+        // found the permission not granted; false on Windows and Linux.
+        mic_permission_needed: stats
+            .map_or(false, |s| s.mic_permission_needed.load(Ordering::Relaxed)),
         media_video_frames_sent: stats.map_or(0, |s| s.video_frames_sent.load(Ordering::Relaxed)),
         media_video_frames_played: stats
             .map_or(0, |s| s.video_frames_played.load(Ordering::Relaxed)),
@@ -668,6 +681,7 @@ fn notice_word(notice: CallNotice) -> &'static str {
         CallNotice::NoAnswer => "no_answer",
         CallNotice::Connected => "connected",
         CallNotice::CallEnded => "call_ended",
+        CallNotice::PeerLost => "peer_lost",
         CallNotice::EstablishmentFailed => "establishment_failed",
         CallNotice::ClearIncoming => "clear_incoming",
         CallNotice::SendFailed => "send_failed",
@@ -1065,6 +1079,24 @@ mod tests {
         assert!(!status_dto(&idle, None, true).screen_sharing);
     }
 
+    #[test]
+    fn status_dto_reports_mic_permission_only_when_connected() {
+        // A connected call whose media stats carry the mic-permission flag
+        // reports it; without the flag it does not.
+        let (a, _b) = connected();
+        assert_eq!(a.status().state, State::Connected);
+        let stats = MediaStats::default();
+        stats.mic_permission_needed.store(true, Ordering::SeqCst);
+        assert!(status_dto(&a, Some(&stats), false).mic_permission_needed);
+        assert!(!status_dto(&a, None, false).mic_permission_needed);
+
+        // An idle controller ignores the stats, so it never reports it: the
+        // flag follows a connected call only, like the other media fields.
+        let idle = CallController::new(Ports);
+        assert_eq!(idle.status().state, State::Idle);
+        assert!(!status_dto(&idle, Some(&stats), false).mic_permission_needed);
+    }
+
     // The screen-share start/stop decision taken by `CallRuntime::handle`:
     // start is honoured only while video is negotiated; stop always clears it.
     fn decide_screen_share(controller: &CallController<Ports>, start: bool, prev: bool) -> bool {
@@ -1260,7 +1292,7 @@ mod tests {
         assert!(matches!(response, CallResponse::Ok));
         assert!(source.is_none());
     }
-    struct CountedSource(Arc<AtomicUsize>);
+    struct CountedSource(Arc<AtomicUsize>, bool);
     impl Drop for CountedSource {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::SeqCst);
@@ -1271,17 +1303,22 @@ mod tests {
             true
         }
         fn next_picture(&mut self) -> Option<super::super::video::RawPicture> {
+            let (width, height, size) = if self.1 {
+                (160, 120, 160 * 120 * 3 / 2)
+            } else {
+                (2, 2, 4)
+            };
             Some(super::super::video::RawPicture {
-                width: 2,
-                height: 2,
-                pixels: vec![1; 4],
+                width,
+                height,
+                pixels: vec![128; size],
             })
         }
     }
-    struct CountedFactory(Arc<AtomicUsize>);
+    struct CountedFactory(Arc<AtomicUsize>, bool);
     impl ScreenSourceFactory for CountedFactory {
         fn create(&self) -> Option<Box<dyn super::super::video::VideoSource + Send>> {
-            Some(Box::new(CountedSource(self.0.clone())))
+            Some(Box::new(CountedSource(self.0.clone(), self.1)))
         }
     }
     fn packet_counts(queue: &Arc<Mutex<VecDeque<Vec<u8>>>>) -> [usize; 3] {
@@ -1320,8 +1357,8 @@ mod tests {
         );
         let camera_drops = Arc::new(AtomicUsize::new(0));
         let screen_drops = Arc::new(AtomicUsize::new(0));
-        let camera = CountedFactory(camera_drops.clone());
-        let screen = CountedFactory(screen_drops.clone());
+        let camera = CountedFactory(camera_drops.clone(), true);
+        let screen = CountedFactory(screen_drops.clone(), false);
         assert!(send_media_control(
             &stats,
             MediaControl::AttachCamera(camera.create().unwrap())

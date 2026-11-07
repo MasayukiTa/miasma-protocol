@@ -1092,6 +1092,67 @@ impl ChatService {
         }
     }
 
+    /// Leave a directed-share invite `wire` (for the recipient whose directed
+    /// sharing key is `recipient`) with trusted holders, so an offline
+    /// recipient receives it later. Returns the deposit report. `None` means
+    /// custody is off or there is no holder to ask, which the caller must
+    /// treat as not delivered; an empty `held_by` in the report means no
+    /// holder took a copy and is likewise not delivered.
+    pub fn deposit_directed_invite(
+        &self,
+        recipient: &[u8; 32],
+        item: super::mailbox::ids::ItemId,
+        wire: &[u8],
+    ) -> Option<super::mailbox::client::DepositReport> {
+        if self.custody.is_none() {
+            return None;
+        }
+        let holders: Vec<[u8; 32]> = self
+            .contacts
+            .list()
+            .into_iter()
+            .filter_map(|c| c.endpoint_bytes())
+            .filter(|id| id != recipient)
+            .collect();
+        if holders.is_empty() {
+            return None;
+        }
+        let client = super::mailbox::client::MailboxClient::new(
+            super::mailbox::transport::ChatMailboxTransport::new(self.node.clone()),
+            self.settings.custody_copies,
+        );
+        let me = self.core.own_id();
+        Some(client.deposit_directed(&holders, &me, recipient, item, wire, now_ms()))
+    }
+
+    /// Collect directed-share invites waiting for `me` (our own directed
+    /// sharing key) from trusted holders, handing each one to `take` as
+    /// (sender, invite wire). A taken invite is removed from the holders.
+    /// `None` means custody is off or there is no holder to ask.
+    pub fn collect_directed_invites(
+        &self,
+        me: &[u8; 32],
+        take: impl FnMut(&[u8; 32], &[u8]) -> bool,
+    ) -> Option<super::mailbox::client::CollectReport> {
+        if self.custody.is_none() {
+            return None;
+        }
+        let holders: Vec<[u8; 32]> = self
+            .contacts
+            .list()
+            .into_iter()
+            .filter_map(|c| c.endpoint_bytes())
+            .collect();
+        if holders.is_empty() {
+            return None;
+        }
+        let client = super::mailbox::client::MailboxClient::new(
+            super::mailbox::transport::ChatMailboxTransport::new(self.node.clone()),
+            self.settings.custody_copies,
+        );
+        Some(client.collect_directed(&holders, me, now_ms(), take))
+    }
+
     // ── Receiving ────────────────────────────────────────────────────────────
 
     async fn serve(self: Arc<Self>, conn: Connection) {

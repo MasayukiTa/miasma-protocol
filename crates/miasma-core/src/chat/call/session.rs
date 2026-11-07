@@ -74,6 +74,8 @@ pub struct SessionStats {
     pub sent: u64,
     pub send_failed: u64,
     pub received_ok: u64,
+    /// Time of the most recent authenticated packet of any media type.
+    pub last_received_ms: u64,
     pub dropped: u64,
     pub played: u64,
     pub late_dropped: u64,
@@ -235,6 +237,7 @@ impl<S: AudioSource, K: AudioSink, L: DatagramLink> MediaSession<S, K, L> {
             match outcome {
                 RecvOutcome::Audio(frame) => {
                     self.stats.received_ok = self.stats.received_ok.saturating_add(1);
+                    self.stats.last_received_ms = now_ms;
                     if let Ok((header, _)) = split_packet(&packet) {
                         self.jitter.push(header.packet_seq, frame);
                     }
@@ -243,8 +246,14 @@ impl<S: AudioSource, K: AudioSink, L: DatagramLink> MediaSession<S, K, L> {
                 // authenticated media_type, so camera (0x01) and screen (0x02)
                 // bodies arrive as distinct outcomes and reach separate
                 // drivers; they never mix even with equal frame numbers.
-                RecvOutcome::Video(body) => receive_video(&body[..], now_ms),
-                RecvOutcome::Screen(body) => receive_screen(&body[..], now_ms),
+                RecvOutcome::Video(body) => {
+                    self.stats.last_received_ms = now_ms;
+                    receive_video(&body[..], now_ms);
+                }
+                RecvOutcome::Screen(body) => {
+                    self.stats.last_received_ms = now_ms;
+                    receive_screen(&body[..], now_ms);
+                }
                 RecvOutcome::Dropped(_) => {
                     self.stats.dropped = self.stats.dropped.saturating_add(1)
                 }

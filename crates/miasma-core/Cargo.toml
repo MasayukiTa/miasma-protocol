@@ -75,9 +75,10 @@ iroh-mdns-address-lookup = { version = "0.6", optional = true }
 ml-kem = { version = "0.3.3", default-features = false, features = ["zeroize"], optional = true }
 rand_core_pqc = { package = "rand_core", version = "0.10", default-features = false, optional = true }
 
-[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 jpeg-encoder = { version = "0.7.1", default-features = false, features = ["std"], optional = true }
 zune-jpeg = { version = "0.5.15", default-features = false, optional = true }
+
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
 # Real call audio (see src/chat/call/audio_device.rs and codec.rs). Both are
 # optional, desktop-only, and gated by the `call-audio` feature.
 # cpal: capture and playback on Windows and macOS through the
@@ -107,6 +108,13 @@ nokhwa = { version = "0.10", default-features = false, features = ["input-msmf",
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
+# Microphone permission preflight and one-time prompt before opening the
+# capture device (src/chat/call/mac_permissions.rs): AVCaptureDevice's
+# authorization status and access request. block2 carries the no-op completion
+# handler the request takes. Both are already in Cargo.lock through the desktop
+# AppKit stack, so this adds no new crate.
+objc2-av-foundation = { version = "0.3", default-features = false, features = ["AVCaptureDevice", "AVMediaFormat"] }
+block2 = "0.6"
 # Camera capture through AVFoundation (src/chat/call/video_camera.rs). The
 # backend serves frames only after camera access is granted, so the capture
 # thread requests it before opening the stream; the app bundle carries the

@@ -67,6 +67,15 @@ jobs:
       - name: Test miasma-core
         run: cargo test -p miasma-core --tests --locked
 
+      # The mailbox custody unit tests (chat::mailbox) live behind
+      # #[cfg(test)] and so run only under --lib, which the --tests line
+      # above does not cover. Name them here so the directed-invite and
+      # private-message custody round trips, tag separation, and the
+      # not-delivered verdict are actually exercised, not green by never
+      # running. Platform-neutral (pure simulator, no network).
+      - name: Test mailbox custody (private and directed invite)
+        run: cargo test -p miasma-core --lib --locked -- "chat::mailbox::"
+
       # The history hand-over wire test (ADR-012) is named here explicitly so a
       # regression in it fails this job by name, not only through the
       # auto-collected `--tests` run above. It is platform-neutral (no network,
@@ -138,6 +147,7 @@ jobs:
       - name: Test desktop and check CLI without the hybrid feature
         run: |
           cargo test -p miasma-desktop --no-default-features --locked --bin miasma-desktop -- the_chat_protection_radios
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo check -p miasma-cli --no-default-features --locked
 
       # The bridge's tests were only ever built, never run, so its entire
@@ -156,6 +166,13 @@ jobs:
       # The root key wrap that uses the Windows data protection API.
       - name: Test root key wrap
         run: cargo test -p miasma-core --lib --locked -- "root_key::"
+
+      # The CLI unit tests were only ever built, never run, so the
+      # offline-check self-check verdict logic (pure, no network) was
+      # invisible to CI. Run the binary unit tests here where the CLI already
+      # builds. Platform-neutral (no network, no feature flags).
+      - name: Test CLI
+        run: cargo test -p miasma-cli --locked --bin miasma
 
       - name: Build CLI
         run: cargo build -p miasma-cli --locked

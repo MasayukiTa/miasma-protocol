@@ -163,6 +163,38 @@ impl PublishOptions {
             min_remote_distinct_shards: params.data_shards,
         }
     }
+
+    /// The default for the daemon's own publish path: require at least one
+    /// distinct remote holder acknowledgement before a publish is reported as
+    /// done. Unlike [`PublishOptions::strict`] this asks for a single remote
+    /// copy, not `data_shards` of them, so a small contact set still lets a
+    /// publish succeed; unlike [`PublishOptions::default`] (which accepts zero
+    /// remote copies) it never reports success for content that lives only on
+    /// the publisher. When fewer than one remote copy is acknowledged the call
+    /// fails with `MiasmaError::InsufficientShares` and no `DhtRecord` is
+    /// published, so the caller can tell the user the content is stored only on
+    /// this device rather than claiming it was delivered.
+    pub fn network_default() -> Self {
+        Self {
+            min_remote_distinct_shards: 1,
+        }
+    }
+
+    /// Check an observed remote-distinct-shard count against this policy.
+    ///
+    /// Returns `Ok(())` when `remote_distinct` meets
+    /// [`Self::min_remote_distinct_shards`], or `Err((need, got))` with the
+    /// required and observed counts when it does not. The daemon publish path
+    /// maps the error to `MiasmaError::InsufficientShares` and the
+    /// "stored only on this device" message; `PublishOptions::default()`
+    /// (min = 0) always returns `Ok(())`.
+    pub fn accepts(&self, remote_distinct: usize) -> Result<(), (usize, usize)> {
+        if remote_distinct < self.min_remote_distinct_shards {
+            Err((self.min_remote_distinct_shards, remote_distinct))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /// Outcome of a `dissolve_and_publish*_with_options` call.
@@ -2584,5 +2616,52 @@ mod large_file_storage_preflight_tests {
         let estimate =
             estimated_local_share_storage_bytes(100_u64 * 1024 * 1024 * 1024, params).unwrap();
         assert!(estimate > 10_240_u64 * 1024 * 1024);
+    }
+}
+
+#[cfg(test)]
+mod publish_options_accepts_tests {
+    use super::*;
+
+    #[test]
+    fn default_accepts_zero_remote_copies() {
+        // The pre-2.1 default (min = 0) never blocks a publish, even when no
+        // remote peer acknowledged a copy: best-effort distribution only.
+        let opts = PublishOptions::default();
+        assert_eq!(opts.min_remote_distinct_shards, 0);
+        assert!(opts.accepts(0).is_ok());
+        assert!(opts.accepts(5).is_ok());
+    }
+
+    #[test]
+    fn network_default_refuses_zero_remote_copies() {
+        // The daemon default (min = 1) must reject a publish that left no
+        // distinct copy on any remote holder, reporting the required and the
+        // observed counts so the caller can say "stored only on this device".
+        let opts = PublishOptions::network_default();
+        assert_eq!(opts.min_remote_distinct_shards, 1);
+        assert_eq!(opts.accepts(0), Err((1, 0)));
+    }
+
+    #[test]
+    fn network_default_accepts_one_or_more_remote_copies() {
+        let opts = PublishOptions::network_default();
+        assert!(opts.accepts(1).is_ok());
+        assert!(opts.accepts(10).is_ok());
+    }
+
+    #[test]
+    fn strict_requires_data_shards_distinct_remote_copies() {
+        // strict(params) demands one remote copy per data shard; anything less
+        // fails with (need = data_shards, got = observed).
+        let params = DissolutionParams {
+            data_shards: 10,
+            total_shards: 20,
+        };
+        let opts = PublishOptions::strict(params);
+        assert_eq!(opts.min_remote_distinct_shards, 10);
+        assert_eq!(opts.accepts(9), Err((10, 9)));
+        assert!(opts.accepts(10).is_ok());
+        assert!(opts.accepts(11).is_ok());
     }
 }

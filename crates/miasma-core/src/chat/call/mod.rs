@@ -21,6 +21,7 @@ pub mod device;
 pub mod frame;
 pub mod inbound;
 pub mod jitter;
+pub mod mac_permissions;
 pub mod media;
 #[cfg(feature = "iroh")]
 pub mod media_task;
@@ -34,7 +35,7 @@ pub mod session;
 pub mod signal;
 pub mod state;
 pub mod video;
-#[cfg(all(feature = "call-video", any(windows, target_os = "macos")))]
+#[cfg(feature = "call-video")]
 pub mod video_codec;
 pub mod video_frame;
 
