@@ -89,6 +89,13 @@ jobs:
       - name: Test hand-over custody carriage (ADR-012 step 5)
         run: cargo test -p miasma-core --locked --test group_handover_custody_carry_test
 
+      # Offline file delivery (Miasma beta.13 must): a sender deposits an
+      # end-to-end encrypted file into a holder, goes offline, and the
+      # recipient fetches it later. Named here so a regression fails this job
+      # by name. Platform-neutral (no network, no feature flags).
+      - name: Test offline file deposit via holders
+        run: cargo test -p miasma-core --locked --test push_offline_deposit_test
+
   test-core-pqc:
     name: Core Tests, opt-in hybrid feature (Ubuntu)
     runs-on: ubuntu-24.04
