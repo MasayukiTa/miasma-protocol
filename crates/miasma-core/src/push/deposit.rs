@@ -81,12 +81,7 @@ impl FileKey {
     /// secret `DH(sender, recipient)` is the input key material, the salt binds
     /// it to this file, and the direction is fixed (sender first) so the two
     /// ends agree regardless of who derives it.
-    fn derive(
-        shared: &[u8; 32],
-        sender: &[u8; 32],
-        recipient: &[u8; 32],
-        salt: &[u8; 16],
-    ) -> Self {
+    fn derive(shared: &[u8; 32], sender: &[u8; 32], recipient: &[u8; 32], salt: &[u8; 16]) -> Self {
         let mut ikm = Vec::with_capacity(32 + 32 + 32);
         ikm.extend_from_slice(shared);
         ikm.extend_from_slice(sender);
@@ -107,10 +102,8 @@ impl FileKey {
         let mut out = [0u8; 32 + NONCE_LEN];
         hk.expand(info, &mut out)
             .expect("56 is a valid HKDF-SHA256 output length");
-        let mut key = [0u8; 32];
-        let mut nonce = [0u8; NONCE_LEN];
-        key.copy_from_slice(&out[..32]);
-        nonce.copy_from_slice(&out[32..]);
+        let key = out[..32].try_into().expect("key length");
+        let nonce = out[32..].try_into().expect("nonce length");
         (key, nonce)
     }
 }
@@ -181,7 +174,14 @@ fn item_id(index: u64, kind: u8, salt: &[u8; 16]) -> ItemId {
     let mut input = Vec::with_capacity(1 + 8);
     input.push(kind);
     input.extend_from_slice(&index.to_be_bytes());
-    let h = blake3::keyed_hash(&{ let mut k = [0u8; 32]; k[..16].copy_from_slice(salt); k }, &input);
+    let h = blake3::keyed_hash(
+        &{
+            let mut k = [0u8; 32];
+            k[..16].copy_from_slice(salt);
+            k
+        },
+        &input,
+    );
     let mut id = [0u8; 16];
     id.copy_from_slice(&h.as_bytes()[..16]);
     ItemId(id)
@@ -289,11 +289,7 @@ pub fn deposit_file<R: std::io::Read>(
 
     // Holders that have acknowledged *every* item so far. Start with all the
     // offered holders; intersect after each item with the ones that took it.
-    let mut surviving: Vec<[u8; 32]> = holders
-        .iter()
-        .copied()
-        .filter(|h| h != recipient)
-        .collect();
+    let mut surviving: Vec<[u8; 32]> = holders.iter().copied().filter(|h| h != recipient).collect();
     surviving.dedup();
 
     let mut hasher = blake3::Hasher::new();
@@ -490,7 +486,10 @@ mod tests {
 
     impl InProcess {
         fn store(&self, holder: &[u8; 32]) -> Option<&Arc<MemoryCustody>> {
-            self.holders.iter().find(|(id, _)| id == holder).map(|(_, s)| s)
+            self.holders
+                .iter()
+                .find(|(id, _)| id == holder)
+                .map(|(_, s)| s)
         }
     }
 
@@ -514,7 +513,8 @@ mod tests {
             now_ms: u64,
         ) -> Result<Vec<ItemId>, MailboxError> {
             let s = self.store(holder).ok_or(MailboxError::Unreachable)?;
-            s.list(&self.who, tag, now_ms).map_err(MailboxError::Refused)
+            s.list(&self.who, tag, now_ms)
+                .map_err(MailboxError::Refused)
         }
         fn fetch(
             &self,
@@ -534,7 +534,8 @@ mod tests {
             item: ItemId,
         ) -> Result<bool, MailboxError> {
             let s = self.store(holder).ok_or(MailboxError::Unreachable)?;
-            s.delete(&self.who, tag, item).map_err(MailboxError::Refused)
+            s.delete(&self.who, tag, item)
+                .map_err(MailboxError::Refused)
         }
     }
 
@@ -556,7 +557,10 @@ mod tests {
     }
 
     fn ids() -> (Identity, Identity) {
-        (Identity::from_seed(&[11u8; 32]), Identity::from_seed(&[22u8; 32]))
+        (
+            Identity::from_seed(&[11u8; 32]),
+            Identity::from_seed(&[22u8; 32]),
+        )
     }
 
     /// We need the X25519 secret scalar of each identity to agree the file key.
@@ -572,7 +576,7 @@ mod tests {
         let (sender, recipient) = ids();
         let holder_id = [7u8; 32];
         let store = file_holder(sender.id(), recipient.id());
-        let salt = [3u8; 16];
+        let salt = rand::random();
         // A file of a few chunks plus a partial last chunk.
         let file: Vec<u8> = (0..(CHUNK_PLAINTEXT * 3 + 123))
             .map(|i| (i % 251) as u8)
@@ -640,7 +644,7 @@ mod tests {
             &dh_secret(&[11u8; 32]),
             &sender.id(),
             &recipient.id(),
-            [4u8; 16],
+            rand::random(),
             &file[..],
             0,
             2,
@@ -664,7 +668,7 @@ mod tests {
             &dh_secret(&[11u8; 32]),
             &sender.id(),
             &recipient.id(),
-            [5u8; 16],
+            rand::random(),
             &file[..],
             0,
             1,
@@ -676,10 +680,9 @@ mod tests {
     #[test]
     fn a_wrong_recipient_key_cannot_open_the_file() {
         let (sender, recipient) = ids();
-        let stranger = Identity::from_seed(&[33u8; 32]);
         let holder_id = [7u8; 32];
         let store = file_holder(sender.id(), recipient.id());
-        let salt = [6u8; 16];
+        let salt = rand::random();
         let file = vec![2u8; CHUNK_PLAINTEXT + 1];
         let tx = InProcess {
             holders: vec![(holder_id, store.clone())],
@@ -709,7 +712,7 @@ mod tests {
             &[holder_id],
             &dh_secret(&[33u8; 32]),
             &sender.id(),
-            &stranger.id(),
+            &recipient.id(),
             salt,
             &mut out,
             0,
