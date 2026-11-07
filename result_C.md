@@ -58,14 +58,20 @@ worktree: C:/Users/M118A8586/AppData/Local/Temp/m365-companion/agents/offC (bran
 
 セキュリティ要件は不変更（PQ/E2EE/認証に手を加えず、ホルダーは暗号文のみ。既存挙動を維持）。
 
-## 改行コードについて
-作業ツリーの `service.rs`/`sim_tests.rs` は編集過程で一時 CRLF 化したため、HEAD（LF）に合わせて両ファイルを LF へ戻した。`git diff --ignore-all-space --numstat` は service.rs の実変更が 88/9 であることを示す（全行書き換えではない）。sim_tests.rs は追加のみ 181/0（削除ゼロ=既存テスト保持、うち私の追加は上記2件、残りは別サブ担当の directed invite テスト群で温存）。
+## 改行コードについて（新会話で再検証）
+`git diff origin/main --numstat`（raw）と `--ignore-all-space --numstat` が **両方とも service.rs=88/9・sim_tests.rs=181/0 で完全一致**。すなわち改行コードによる偽差分（whole-file rewrite）は無く、実内容の変更のみ。sim_tests.rs は追加のみ（削除 0＝既存テスト保持、うち本担当の追加は上記2件、残りは別サブ担当の directed invite テスト群）。
 
-## cargo test の実 pass/fail 件数: **未取得（環境ビルドブロッカー）**
-1/5 と同一の `audiopus_sys v0.2.2` CMake/VS 検出失敗でコンパイル未到達。加えて `rustfmt` もツールチェーン破損（`missing manifest in toolchain 'stable-x86_64-pc-windows-msvc'`）で構文整形チェック不可。したがって追加した sim_tests 2件の実 pass 件数は 0件取得（コンパイル未到達）。変更の整合はコード目視でのみ確認。
+## cargo test の実 pass/fail 件数: **0件取得（rustc 不在によりコンパイル一切不可）— 新会話で再検証**
+当初は `audiopus_sys` の CMake/VS 検出失敗が原因と記録したが、新会話で実測したところ、その手前で **rustc（ツールチェーン本体）が存在しない**ことが真の原因と確定した。実証:
+- `cargo --version` → `cargo 1.99.1` は動く。しかし `rustc --version` → `error: missing manifest in toolchain 'stable-x86_64-pc-windows-msvc'`。
+- `C:\Users\M118A8586\.rustup\toolchains` は**空ディレクトリ**（toolchain 本体が未配置）。
+- `rustup which rustc` は再 DL を試みるが `error: failed to install component: 'cargo-x86_64-pc-windows-msvc', detected conflict: 'bin\cargo.exe'` で失敗（別途インストール済みの cargo.exe と衝突し修復不可）。
+- `cargo test -p miasma-core --locked --lib chat::mailbox:: --no-run`（共有 `CARGO_TARGET_DIR=C:/work/miasma-beta12-src/target`）を実行 → ログ末尾は `error: missing manifest in toolchain` のみ。audiopus_sys の CMake 段階にすら到達せず、**コンパイル自体が開始できない**。
 
-## コミット/PR について
-このワークツリーは複数サブ担当の未コミット変更（client.rs, ids.rs, coordinator.rs, service.rs の directed invite 追記, result_C.md）が共有状態で混在している。共有ファイル service.rs/sim_tests.rs を `git add` すると他担当の未コミット作業を巻き込むため、エージェント契約（変更したファイルだけを明示 add／main にコミットしない／隔離）に従い、この会話ではコミット・push・PR を行わない。コード変更はワークツリー上に適用済み。
+したがって追加した sim_tests 2件の実 pass 件数は **0件取得（ビルド不能）**。これは PART C のコード範囲外の環境破損であり、rustup 修復はツールチェーン全体を触り隔離契約に反するため本担当では修復しない。変更の整合はコード目視でのみ確認。
+
+## コミット/PR について（新会話で再検証）
+本担当2/5の変更は**既にコミット済み**。`git log` 上、HEAD=`d3e4d31`（origin/main=`c793a90` より先行）。service.rs の `deposit_with_holders -> bool` 化・呼び出し元の not-delivered 記録・sim_tests 2件は、`git diff origin/main` に service.rs 88/9・sim_tests.rs 181/0 として確定反映済み（grep で service.rs:705,718,1037、sim_tests.rs:446,472 を実在確認）。CI 配線も `.github/workflows/ci.yml:76-77` が `cargo test -p miasma-core --lib -- chat::mailbox::` を実行し、追加テストは `chat::mailbox` 配下のため収集される。現時点の未コミット差分は追跡ファイルでは `result_C.md` のみ（`git status` 実測）。push/PR は PART C 全体サマリの管掌。
 
 ## 取得件数の明記
 - 変更したコード箇所: service.rs 2箇所（`deposit_with_holders` の bool 化、呼び出し元の未配送記録）、sim_tests.rs 1箇所（テスト2件追加）。
@@ -120,3 +126,54 @@ worktree: C:/Users/M118A8586/AppData/Local/Temp/m365-companion/agents/offC (bran
 
 ## 未追跡の作業用ファイルについて
 - 作業ツリーに残るログ（`*.log`）、ハーネス（`cfg_harness.*`）、ラッパ（`run_*.cmd`/`*.bat`）、設計メモ（`.fleet_scratch_C_invite_design.md`）、awk 事故産物（`2000`）はいずれも**未追跡のゴミで、どのコミットにも含めていない**。push 対象は追跡ファイルのみ。
+
+---
+
+# 担当 4/5 結果（再検証・確定）: network-publish 既定で遠隔 ACK 1件以上を必須化
+
+worktree: C:/Users/M118A8586/AppData/Local/Temp/m365-companion/agents/offC (branch offline/C)
+担当範囲: report (d) / ブリーフ PART C 項目3 ＝「既定 `PublishOptions`（遠隔確認数0許容, coordinator.rs:135-163）を、既定で最低1件の異なる遠隔ホルダー ACK を『done』条件とするよう変更。得られなければ『このデバイスにのみ保存』と表示。strict モードは従来どおり。既定で遠隔 ACK なしが成功と報告されないことを証明するテストを追加。」
+
+## 実装（コミット済み、origin/main..HEAD の実差分を確認）
+差分: `coordinator.rs +79/-0`、`daemon/mod.rs +257/-31`(本項目分を含む)。関連コミット: c0e7547 / e42cd14 / 2db575a / fb6425d。
+
+### coordinator.rs
+- `coordinator.rs:138` `struct PublishOptions` に `min_remote_distinct_shards: usize`（:151）。
+- `coordinator.rs:163` `default()` は `min_remote_distinct_shards = 0`（＝レガシー best-effort、後方互換で温存）。
+- `coordinator.rs:177` **`network_default()` を新設 → `min_remote_distinct_shards = 1`**（デーモン既定）。
+- `coordinator.rs:191` **`accepts(remote_distinct) -> Result<(),(usize,usize)>`**: 観測遠隔数が閾値未満なら `Err((need, got))`。
+- `coordinator.rs:886` 配布経路で `remote_distinct < options.min_remote_distinct_shards` のとき `InsufficientShares { need, got }` を返す。
+- strict は従来通り: `strict(params)` は `min = data_shards`（coordinator.rs:163 近傍の strict コンストラクタ）。
+
+### daemon/mod.rs
+- `daemon/mod.rs:1315,1348,1382` raw/ファイル/保護付きファイルの各 publish 経路が **`PublishOptions::network_default()`**（既定 min=1）を使用。
+- `daemon/mod.rs:2359-2374` `publish_error_text()`: `InsufficientShares { got: 0, .. }` を **「stored only on this device: no remote holder acknowledged a copy …」** に変換。`{ need, got }` 一般形も人間可読文に。
+- `daemon/mod.rs:2809-2816` publish 実経路でポリシー判定し、未達なら `Err(InsufficientShares{need,got})` を返して DhtRecord を公開しない（＝成功 id を返さない）。
+
+## 追加テスト（本担当分 合計 6件 — 静的に全確認）
+### coordinator.rs `mod publish_options_accepts_tests`（coordinator.rs:2623〜, 4件）
+1. `default_accepts_zero_remote_copies` — レガシー既定(min=0)は `accepts(0)`/`accepts(5)` とも Ok。
+2. **`network_default_refuses_zero_remote_copies`** — 既定(min=1)は `accepts(0) == Err((1,0))`。★「遠隔ACKなし＝成功ではない」の証明。
+3. `network_default_accepts_one_or_more_remote_copies` — `accepts(1)`/`accepts(10)` とも Ok。
+4. **`strict_requires_data_shards_distinct_remote_copies`** — strict(data_shards=10) は `accepts(9)==Err((10,9))`、`accepts(10/11)` Ok。★strict 従来動作の維持を証明。
+
+### daemon/mod.rs `mod publish_content_remote_ack_tests`（daemon/mod.rs:3174〜, 2件, in-process 実ノード `#[tokio::test(multi_thread)]`）
+5. **`raw_publish_default_requires_a_remote_ack_and_reports_failure_when_offline`** — ピア0の実ノードで raw publish を `network_default()` で実行→ `InsufficientShares{need:1,got:0}` で失敗することを assert（成功 mid を返さない）。さらに `publish_error_text` が「stored only on this device」を含むことを確認。★中核要件の end-to-end 証明。
+6. `raw_publish_legacy_default_still_succeeds_offline` — 同条件でも `PublishOptions::default()`(min=0) なら `Ok`（後方互換の保証）。
+
+## cargo test の実 pass/fail 件数: **0件取得（環境の Rust 標準ライブラリ破損によりコンパイル不能）**
+この会話で再実測した確定事実:
+- ツールチェーン本体の `rustc.exe -vV` は動作（rustc 1.99.1）。しかし **標準ライブラリの配布物が物理的に欠落**している:
+  - `…\toolchains\stable-x86_64-pc-windows-msvc\lib\rustlib\x86_64-pc-windows-msvc\lib` に `libstd-*` / `libtest-*` / `libcore-*` の rlib が **1つも存在しない**。
+  - rustup の `…\lib\rustlib\components` ファイルが **消失**（「指定されたパスが見つかりません」）。
+- この状態で `cargo test`（共有 `CARGO_TARGET_DIR=C:/work/miasma-beta12-src/target`, vcvars64 有効, PATH から mingw 除去, rustup シムをバイパスした直接 cargo 呼び出し）を実行したが、実クレート(ring, x509-parser 等)が **`E0463: can't find crate for std`** で失敗し、テストに到達できない。
+- 以前の試行で判明していた `audiopus_sys`(CMake/VS 検出失敗) は `--no-default-features --features iroh` で回避済みだが、その手前の **std 欠落が上位ブロッカー**。
+- 修復には `rustup target add x86_64-pc-windows-msvc`（rust-std 再取得）が必須。しかしこれは (a) オフライン環境で取得不可の可能性が高く、(b) 共有 Rust インストールへの破壊的変更で並行する他会話(A/B/D/E)のビルドを壊し、エージェント契約「自分の作業完了まで他走行から見える状態を変えない」に反するため、**本担当では実行しない**。
+
+## 取得件数の明記
+- 変更/確認したコード箇所: coordinator.rs 2関数新設(`network_default`, `accepts`)＋フィールド1＋配布経路の判定1、daemon/mod.rs 3経路の既定差し替え＋エラー文言変換＋publish 実経路のポリシー強制。
+- 追加した単体/統合テスト: **6件**（coordinator 4件、daemon 2件。うち in-process 実ノード 2件）。
+- 実行した cargo test の実 pass/fail 件数: **0件取得**（環境の rust-std 物理欠落によりコンパイル未到達。コードは静的レビューでのみ整合確認）。
+
+## 結論
+担当範囲（network-publish 既定で遠隔 ACK ≥1 を必須化、strict 維持、遠隔ACKなしを成功としない証明テスト追加）の **コードとテストは実装・コミット済み**。唯一の未達は必須出力「cargo test の実 pass/fail 件数」で、これは担当コード範囲外の**マシン側 Rust 標準ライブラリ破損（+オフラインで修復不可）**という環境ブロッカーによる。正規トゥールチェーンの CI 環境では本テスト群が実行される見込み。
