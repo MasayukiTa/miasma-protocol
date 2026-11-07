@@ -2331,6 +2331,10 @@ async fn process_request_inner(
                 Ok(i) => i,
                 Err(e) => return ControlResponse::Error(format!("inbox open failed: {e}")),
             };
+            // Collect any directed invites a holder kept for us while we were
+            // offline, saving each into the inbox and acknowledging it (the
+            // holder removes its copy) so a later send does not hand it back.
+            collect_directed_invites_into_inbox(&sharing_pubkey, &inbox, &data_dir);
             let now = now_secs();
             inbox.expire_all(now);
             ControlResponse::DirectedInboxList(inbox.list_incoming())
@@ -2443,12 +2447,14 @@ async fn process_directed_send(
         .save_outgoing(&envelope)
         .map_err(|e| MiasmaError::Storage(format!("save outgoing: {e}")))?;
 
-    // Deliver envelope to recipient via P2P (best-effort).
+    // Record the recipient PeerId alongside the outgoing envelope for later
+    // confirm (unchanged), and best-effort deliver the invite directly in
+    // case the recipient is online now. A direct delivery is an optimisation,
+    // not the definition of "sent": that is the mailbox deposit below, so an
+    // offline recipient still receives the invite later from a holder.
     let recipient_peer_id_str = directed::parse_sharing_contact(recipient_contact)
         .map(|(_, pid)| pid)
         .unwrap_or_default();
-
-    // Store recipient PeerId alongside outgoing envelope for later confirm.
     inbox.save_outgoing_peer_id(&envelope_id_hex, &recipient_peer_id_str);
     if let Ok(peer_id) = recipient_peer_id_str.parse::<libp2p::PeerId>() {
         let invite_req = directed::DirectedRequest::Invite {
@@ -2459,19 +2465,101 @@ async fn process_directed_send(
             .await
         {
             Ok(directed::DirectedResponse::InviteAccepted { .. }) => {
-                info!(envelope_id = %envelope_id_hex, "directed invite delivered to recipient");
+                info!(envelope_id = %envelope_id_hex, "directed invite delivered directly to recipient");
             }
             Ok(other) => {
-                warn!(envelope_id = %envelope_id_hex, ?other, "directed invite: unexpected response");
+                warn!(envelope_id = %envelope_id_hex, ?other, "directed invite: unexpected direct response");
             }
             Err(e) => {
-                warn!(envelope_id = %envelope_id_hex, %e, "directed invite delivery failed (recipient may be offline)");
+                warn!(envelope_id = %envelope_id_hex, %e, "directed invite direct delivery failed (recipient may be offline), relying on mailbox deposit");
             }
         }
     }
 
-    info!(envelope_id = %envelope_id_hex, "directed share created and published");
+    // Deposit the invite with trusted holders so an offline recipient receives
+    // it later. This deposit, not the best-effort direct send above, decides
+    // whether the share counts as sent: if no holder takes a copy, the invite
+    // is not delivered and the sender is told so instead of getting a success
+    // id for a share nobody can ever receive.
+    directed_deposit_invite(&envelope, &recipient_pubkey, data_dir)?;
+
+    info!(envelope_id = %envelope_id_hex, "directed share created, published and deposited with holders");
     Ok(envelope_id_hex)
+}
+
+/// Deposit a directed-share invite with trusted holders and decide whether it
+/// counts as delivered. Returns `Ok(())` only when at least one holder took a
+/// copy; otherwise it returns an error so the caller never reports a share as
+/// sent when no holder can ever hand the invite to an offline recipient.
+fn directed_deposit_invite(
+    envelope: &directed::DirectedEnvelope,
+    recipient_pubkey: &[u8; 32],
+    data_dir: &std::path::Path,
+) -> Result<(), MiasmaError> {
+    let service = crate::chat::service::service_for(data_dir).ok_or_else(|| {
+        MiasmaError::Storage(
+            "directed invite not delivered: custody (chat mailbox) is not running, so no holder \
+             can keep the invite for an offline recipient"
+                .into(),
+        )
+    })?;
+    let wire = bincode::serialize(envelope)
+        .map_err(|e| MiasmaError::Storage(format!("serialize invite for deposit: {e}")))?;
+    let item = crate::chat::mailbox::ids::item_id_for_directed(&envelope.envelope_id);
+    let report = service
+        .deposit_directed_invite(recipient_pubkey, item, &wire)
+        .ok_or_else(|| {
+            MiasmaError::Storage(
+                "directed invite not delivered: custody is off or no trusted holder is reachable \
+                 to keep the invite for an offline recipient"
+                    .into(),
+            )
+        })?;
+    if report.held_by.is_empty() {
+        return Err(MiasmaError::Storage(format!(
+            "directed invite not delivered: no holder accepted a copy ({} holder(s) failed), so an \
+             offline recipient could never receive it",
+            report.failed.len()
+        )));
+    }
+    info!(
+        envelope_id = %envelope.id_hex(),
+        holders = report.held_by.len(),
+        "directed invite deposited with holder(s)"
+    );
+    Ok(())
+}
+
+/// Collect directed-share invites that trusted holders kept for us while we
+/// were offline, save each into the directed inbox, and acknowledge it so the
+/// holder drops its copy. Best-effort: custody off, no holder, or an
+/// unreadable copy simply leaves nothing collected. `me` is our own directed
+/// sharing key.
+fn collect_directed_invites_into_inbox(
+    me: &[u8; 32],
+    inbox: &DirectedInbox,
+    data_dir: &std::path::Path,
+) {
+    let Some(service) = crate::chat::service::service_for(data_dir) else {
+        return;
+    };
+    let report = service.collect_directed_invites(me, |_sender, wire| {
+        // Only take (and thereby acknowledge) an invite we can decode and that
+        // is actually bound to us; anything else is left for its holder to
+        // expire rather than silently dropped.
+        let Ok(envelope) = bincode::deserialize::<directed::DirectedEnvelope>(wire) else {
+            return false;
+        };
+        if envelope.recipient_pubkey != *me {
+            return false;
+        }
+        inbox.save_incoming(&envelope).is_ok()
+    });
+    if let Some(rep) = report {
+        if rep.taken > 0 {
+            info!(taken = rep.taken, "collected directed invite(s) from holders");
+        }
+    }
 }
 
 async fn process_directed_confirm(
