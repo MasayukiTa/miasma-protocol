@@ -443,29 +443,48 @@ fn junk_in_custody_is_not_applied() {
 }
 
 #[test]
-fn a_deposit_with_the_only_holder_offline_takes_no_copy() {
-    // The sender tries to leave a copy for an offline recipient, but the only
-    // trusted holder is itself unreachable: nothing is held. An empty `held_by`
-    // is how the caller tells this apart from a real deposit, so it must never
-    // be reported as delivered.
+fn a_deposit_that_reaches_no_holder_is_never_a_delivery() {
+    // The only trusted holder is offline, so the deposit reaches no one. The
+    // sender must see "not deposited", never a delivery, and the recipient must
+    // still have nothing to collect when it returns.
     let (a, b, c) = (side(), side(), side());
     let net = Arc::new(Net::default());
     net.add_holder(c.id(), on(), &[a.id(), b.id()]);
     net.set_offline(b.id(), true);
     net.set_offline(c.id(), true);
-    a.core.enqueue(&b.id(), "nowhere to leave this", 1).unwrap();
+    a.core.enqueue(&b.id(), "no holder for this", 1).unwrap();
     let ca = client(&net, a.id(), 1);
-    let (_item, n) = deposit_oldest(&ca, &a, &b, &[c.id()], 1_000);
-    assert_eq!(n, 0, "no reachable holder: nothing should be held");
-    assert_eq!(net.holder(&c.id()).stats().items, 0);
-    // B comes back but there is nothing to collect: the message was not left.
+    let en = a.core.outbox.first_for(&b.id()).unwrap();
+    let (wire, _) = a.core.prepare_wire(&en.id).unwrap();
+    let rep = ca.deposit(
+        &[c.id()],
+        &a.id(),
+        &b.id(),
+        item_id_of(&wire).unwrap(),
+        &wire,
+        1_000,
+    );
+    // No copy was placed: this is the count the sender shows as "not deposited",
+    // and it is never reported as delivered.
+    assert!(rep.held_by.is_empty());
+    assert_eq!(rep.failed.len(), 1);
+    assert_eq!(rep.failed[0].0, c.id());
+    assert_eq!(rep.failed[0].1, MailboxError::Unreachable);
+    assert!(
+        a.delivered(&b.id()).is_empty(),
+        "a message no holder accepted must not be shown as delivered"
+    );
+    // The message stays with the sender for a later direct delivery.
+    assert_eq!(a.core.outbox.len(), 1);
+
+    // The recipient returns, the holder is still offline: nothing to collect.
     net.set_offline(b.id(), false);
     let cb = client(&net, b.id(), 1);
     let (rep, st) = collect_into(&cb, &b, &[c.id()], 2_000);
-    assert_eq!((rep.offered, st.len()), (0, 0));
+    assert_eq!((rep.offered, rep.taken), (0, 0));
+    assert_eq!(rep.unreachable, 1);
+    assert!(st.is_empty());
     assert!(b.received(&a.id()).is_empty());
-    // The sender still holds it for a later direct send.
-    assert_eq!(a.core.outbox.len(), 1);
 }
 
 #[test]

@@ -93,10 +93,15 @@ pub enum Label {
     PushOutbox,
     /// The record kept outside the data folder that tells whether a chat session file is the latest one written.
     ChatAnchor,
+    /// Sealed envelopes a holder keeps on disk for trusted contacts who are
+    /// offline (one document for the whole store). Written when custody is on;
+    /// stealth mode governs logs, not chat state (like the outbox and session
+    /// state), so this is sealed to disk alongside the rest of chat state.
+    ChatCustody,
 }
 
 impl Label {
-    pub const ALL: [Label; 14] = [
+    pub const ALL: [Label; 15] = [
         Label::Contacts,
         Label::PushHistory,
         Label::ReplicationWal,
@@ -111,6 +116,7 @@ impl Label {
         Label::ChatGroupHistory,
         Label::PushOutbox,
         Label::ChatAnchor,
+        Label::ChatCustody,
     ];
 
     /// The id stored in file headers.
@@ -130,6 +136,7 @@ impl Label {
             Label::ChatGroupHistory => 12,
             Label::PushOutbox => 13,
             Label::ChatAnchor => 14,
+            Label::ChatCustody => 15,
         }
     }
 
@@ -154,6 +161,7 @@ impl Label {
             Label::ChatGroupHistory => "chat-group-history",
             Label::PushOutbox => "push-outbox",
             Label::ChatAnchor => "chat-anchor",
+            Label::ChatCustody => "chat-custody",
         }
     }
 

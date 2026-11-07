@@ -1,6 +1,8 @@
 //! The custody store: sealed envelopes held for contacts who are offline.
 //!
-//! Everything is bounded and nothing is written to disk:
+//! [`MemoryCustody`] keeps everything in memory; [`DiskCustody`] wraps it and
+//! also seals a snapshot to disk so a holder that restarts does not lose what
+//! it was keeping. Either way the store is bounded:
 //!
 //! * a size limit per item, a limit on items and bytes in total, and a budget
 //!   of items and bytes per depositor (so one contact cannot use it all);
@@ -55,12 +57,18 @@ impl Default for CustodyLimits {
 }
 
 impl CustodyLimits {
-    /// The limits for `[chat]`: only the switch comes from the settings.
+    /// The limits for `[chat]`: the switch, the total byte and item
+    /// ceilings, and the time-to-live (days) all come from the settings and
+    /// are then clamped to the hard ceilings.
     pub fn from_config(c: &ChatConfig) -> Self {
         Self {
             enabled: c.custody_enabled,
+            max_total_bytes: c.custody_max_total_bytes,
+            max_items: c.custody_max_items,
+            ttl_ms: c.custody_ttl_days.saturating_mul(86_400_000),
             ..Self::default()
         }
+        .clamped()
     }
 
     fn clamped(mut self) -> Self {
@@ -102,6 +110,10 @@ pub struct CustodyStats {
 /// What a holder offers. `who` is the authenticated ID of the caller (the
 /// transport proves it); every call checks it again.
 pub trait CustodyStore: Send + Sync {
+    /// Let the contact `id` use this holder. Called again for a caller on each
+    /// request, so a contact added after start is served without a restart.
+    fn trust(&self, id: [u8; 32]);
+
     fn deposit(
         &self,
         who: &[u8; 32],
@@ -206,11 +218,6 @@ impl MemoryCustody {
         &self.limits
     }
 
-    /// Let the contact `id` use this holder.
-    pub fn trust(&self, id: [u8; 32]) {
-        self.trusted.lock().unwrap().insert(id);
-    }
-
     /// Stop serving `id` and drop what it deposited.
     pub fn revoke(&self, id: &[u8; 32]) {
         self.trusted.lock().unwrap().remove(id);
@@ -235,9 +242,108 @@ impl MemoryCustody {
         }
         Ok(())
     }
+
+    /// Serialise every held item (not the trust set, which the service
+    /// re-establishes from the contact list) into a flat buffer that
+    /// [`Self::restore`] reads back. Order is by `order` so the oldest item
+    /// keeps its place after a restart.
+    pub(crate) fn snapshot(&self) -> Vec<u8> {
+        let g = self.inner.lock().unwrap();
+        let mut items: Vec<(&(RecipientTag, ItemId), &Held)> = g.items.iter().collect();
+        items.sort_by_key(|(_, h)| h.order);
+        let mut out = Vec::with_capacity(5 + items.len() * (16 + 16 + 32 + 8 + 4));
+        out.push(SNAPSHOT_VERSION);
+        out.extend_from_slice(&(items.len() as u32).to_be_bytes());
+        for ((tag, item), h) in items {
+            out.extend_from_slice(&tag.0);
+            out.extend_from_slice(&item.0);
+            out.extend_from_slice(&h.from);
+            out.extend_from_slice(&h.expires_ms.to_be_bytes());
+            out.extend_from_slice(&(h.blob.len() as u32).to_be_bytes());
+            out.extend_from_slice(&h.blob);
+        }
+        out
+    }
+
+    /// Replace the held items with those encoded in `buf` by [`Self::snapshot`].
+    /// Items already expired at `now_ms`, or that would breach a current limit,
+    /// are dropped silently: a snapshot never raises a ceiling. A malformed
+    /// buffer leaves the store empty. The trust set is untouched.
+    pub(crate) fn restore(&self, buf: &[u8], now_ms: u64) {
+        let mut g = self.inner.lock().unwrap();
+        *g = Inner {
+            items: HashMap::new(),
+            bytes: 0,
+            per_depositor: HashMap::new(),
+            next_order: 0,
+        };
+        let Some((&ver, mut rest)) = buf.split_first() else {
+            return;
+        };
+        if ver != SNAPSHOT_VERSION || rest.len() < 4 {
+            return;
+        }
+        let count = u32::from_be_bytes(rest[..4].try_into().expect("len")) as usize;
+        rest = &rest[4..];
+        for _ in 0..count {
+            if rest.len() < 16 + 16 + 32 + 8 + 4 {
+                break;
+            }
+            let mut tag = [0u8; 16];
+            tag.copy_from_slice(&rest[..16]);
+            let mut item = [0u8; 16];
+            item.copy_from_slice(&rest[16..32]);
+            let mut from = [0u8; 32];
+            from.copy_from_slice(&rest[32..64]);
+            let expires_ms = u64::from_be_bytes(rest[64..72].try_into().expect("len"));
+            let blen = u32::from_be_bytes(rest[72..76].try_into().expect("len")) as usize;
+            rest = &rest[76..];
+            if rest.len() < blen {
+                break;
+            }
+            let blob = rest[..blen].to_vec();
+            rest = &rest[blen..];
+            // Honour the current limits and skip anything already expired, so a
+            // snapshot made under looser settings cannot push the store over a
+            // tightened ceiling after a restart.
+            if expires_ms <= now_ms || blob.is_empty() || blob.len() > self.limits.max_item_bytes {
+                continue;
+            }
+            let (n, b) = g.per_depositor.get(&from).copied().unwrap_or((0, 0));
+            if n + 1 > self.limits.max_items_per_depositor
+                || b + blob.len() > self.limits.max_bytes_per_depositor
+                || g.items.len() + 1 > self.limits.max_items
+                || g.bytes + blob.len() > self.limits.max_total_bytes
+            {
+                continue;
+            }
+            let order = g.next_order;
+            g.next_order += 1;
+            g.bytes += blob.len();
+            let e = g.per_depositor.entry(from).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += blob.len();
+            g.items.insert(
+                (RecipientTag(tag), ItemId(item)),
+                Held {
+                    from,
+                    blob,
+                    expires_ms,
+                    order,
+                },
+            );
+        }
+    }
 }
 
+/// Version byte of the custody snapshot written to disk.
+const SNAPSHOT_VERSION: u8 = 1;
+
 impl CustodyStore for MemoryCustody {
+    fn trust(&self, id: [u8; 32]) {
+        self.trusted.lock().unwrap().insert(id);
+    }
+
     fn deposit(
         &self,
         who: &[u8; 32],
@@ -340,6 +446,163 @@ impl CustodyStore for MemoryCustody {
     }
 }
 
+/// A [`CustodyStore`] that keeps its held items in an encrypted document on
+/// disk, so a holder that restarts still has what it was keeping for an
+/// offline contact. It wraps a [`MemoryCustody`] for all the bookkeeping and
+/// writes a fresh snapshot after every change.
+///
+/// The snapshot is sealed with [`Label::ChatCustody`], exactly like the other
+/// chat state; a holder learns nothing from the file it would not already learn
+/// by holding the items in memory. `privacy.stealth_mode` governs logs, not
+/// chat state (see `ChatConfig::history_save`), so custody is sealed to disk
+/// alongside the outbox and session state, exactly like the rest of chat.
+pub struct DiskCustody {
+    mem: MemoryCustody,
+    keys: std::sync::Arc<crate::state_crypto::StateKeys>,
+    path: std::path::PathBuf,
+    /// Set after a write failed: the store keeps working in memory and stops
+    /// touching the file for the rest of the run, so a full or read-only disk
+    /// never turns custody into an error path.
+    off: std::sync::atomic::AtomicBool,
+}
+
+impl DiskCustody {
+    /// Open the store at `path`, loading any snapshot found there. A snapshot
+    /// that cannot be read (wrong key, damaged, truncated) is ignored and the
+    /// store starts empty; the file is replaced on the next write.
+    pub fn open(
+        limits: CustodyLimits,
+        keys: std::sync::Arc<crate::state_crypto::StateKeys>,
+        path: std::path::PathBuf,
+        now_ms: u64,
+    ) -> Self {
+        let mem = MemoryCustody::new(limits);
+        if path.exists() {
+            if let Ok(plain) = crate::state_crypto::doc::read_document(
+                &keys,
+                crate::state_crypto::Label::ChatCustody,
+                &path,
+            ) {
+                mem.restore(&plain, now_ms);
+            }
+        }
+        Self {
+            mem,
+            keys,
+            path,
+            off: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    pub fn limits(&self) -> &CustodyLimits {
+        self.mem.limits()
+    }
+
+    /// Stop serving `id`, drop what it deposited, and write the smaller store.
+    pub fn revoke(&self, id: &[u8; 32]) {
+        self.mem.revoke(id);
+        self.persist();
+    }
+
+    /// Write the current items to disk, unless writing was turned off after an
+    /// earlier failure.
+    fn persist(&self) {
+        if self.off.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let snap = self.mem.snapshot();
+        if crate::state_crypto::doc::write_document(
+            &self.keys,
+            crate::state_crypto::Label::ChatCustody,
+            &self.path,
+            &snap,
+        )
+        .is_err()
+        {
+            // Keep serving from memory; leave the file alone for the rest of
+            // the run so one bad write does not repeat on every call.
+            self.off.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+impl CustodyStore for DiskCustody {
+    fn trust(&self, id: [u8; 32]) {
+        self.mem.trust(id);
+    }
+
+    fn deposit(
+        &self,
+        who: &[u8; 32],
+        tag: RecipientTag,
+        item: ItemId,
+        blob: &[u8],
+        now_ms: u64,
+    ) -> Result<DepositOutcome, CustodyError> {
+        let out = self.mem.deposit(who, tag, item, blob, now_ms)?;
+        // A duplicate changed nothing; only a fresh item needs a new snapshot.
+        if out == DepositOutcome::Stored {
+            self.persist();
+        }
+        Ok(out)
+    }
+
+    fn list(
+        &self,
+        who: &[u8; 32],
+        tag: RecipientTag,
+        now_ms: u64,
+    ) -> Result<Vec<ItemId>, CustodyError> {
+        let before = self.mem.stats().items;
+        let out = self.mem.list(who, tag, now_ms)?;
+        // The listing swept: if it dropped anything, persist the smaller store.
+        if self.mem.stats().items != before {
+            self.persist();
+        }
+        Ok(out)
+    }
+
+    fn fetch(
+        &self,
+        who: &[u8; 32],
+        tag: RecipientTag,
+        item: ItemId,
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, CustodyError> {
+        let before = self.mem.stats().items;
+        let out = self.mem.fetch(who, tag, item, now_ms)?;
+        if self.mem.stats().items != before {
+            self.persist();
+        }
+        Ok(out)
+    }
+
+    fn delete(
+        &self,
+        who: &[u8; 32],
+        tag: RecipientTag,
+        item: ItemId,
+    ) -> Result<bool, CustodyError> {
+        let removed = self.mem.delete(who, tag, item)?;
+        if removed {
+            self.persist();
+        }
+        Ok(removed)
+    }
+
+    fn sweep(&self, now_ms: u64) -> usize {
+        let n = self.mem.sweep(now_ms);
+        if n > 0 {
+            self.persist();
+        }
+        n
+    }
+
+    fn stats(&self) -> CustodyStats {
+        self.mem.stats()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,6 +646,29 @@ mod tests {
         let mut cfg = ChatConfig::default();
         cfg.custody_enabled = true;
         assert!(CustodyLimits::from_config(&cfg).enabled);
+    }
+
+    #[test]
+    fn limits_come_from_config_and_are_clamped() {
+        // Ordinary values pass through from the settings.
+        let mut cfg = ChatConfig::default();
+        cfg.custody_max_total_bytes = 1024;
+        cfg.custody_max_items = 7;
+        cfg.custody_ttl_days = 3;
+        let l = CustodyLimits::from_config(&cfg);
+        assert_eq!(l.max_total_bytes, 1024);
+        assert_eq!(l.max_items, 7);
+        assert_eq!(l.ttl_ms, 3 * 86_400_000);
+
+        // Values past the hard ceilings are clamped down.
+        let mut big = ChatConfig::default();
+        big.custody_max_total_bytes = usize::MAX;
+        big.custody_max_items = usize::MAX;
+        big.custody_ttl_days = u64::MAX / 86_400_000 + 1000;
+        let c = CustodyLimits::from_config(&big);
+        assert_eq!(c.max_total_bytes, HARD_MAX_TOTAL_BYTES);
+        assert_eq!(c.max_items, HARD_MAX_ITEMS);
+        assert_eq!(c.ttl_ms, HARD_MAX_TTL_MS);
     }
 
     #[test]
@@ -561,5 +847,154 @@ mod tests {
         let l = s.list(&B, tag(), 0).unwrap();
         assert_eq!(l.len(), MAX_LIST);
         assert_eq!(l[0], id(0));
+    }
+}
+
+#[cfg(test)]
+mod disk_tests {
+    use super::*;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    use crate::state_crypto::StateKeys;
+
+    const A: [u8; 32] = [1; 32];
+    const B: [u8; 32] = [2; 32];
+
+    fn tag() -> RecipientTag {
+        RecipientTag([7; 16])
+    }
+    fn id(n: u8) -> ItemId {
+        ItemId([n; 16])
+    }
+    fn on() -> CustodyLimits {
+        CustodyLimits {
+            enabled: true,
+            ..CustodyLimits::default()
+        }
+    }
+    fn keys(master: u8) -> Arc<StateKeys> {
+        Arc::new(StateKeys::from_master_key(&[master; 32]).unwrap())
+    }
+
+    // A holder that restarts still has what it was keeping for an offline
+    // contact: deposit, drop the store, re-open the same file, and the sealed
+    // item is read back and served.
+    #[test]
+    fn survives_a_restart() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("custody.doc");
+        let k = keys(7);
+        {
+            let s = DiskCustody::open(on(), k.clone(), path.clone(), 0);
+            s.trust(A);
+            s.trust(B);
+            s.deposit(&A, tag(), id(1), b"sealed", 0).unwrap();
+            assert_eq!(s.stats().items, 1);
+        }
+        assert!(path.exists(), "a snapshot is written on deposit");
+        let s = DiskCustody::open(on(), k, path, 0);
+        // Trust is re-seeded from the contact list after a restart, exactly as
+        // the service does; the held item is already back.
+        s.trust(B);
+        assert_eq!(s.stats().items, 1);
+        assert_eq!(s.list(&B, tag(), 0).unwrap(), vec![id(1)]);
+        assert_eq!(
+            s.fetch(&B, tag(), id(1), 0).unwrap(),
+            Some(b"sealed".to_vec())
+        );
+    }
+
+    // The file is sealed: a store opened with a different master key cannot read
+    // it and starts empty rather than leaking or erroring.
+    #[test]
+    fn a_wrong_key_starts_empty() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("custody.doc");
+        {
+            let s = DiskCustody::open(on(), keys(7), path.clone(), 0);
+            s.trust(A);
+            s.deposit(&A, tag(), id(1), b"sealed", 0).unwrap();
+        }
+        let s = DiskCustody::open(on(), keys(8), path, 0);
+        s.trust(B);
+        assert_eq!(s.stats().items, 0);
+        assert_eq!(s.list(&B, tag(), 0).unwrap(), Vec::<ItemId>::new());
+    }
+
+    // A snapshot taken under looser settings cannot push the store past a
+    // ceiling that was tightened before the restart.
+    #[test]
+    fn a_tightened_ceiling_drops_items_on_restore() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("custody.doc");
+        let k = keys(7);
+        {
+            let s = DiskCustody::open(on(), k.clone(), path.clone(), 0);
+            s.trust(A);
+            for n in 1..=4 {
+                s.deposit(&A, tag(), id(n), &[0u8; 10], 0).unwrap();
+            }
+            assert_eq!(s.stats().items, 4);
+        }
+        let tight = CustodyLimits {
+            max_items: 2,
+            ..on()
+        };
+        let s = DiskCustody::open(tight, k, path, 0);
+        s.trust(A);
+        assert_eq!(s.stats().items, 2, "restore honours the current ceiling");
+    }
+
+    // Items already expired at restore time are not read back.
+    #[test]
+    fn an_expired_item_is_not_restored() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("custody.doc");
+        let k = keys(7);
+        {
+            let s = DiskCustody::open(
+                CustodyLimits {
+                    ttl_ms: 1000,
+                    ..on()
+                },
+                k.clone(),
+                path.clone(),
+                0,
+            );
+            s.trust(A);
+            s.deposit(&A, tag(), id(1), b"x", 0).unwrap();
+        }
+        // Re-open after the item's expiry: it is swept on restore.
+        let s = DiskCustody::open(
+            CustodyLimits {
+                ttl_ms: 1000,
+                ..on()
+            },
+            k,
+            path,
+            2000,
+        );
+        s.trust(A);
+        assert_eq!(s.stats().items, 0);
+    }
+
+    // Revoking a contact drops what it deposited and the smaller store is
+    // written, so the dropped item is gone after a restart too.
+    #[test]
+    fn a_revoke_persists_across_a_restart() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("custody.doc");
+        let k = keys(7);
+        {
+            let s = DiskCustody::open(on(), k.clone(), path.clone(), 0);
+            s.trust(A);
+            s.deposit(&A, tag(), id(1), b"x", 0).unwrap();
+            s.revoke(&A);
+            assert_eq!(s.stats().items, 0);
+        }
+        let s = DiskCustody::open(on(), k, path, 0);
+        s.trust(A);
+        assert_eq!(s.stats().items, 0);
     }
 }

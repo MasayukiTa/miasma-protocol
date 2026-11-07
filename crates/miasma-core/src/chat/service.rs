@@ -312,7 +312,7 @@ pub struct ChatService {
     activity: ChatActivity,
     /// The holder store, when `custody_enabled` is on; `None` keeps the node
     /// holding nothing and answering no custody verb (exactly as before).
-    custody: Option<Arc<super::mailbox::holder::MemoryCustody>>,
+    custody: Option<Arc<dyn super::mailbox::holder::CustodyStore>>,
     /// Wakes the collection task so it asks holders at once (on a fresh inbound
     /// connection, say). The task also runs on its own timer. Unused when
     /// custody is off.
@@ -377,21 +377,33 @@ impl ChatService {
         // With custody on, build the holder store and let every contact this
         // node trusts use it. Trust is re-seeded for a caller on each request
         // too, so a contact added later is served without a restart.
-        let custody = if settings.custody_enabled {
-            let store =
-                super::mailbox::holder::MemoryCustody::new(super::mailbox::holder::CustodyLimits {
+        let custody: Option<Arc<dyn super::mailbox::holder::CustodyStore>> =
+            if settings.custody_enabled {
+                use super::mailbox::holder::{CustodyLimits, CustodyStore, DiskCustody};
+                let limits = CustodyLimits {
                     enabled: true,
-                    ..super::mailbox::holder::CustodyLimits::default()
-                });
-            for c in contacts.list() {
-                if let Some(id) = c.endpoint_bytes() {
-                    store.trust(id);
+                    ..CustodyLimits::default()
+                };
+                // Custody is protected state like the outbox: it lives in the
+                // chat folder, sealed at rest, and survives a restart so a
+                // holder does not lose what it was keeping for an offline
+                // contact. (`privacy.stealth_mode` governs logs, not chat
+                // state, so there is no memory-only branch here.)
+                let store = DiskCustody::open(
+                    limits,
+                    keys.clone(),
+                    crate::paths::chat_custody_file(chat_dir),
+                    now_ms(),
+                );
+                for c in contacts.list() {
+                    if let Some(id) = c.endpoint_bytes() {
+                        store.trust(id);
+                    }
                 }
-            }
-            Some(Arc::new(store))
-        } else {
-            None
-        };
+                Some(Arc::new(store))
+            } else {
+                None
+            };
         let svc = Arc::new(Self {
             core,
             contacts,
@@ -701,23 +713,14 @@ impl ChatService {
                         if let Ok((wire, _)) = self.core.prepare_wire(&entry.id) {
                             let me = self.clone();
                             let peer = peer;
-                            let deposited = tokio::task::spawn_blocking(move || {
+                            let count = tokio::task::spawn_blocking(move || {
                                 me.deposit_with_holders(&peer, &wire)
                             })
                             .await
-                            .unwrap_or(false);
-                            // A deposit that reached no holder leaves the
-                            // message collectable nowhere while we cannot reach
-                            // the contact: record it as not delivered rather
-                            // than letting the earlier "waits" reason stand, so
-                            // status never implies the copy is safe with a
-                            // holder when it is not.
-                            if !deposited {
-                                self.core.outbox.update(&entry.id, |e| {
-                                    e.last_error =
-                                        Some("not delivered: no holder took a copy".to_owned());
-                                });
-                            }
+                            .unwrap_or(0);
+                            self.core.outbox.update(&entry.id, |e| {
+                                e.last_error = Some(custody_status(count));
+                            });
                         }
                     }
                     // A wake means the contact is here: start the schedule over.
@@ -1026,24 +1029,19 @@ impl ChatService {
     }
 
     /// Leave a copy of the sealed envelope for `peer` with trusted holders,
-    /// after a direct send could not go through. The envelope is the same bytes
-    /// the direct send would have used, so the recipient drops a duplicate.
-    ///
-    /// Returns `true` only when at least one reachable holder took a copy, so
-    /// the caller can tell a real deposit from a failure. `false` means the
-    /// message was *not* left anywhere a recipient could later collect it
-    /// (custody is off, there is no holder to ask, or every holder was
-    /// unreachable or refused); the caller must not treat that as delivered.
-    fn deposit_with_holders(&self, peer: &[u8; 32], wire: &[u8]) -> bool {
+    /// after a direct send could not go through. Does nothing when custody is
+    /// off or there is no holder to ask. The envelope is the same bytes the
+    /// direct send would have used, so the recipient drops a duplicate.
+    fn deposit_with_holders(&self, peer: &[u8; 32], wire: &[u8]) -> usize {
         if self.custody.is_none() {
-            return false;
+            return 0;
         }
         let Some(item) = super::mailbox::ids::item_id_of(wire) else {
-            return false;
+            return 0;
         };
         let holders = self.holders_for(peer);
         if holders.is_empty() {
-            return false;
+            return 0;
         }
         let client = super::mailbox::client::MailboxClient::new(
             super::mailbox::transport::ChatMailboxTransport::new(self.node.clone()),
@@ -1057,7 +1055,7 @@ impl ChatService {
                 "left a copy with {} holder(s)", rep.held_by.len()
             );
         }
-        !rep.held_by.is_empty()
+        rep.held_by.len()
     }
 
     /// Collect from trusted holders whatever waits for us, applying each item
@@ -1412,6 +1410,12 @@ impl ChatService {
                 PqLoop::Free
             }
             Pass::Hold => {
+                if let Some(e) = &first {
+                    self.core.outbox.update(&e.id, |entry| {
+                        entry.sending = false;
+                        entry.last_error = Some("Waiting for the contact to complete advanced encryption; not deposited".to_owned());
+                    });
+                }
                 tokio::select! {
                     _ = tokio::time::sleep(PQ_POLL) => {}
                     _ = wake.notified() => {}
@@ -1440,6 +1444,12 @@ impl ChatService {
                 Err(why) => {
                     *failures += 1;
                     debug!(peer = %fingerprint(peer), "hybrid upgrade waits: {why}");
+                    if let Some(e) = &first {
+                        self.core.outbox.update(&e.id, |entry| {
+                            entry.sending = false;
+                            entry.last_error = Some("Waiting for the contact to complete advanced encryption; not deposited".to_owned());
+                        });
+                    }
                     if !have_text && *failures >= PQ_ONLY_RETRIES {
                         return PqLoop::Leave;
                     }
@@ -1552,4 +1562,56 @@ pub(crate) fn envelope_id_of(wire: &[u8]) -> [u8; 16] {
     wire.get(3..19)
         .and_then(|s| <[u8; 16]>::try_from(s).ok())
         .unwrap_or_else(rand::random)
+}
+
+// Custody is an intermediate state: only an acknowledgement from the recipient
+// marks a message delivered.
+fn custody_status(count: usize) -> String {
+    if count == 0 {
+        "Not deposited with any holder".to_owned()
+    } else {
+        format!("Deposited with {count} holder(s); awaiting delivery")
+    }
+}
+
+#[cfg(test)]
+mod custody_status_tests {
+    use super::custody_status;
+
+    #[test]
+    fn reports_deposit_count_without_claiming_delivery() {
+        assert_eq!(custody_status(0), "Not deposited with any holder");
+        assert_eq!(
+            custody_status(2),
+            "Deposited with 2 holder(s); awaiting delivery"
+        );
+    }
+
+    // A deposit is never a delivery. Whatever the holder count, the status
+    // the sender records is a waiting/undeposited note, never a success: it
+    // must not read as "delivered" or "read", so the UI cannot derive an
+    // acknowledgement from a mere custody hand-off. Only a receipt from the
+    // recipient does that, on a separate path.
+    #[test]
+    fn a_deposit_is_never_reported_as_delivered() {
+        for count in [0usize, 1, 3, 64] {
+            let s = custody_status(count).to_lowercase();
+            assert!(
+                !s.contains("delivered") && !s.contains("read"),
+                "custody status for {count} holders must not claim delivery: {s:?}"
+            );
+        }
+    }
+
+    // With no holder to take a copy, the failure is surfaced as "not
+    // deposited", distinct from the success wording used when at least one
+    // holder took it. The two states never share wording.
+    #[test]
+    fn no_holder_is_surfaced_as_not_deposited() {
+        let none = custody_status(0);
+        let some = custody_status(1);
+        assert!(none.to_lowercase().contains("not deposited"));
+        assert!(!some.to_lowercase().contains("not deposited"));
+        assert_ne!(none, some);
+    }
 }

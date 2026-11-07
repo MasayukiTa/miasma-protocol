@@ -215,3 +215,83 @@ async fn a_message_reaches_an_offline_recipient_through_a_holder() {
     std::mem::forget(r);
     drop((a, b));
 }
+
+/// Custody is an intermediate state, never a success: when a direct send cannot
+/// go through and there is no reachable holder to take a copy, the message is
+/// reported as not deposited and is never shown as delivered. This guards the
+/// contract that a deposit failure is surfaced, not swallowed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deposit_with_no_holder_is_reported_not_delivered() {
+    let r = relay().await;
+
+    // Recipient B stays offline for the whole test; its endpoint id is known
+    // from its seed so A can list it as a contact and dial it.
+    let a_seed: [u8; 32] = rand::random();
+    let b_seed: [u8; 32] = rand::random();
+    let b_id = Identity::from_seed(&b_seed).id();
+
+    // Sender A knows only B. With no other trusted contact, there is no holder
+    // to leave a copy with, so the deposit after a failed direct send finds
+    // zero holders.
+    let a_dir = tempfile::tempdir().unwrap();
+    let a_node = start_node(&r, &a_seed).await;
+    let a_contacts = Arc::new(ContactStore::open(a_dir.path()));
+    a_contacts
+        .add(
+            &ContactCode::new(b_id),
+            Some("bob"),
+            Some(&a_node.endpoint_id()),
+        )
+        .unwrap();
+    let a = start_service(a_dir.path(), a_node.clone(), &a_seed, a_contacts);
+
+    // A sends to B. B is offline, so the direct send cannot go through and the
+    // message is queued.
+    assert!(matches!(
+        handle_with(
+            &a,
+            ChatRequest::Send {
+                contact: "bob".into(),
+                text: "nobody to hold this".into(),
+            },
+        ),
+        ChatResponse::Queued { .. }
+    ));
+
+    // The worker tries the direct send, fails, and runs the deposit path with
+    // no holder to ask. The outbox entry records that nothing was deposited.
+    until(40, "the message is marked not deposited", || {
+        a.core()
+            .outbox
+            .pending_for(&b_id)
+            .iter()
+            .any(|e| e.last_error.as_deref() == Some("Not deposited with any holder"))
+    })
+    .await;
+
+    // It is never shown as delivered (or read): custody did not take a copy and
+    // the recipient never acknowledged anything.
+    let h = a.core().history(&b_id, None, 50);
+    let m = h
+        .iter()
+        .find(|m| m.text == "nobody to hold this")
+        .expect("the message is in A's history");
+    assert!(
+        !matches!(
+            m.state,
+            miasma_core::chat::store::MsgState::Delivered
+                | miasma_core::chat::store::MsgState::Read
+        ),
+        "a message with no holder must not be shown as delivered: {:?}",
+        m.state
+    );
+    assert_eq!(
+        m.reason.as_deref(),
+        Some("Not deposited with any holder"),
+        "the undelivered reason is surfaced to the person"
+    );
+
+    std::mem::forget(a_node);
+    std::mem::forget(r);
+    drop(a);
+}
