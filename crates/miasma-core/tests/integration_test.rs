@@ -1289,22 +1289,10 @@ async fn daemon_ipc_publish_get_roundtrip() {
         let dir_a_path = dir_a.path().to_owned();
         tokio::spawn(server_a.run());
 
-        // ── Publish via IPC client (network-publish behaviour) ────────────────
-        let content = b"daemon IPC round-trip test payload";
-        let req = ControlRequest::Publish {
-            data: content.to_vec(),
-            data_shards: 2,
-            total_shards: 3,
-        };
-        let mid_str = match daemon_request(&dir_a_path, req).await.unwrap() {
-            ControlResponse::Published { mid } => mid,
-            other => panic!("unexpected: {other:?}"),
-        };
-        println!("[ipc] Published MID: {mid_str}");
-
-        // After publish, network-publish EXITS — only the daemon stays alive.
-
         // ── Node B daemon ─────────────────────────────────────────────────────
+        // Brought up and connected to A BEFORE A publishes, so that the daemon's
+        // network_default publish policy (>=1 distinct remote holder) can be
+        // satisfied by B acknowledging a shard copy.
         let dir_b = tempfile::tempdir().unwrap();
         let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
         let key_b = [0x99u8; 32];
@@ -1341,8 +1329,27 @@ async fn daemon_ipc_publish_get_roundtrip() {
         server_b.bootstrap_dht().await.unwrap();
         tokio::spawn(server_b.run());
 
-        // Wait for DHT convergence.
+        // Wait for the B → A connection to come up so a remote copy can land.
         tokio::time::sleep(Duration::from_millis(2000)).await;
+
+        // ── Publish via IPC client (network-publish behaviour) ────────────────
+        // Under the daemon default this now requires >=1 distinct remote holder;
+        // B is connected, so one shard copy is acknowledged and the publish
+        // succeeds.
+        let content = b"daemon IPC round-trip test payload";
+        let req = ControlRequest::Publish {
+            data: content.to_vec(),
+            data_shards: 2,
+            total_shards: 3,
+        };
+        let mid_str = match daemon_request(&dir_a_path, req).await.unwrap() {
+            ControlResponse::Published { mid } => mid,
+            other => panic!("unexpected: {other:?}"),
+        };
+        println!("[ipc] Published MID: {mid_str}");
+
+        // Give the DHT a moment to converge before B fetches.
+        tokio::time::sleep(Duration::from_millis(1000)).await;
 
         // ── Get via IPC client (network-get behaviour) ────────────────────────
         let req = ControlRequest::Get {
@@ -1398,18 +1405,9 @@ async fn daemon_ipc_get_to_file_roundtrip() {
         let dir_a_path = dir_a.path().to_owned();
         tokio::spawn(server_a.run());
 
-        let content = b"daemon IPC GetToFile round-trip test payload -- streamed to disk";
-        let req = ControlRequest::Publish {
-            data: content.to_vec(),
-            data_shards: 2,
-            total_shards: 3,
-        };
-        let mid_str = match daemon_request(&dir_a_path, req).await.unwrap() {
-            ControlResponse::Published { mid } => mid,
-            other => panic!("unexpected: {other:?}"),
-        };
-
         // ── Node B daemon ─────────────────────────────────────────────────────
+        // Connected to A before A publishes so the daemon's network_default
+        // policy (>=1 distinct remote holder) is satisfied by B.
         let dir_b = tempfile::tempdir().unwrap();
         let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
         let key_b = [0xBBu8; 32];
@@ -1445,7 +1443,22 @@ async fn daemon_ipc_get_to_file_roundtrip() {
         server_b.bootstrap_dht().await.unwrap();
         tokio::spawn(server_b.run());
 
+        // Wait for the B → A connection so a remote copy can land.
         tokio::time::sleep(Duration::from_millis(2000)).await;
+
+        let content = b"daemon IPC GetToFile round-trip test payload -- streamed to disk";
+        let req = ControlRequest::Publish {
+            data: content.to_vec(),
+            data_shards: 2,
+            total_shards: 3,
+        };
+        let mid_str = match daemon_request(&dir_a_path, req).await.unwrap() {
+            ControlResponse::Published { mid } => mid,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        // Give the DHT a moment to converge before B fetches.
+        tokio::time::sleep(Duration::from_millis(1000)).await;
 
         // ── GetToFile via IPC client (network-get -o behaviour) ────────────────
         let out_dir = tempfile::tempdir().unwrap();
@@ -2341,23 +2354,12 @@ async fn replication_retries_after_peer_join() {
         let queue_a = server_a.queue();
         tokio::spawn(server_a.run());
 
-        let content = b"replication-retry test: publish before peers exist";
-        let req = ControlRequest::Publish {
-            data: content.to_vec(),
-            data_shards: 2,
-            total_shards: 3,
-        };
-        let mid_str = match daemon_request(&dir_a_path, req).await.unwrap() {
-            ControlResponse::Published { mid } => mid,
-            other => panic!("unexpected: {other:?}"),
-        };
-        println!("[retry] Published MID: {mid_str} (no peers yet)");
-
-        // Immediately after publish: pending_replication = 1, replicated = 0.
-        assert_eq!(queue_a.lock().unwrap().pending_count(), 1);
-        assert_eq!(queue_a.lock().unwrap().replicated_count(), 0);
-
-        // ── Node B: join and bootstrap to A ───────────────────────────────────
+        // ── Node B: join and bootstrap to A BEFORE A publishes ────────────────
+        // Under the daemon's network_default policy a peerless publish is
+        // refused ("stored only on this device"), so B must be connected for the
+        // publish to land a remote copy. The replication queue then keeps the
+        // record and the retry/topology machinery continues to reconcile it,
+        // which is what this test ultimately asserts via replicated_count.
         let dir_b = tempfile::tempdir().unwrap();
         let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
         let node_b =
@@ -2390,12 +2392,26 @@ async fn replication_retries_after_peer_join() {
         server_b.bootstrap_dht().await.unwrap();
         tokio::spawn(server_b.run());
 
-        // Wait for connection to be established.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        // Wait for the B → A connection to be established.
+        tokio::time::sleep(Duration::from_millis(2000)).await;
 
-        // Re-read server_a via IPC: trigger replication retry now that A has a peer.
-        // In production this happens via the 5-second timer; here we just wait for it.
-        // The timer fires every 5s, so wait up to 7s for at least one retry.
+        let content = b"replication-retry test: publish with a reachable peer";
+        let req = ControlRequest::Publish {
+            data: content.to_vec(),
+            data_shards: 2,
+            total_shards: 3,
+        };
+        let mid_str = match daemon_request(&dir_a_path, req).await.unwrap() {
+            ControlResponse::Published { mid } => mid,
+            other => panic!("unexpected: {other:?}"),
+        };
+        println!("[retry] Published MID: {mid_str}");
+
+        // The record is queued for ongoing replication reconciliation.
+        assert!(queue_a.lock().unwrap().pending_count() >= 1);
+
+        // Wait for replication to be confirmed by the remote peer. The retry
+        // timer fires every 5s, so wait up to 7s for at least one confirmation.
         let mut replicated = false;
         for _ in 0..14 {
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -2481,22 +2497,12 @@ fn topology_event_triggers_replication() {
             let queue_a = server_a.queue();
             tokio::spawn(server_a.run());
 
-            let content = b"topology-event-driven replication test";
-            let req = ControlRequest::Publish {
-                data: content.to_vec(),
-                data_shards: 2,
-                total_shards: 3,
-            };
-            match daemon_request(&dir_a_path, req).await.unwrap() {
-                ControlResponse::Published { mid } => {
-                    println!("[topo] Published MID: {mid}");
-                }
-                other => panic!("unexpected: {other:?}"),
-            };
-
-            assert_eq!(queue_a.lock().unwrap().pending_count(), 1);
-
-            // ── Node B: join — PeerConnected should trigger replication ───
+            // ── Node B: join and connect BEFORE A publishes ───────────────
+            // The daemon's network_default publish policy refuses a peerless
+            // publish, so B must be reachable for the publish to land a remote
+            // copy. Replication is still confirmed well within the 5s window and
+            // far below the 60s fallback timer, so the event-driven path (not
+            // the fallback timer) is what reconciles the queue.
             let dir_b = tempfile::tempdir().unwrap();
             let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
             let node_b =
@@ -2527,16 +2533,32 @@ fn topology_event_triggers_replication() {
             server_b.bootstrap_dht().await.unwrap();
             tokio::spawn(server_b.run());
 
+            // Let the B → A connection come up.
+            tokio::time::sleep(Duration::from_millis(2000)).await;
+
+            let content = b"topology-event-driven replication test";
+            let req = ControlRequest::Publish {
+                data: content.to_vec(),
+                data_shards: 2,
+                total_shards: 3,
+            };
+            match daemon_request(&dir_a_path, req).await.unwrap() {
+                ControlResponse::Published { mid } => {
+                    println!("[topo] Published MID: {mid}");
+                }
+                other => panic!("unexpected: {other:?}"),
+            };
+
             // Wait for replication to be confirmed.
             // Fallback timer is 60s; if this completes in <5s it proves
-            // the topology-event path drove the replication.
+            // the event-driven path drove the replication.
             tokio::time::sleep(Duration::from_secs(5)).await;
             let rc = queue_a.lock().unwrap().replicated_count();
             let pc = queue_a.lock().unwrap().pending_count();
             println!("[topo] replicated={rc}, pending={pc}");
             assert!(
                 rc > 0,
-                "replication should be driven by topology event, not fallback timer"
+                "replication should be driven by the topology event, not the fallback timer"
             );
         })
         .await
