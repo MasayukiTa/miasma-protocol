@@ -468,7 +468,8 @@ async fn video_frames_survive_the_wire_in_both_directions() {
 
 /// Two encrypted media sessions over a bounded, delayed in-process link. A
 /// 550 ms one-way delay models the measured 1.1 s round trip; nine packets
-/// per 20 ms admit the audio packet and the paced video fragments.
+/// per 20 ms admit the audio packet and the paced video fragments. The link
+/// serializes packets at 3 ms each (about 240 kbit/s at 90 bytes per packet).
 #[cfg(feature = "call-video")]
 #[test]
 fn jpeg_video_arrives_over_delayed_bounded_link() {
@@ -488,6 +489,7 @@ fn jpeg_video_arrives_over_delayed_bounded_link() {
         rx: Queue,
         tx: Queue,
         now: Arc<AtomicU64>,
+        next_send_ms: u64,
     }
     impl DatagramLink for Link {
         fn max_len(&self) -> usize {
@@ -498,7 +500,9 @@ fn jpeg_video_arrives_over_delayed_bounded_link() {
             if q.len() >= 512 {
                 return false;
             }
-            q.push_back((self.now.load(Ordering::Relaxed) + 550, packet.to_vec()));
+            let start = self.now.load(Ordering::Relaxed).max(self.next_send_ms);
+            self.next_send_ms = start + 3;
+            q.push_back((self.next_send_ms + 550, packet.to_vec()));
             true
         }
         fn try_recv(&mut self) -> Option<Vec<u8>> {
@@ -530,11 +534,13 @@ fn jpeg_video_arrives_over_delayed_bounded_link() {
         rx: ba.clone(),
         tx: ab.clone(),
         now: clock.clone(),
+        next_send_ms: 0,
     };
     let link_b = Link {
         rx: ab,
         tx: ba,
         now: clock.clone(),
+        next_send_ms: 0,
     };
     let root = Zeroizing::new([42u8; 32]);
     let mut a = MediaSession::new(
