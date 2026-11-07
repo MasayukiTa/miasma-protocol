@@ -112,15 +112,15 @@ Both settings persist across restarts.
 
 ## Calls
 
-**No microphone or camera found**: Check that the device is connected and available to your system. On Windows, check the microphone or camera settings and select an available device. Camera capture works on Windows and macOS. On macOS, the first time a call uses the camera the system asks for camera access; allow it so the camera can be used. Screen sharing works on Windows and macOS. On other platforms a call stays voice-only and uses test devices.
+**No microphone or camera found**: Check that the device is connected and available to your system. On Windows, check the microphone or camera settings and select an available device. Camera capture works on Windows and macOS. On macOS, the first time a call uses the microphone or the camera the system asks for access; allow it so the device can be used. Screen sharing works on Windows and macOS. On other platforms a call stays voice-only and uses test devices.
 
 **Choosing a microphone or speaker**: During a call, open the audio-device menu in the call view and pick the microphone and speaker you want. Leave an entry on the default device to use the one your system already uses.
 
-**Camera and screen-share buttons**: During a connected call with video, use the camera button to turn your camera on or off, and the screen button to start or stop sharing your screen. The camera is available on Windows and macOS, and screen sharing works on both as well. If the camera cannot be turned on, the call view shows a short notice and the call continues without it.
+**Camera and screen-share buttons**: During a connected call with video, use the camera button to turn your camera on or off, and the screen button to start or stop sharing your screen. The camera is available on Windows and macOS, and screen sharing works on both as well. If the camera cannot be turned on, the call view shows a short notice and the call continues without it. On macOS, screen sharing needs the Screen Recording permission: the first attempt raises the system prompt, and until it is allowed the call view shows a short notice that points to System Settings > Privacy & Security > Screen Recording. After allowing Miasma there, start sharing again. On macOS the microphone also needs the Microphone permission: when it is not allowed, the call view shows a short notice that points to System Settings > Privacy & Security > Microphone, and your side is silent until you allow Miasma there.
 
 **Permission denied on Windows**: Open Windows Settings > Privacy & security > Microphone or Camera. Allow access to the device and allow desktop apps to use it, then try again.
 
-**Permission denied on macOS**: Open System Settings > Privacy & Security > Camera, allow access for Miasma, then try again. If the camera was refused earlier, the call continues without video until access is allowed.
+**Permission denied on macOS**: Open System Settings > Privacy & Security, then allow Miasma under the matching section: Microphone for call audio, Camera for video, and Screen Recording for screen sharing. Allow access for Miasma, then try again. If a device was refused earlier, the call continues without it until access is allowed; for screen sharing, start it again after allowing Screen Recording.
 
 **Turn calls off**: In `config.toml`, set `enabled = false` under `[call]`:
 

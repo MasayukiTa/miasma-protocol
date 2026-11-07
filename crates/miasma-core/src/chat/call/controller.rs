@@ -24,7 +24,7 @@ use super::media::{self, Direction};
 use super::signal::{self, Record};
 use super::state::{
     CallId, CallMachine, Control, Effect, Event, Notice, Offer, PeerId, Reason, Role, State,
-    OFFER_TTL_MS,
+    MEDIA_SILENCE_MS, OFFER_TTL_MS,
 };
 
 pub trait CallSender {
@@ -224,7 +224,9 @@ mod inbound_tests {
     }
 
     #[test]
-    fn media_gate_controls_offers() {
+    fn media_gate_controls_outbound_dials() {
+        // An outbound dial is still gated: a pending gate holds the dial and a
+        // refused gate turns it away, so nothing leaves until the gate is ready.
         for (gate, error) in [
             (MediaGate::Pending, CallError::NotReady),
             (MediaGate::Refused, CallError::Refused),
@@ -233,10 +235,6 @@ mod inbound_tests {
             c.ports.gate = gate;
             assert_eq!(c.dial([1; 32]), Err(error));
             assert!(c.take_sends().is_empty());
-            c.on_inbound(inbound([1; 32], offer([1; 16], 2000)));
-            assert_eq!(c.status().state, State::Idle);
-            assert!(c.take_notices().0.is_empty());
-            assert_eq!(c.dropped_offers(), 0);
         }
         let mut c = controller();
         assert_eq!(c.dial([1; 32]), Ok(()));
@@ -244,6 +242,36 @@ mod inbound_tests {
             Record::decode(&c.drain_encoded()[0].1),
             Ok(Record::Offer { .. })
         ));
+    }
+
+    #[test]
+    fn an_inbound_offer_rings_while_the_gate_is_still_pending() {
+        // The bug this guards: a contact dials while our hybrid message gate is
+        // not yet ready (the exchange is in flight, or the pair turned hybrid
+        // moments before). The call has its own media keys and does not use the
+        // hybrid message key, so the offer must ring rather than be dropped in
+        // silence. The caller showed "calling"; before the fix we showed
+        // nothing at all.
+        let mut c = controller();
+        c.ports.gate = MediaGate::Pending;
+        c.on_inbound(inbound([1; 32], offer([1; 16], 2000)));
+        assert_eq!(c.status().state, State::Ringing);
+        assert!(c.status().pending_token.is_some());
+        assert_eq!(c.take_notices().0, vec![CallNotice::IncomingRinging]);
+        assert_eq!(c.dropped_offers(), 0);
+    }
+
+    #[test]
+    fn an_inbound_offer_is_dropped_only_when_the_gate_refuses() {
+        // A refused gate (classical or failed under a policy that forbids the
+        // call) is the one state that still suppresses the ring: no state
+        // change and no notice, as before.
+        let mut c = controller();
+        c.ports.gate = MediaGate::Refused;
+        c.on_inbound(inbound([1; 32], offer([1; 16], 2000)));
+        assert_eq!(c.status().state, State::Idle);
+        assert!(c.take_notices().0.is_empty());
+        assert_eq!(c.dropped_offers(), 0);
     }
 
     #[test]
@@ -597,6 +625,7 @@ pub enum CallNotice {
     NoAnswer,
     Connected,
     CallEnded,
+    PeerLost,
     EstablishmentFailed,
     ClearIncoming,
     /// The caller failed to send a control message (e.g. transport down).
@@ -618,6 +647,7 @@ impl From<Notice> for CallNotice {
             Notice::NoAnswer => CallNotice::NoAnswer,
             Notice::Connected => CallNotice::Connected,
             Notice::CallEnded => CallNotice::CallEnded,
+            Notice::PeerLost => CallNotice::PeerLost,
             Notice::EstablishmentFailed => CallNotice::EstablishmentFailed,
             Notice::ClearIncoming => CallNotice::ClearIncoming,
         }
@@ -721,6 +751,7 @@ pub struct CallController<P: CallPorts> {
     safety_code: OnceLock<String>,
     negotiated_media: u8,
     entered_at_ms: Option<u64>,
+    last_peer_activity_ms: Option<u64>,
     offer_limiter: OfferLimiter,
     dropped_offers: u64,
     // Whether this endpoint offers video in its own capabilities. Production
@@ -753,6 +784,7 @@ impl<P: CallPorts> CallController<P> {
             safety_code: OnceLock::new(),
             negotiated_media: 0,
             entered_at_ms: None,
+            last_peer_activity_ms: None,
             offer_limiter: OfferLimiter::new(),
             dropped_offers: 0,
             local_offers_video: true,
@@ -784,6 +816,14 @@ impl<P: CallPorts> CallController<P> {
         let now = self.ports.now_ms();
         let old_state = self.machine.state();
         let peer = inbound.peer;
+        if old_state == State::Connected
+            && self.peer == Some(peer)
+            && self
+                .machine
+                .matches_active(&CallId(*inbound.signal.call_id()))
+        {
+            self.on_peer_media(now);
+        }
         let mut incoming_context = None;
         let offer_hash = if matches!(&inbound.signal, Record::Offer { .. }) {
             match inbound.signal.encode_zeroizing() {
@@ -802,8 +842,17 @@ impl<P: CallPorts> CallController<P> {
                 capabilities,
                 ..
             } => {
+                // An offer from an allowed contact must ring whether or not the
+                // hybrid message gate has finished. The call derives its own
+                // media roots from the offer/answer shares (see
+                // `take_media_roots`) and never uses the hybrid message key, so
+                // a gate that is still `Pending` (the exchange is in flight, or
+                // the pair turned hybrid moments before the dial) must not
+                // silence an incoming call. Only an explicit `Refused` decision
+                // (classical/failed under a policy that forbids the call)
+                // suppresses the ring.
                 let from_contact = self.ports.is_contact_allowed(&peer)
-                    && self.ports.media_gate(&peer) == MediaGate::Ready;
+                    && self.ports.media_gate(&peer) != MediaGate::Refused;
                 if from_contact && !self.offer_limiter.allow(peer, now) {
                     self.dropped_offers = self.dropped_offers.saturating_add(1);
                     return;
@@ -898,7 +947,15 @@ impl<P: CallPorts> CallController<P> {
         }
     }
 
-    /// Inject the offer timeout after more than 45 seconds in Calling or Ringing.
+    /// Record authenticated media received for the current call.
+    pub fn on_peer_media(&mut self, received_at_ms: u64) {
+        if self.machine.state() == State::Connected {
+            self.last_peer_activity_ms =
+                Some(self.last_peer_activity_ms.unwrap_or(0).max(received_at_ms));
+        }
+    }
+
+    /// Inject offer and connected peer-silence timeouts.
     pub fn on_tick(&mut self) {
         let now = self.ports.now_ms();
         if matches!(self.machine.state(), State::Calling | State::Ringing)
@@ -907,6 +964,13 @@ impl<P: CallPorts> CallController<P> {
                 .map_or(false, |entered| now.saturating_sub(entered) > OFFER_TTL_MS)
         {
             self.apply_event(Event::Timeout, now);
+        }
+        if self.machine.state() == State::Connected
+            && self
+                .last_peer_activity_ms
+                .map_or(false, |last| now.saturating_sub(last) >= MEDIA_SILENCE_MS)
+        {
+            self.apply_event(Event::MediaSilence, now);
         }
     }
 
@@ -1153,6 +1217,7 @@ impl<P: CallPorts> CallController<P> {
         let old_state = self.machine.state();
         let transition = self.machine.step(event, now);
         if transition.next != old_state {
+            self.last_peer_activity_ms = (transition.next == State::Connected).then_some(now);
             self.entered_at_ms = if matches!(transition.next, State::Calling | State::Ringing) {
                 Some(now)
             } else {
@@ -1422,6 +1487,29 @@ mod tests {
             signal,
             received_at_ms: 1_000,
         }
+    }
+
+    #[test]
+    fn connected_peer_silence_ends_call_after_last_activity() {
+        let mut a = controller();
+        let mut b = controller();
+        a.dial([2; 32]).unwrap();
+        deliver(&mut b, [1; 32], &a.drain_encoded().remove(0).1);
+        assert!(b.accept(b.status().pending_token.unwrap()));
+        deliver(&mut a, [2; 32], &b.drain_encoded().remove(0).1);
+        assert_eq!(a.status().state, State::Connected);
+        a.take_notices();
+        a.ports.now += MEDIA_SILENCE_MS - 1;
+        a.on_tick();
+        assert_eq!(a.status().state, State::Connected);
+        a.on_peer_media(a.ports.now);
+        a.ports.now += MEDIA_SILENCE_MS - 1;
+        a.on_tick();
+        assert_eq!(a.status().state, State::Connected);
+        a.ports.now += 1;
+        a.on_tick();
+        assert_eq!(a.status().state, State::Idle);
+        assert!(a.take_notices().0.contains(&CallNotice::PeerLost));
     }
 
     #[test]

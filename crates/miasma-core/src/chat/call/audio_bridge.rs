@@ -33,6 +33,10 @@ pub struct DeviceSelection {
 pub struct EncodingSource {
     input: Option<CpalAudioInput>,
     encoder: OpusEncoder,
+    /// True when the macOS microphone preflight reported the permission is not
+    /// granted, so the call UI can show a neutral reason. Always false on
+    /// Windows and Linux, where the preflight reports granted.
+    mic_permission_needed: bool,
 }
 
 impl EncodingSource {
@@ -40,6 +44,18 @@ impl EncodingSource {
     /// source yields no frames. A codec failure is fatal and returned typed.
     pub fn new(choice: &DeviceChoice) -> Result<Self, AudioDeviceError> {
         let encoder = OpusEncoder::new().map_err(|_| AudioDeviceError::Backend)?;
+        // On macOS the microphone needs the Microphone permission. Preflight it
+        // before opening the capture device: when the decision has not been
+        // made the preflight raises the one-time system prompt. Capture is
+        // still attempted either way — an unavailable or refused device is
+        // absorbed into receive-only operation below — so the call does not
+        // block on the result. The preflight result is kept so the call can
+        // report a neutral reason word to the UI when the permission is not
+        // granted. On Windows and Linux the preflight always reports granted,
+        // so behaviour there is unchanged.
+        let mic_permission_needed =
+            super::mac_permissions::mic_reason(super::mac_permissions::preflight_microphone())
+                .is_some();
         let input = match CpalAudioInput::new(choice) {
             Ok(input) => Some(input),
             // Treat an absent or refused device as receive-only, not an error.
@@ -48,12 +64,23 @@ impl EncodingSource {
             | Err(AudioDeviceError::Unsupported) => None,
             Err(other) => return Err(other),
         };
-        Ok(Self { input, encoder })
+        Ok(Self {
+            input,
+            encoder,
+            mic_permission_needed,
+        })
     }
 
     /// Whether a real input device is driving this source.
     pub fn has_input(&self) -> bool {
         self.input.is_some()
+    }
+
+    /// Whether the macOS microphone preflight found the permission not granted,
+    /// so the call UI should show the `mic_permission` reason. Always false on
+    /// Windows and Linux.
+    pub fn mic_permission_needed(&self) -> bool {
+        self.mic_permission_needed
     }
 
     /// Mute the microphone. With no input device this is a no-op.

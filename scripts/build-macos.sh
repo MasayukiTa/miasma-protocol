@@ -39,7 +39,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>CFBundleVersion</key><string>$VERSION</string>
     <key>MiasmaVersion</key><string>$FULL_VERSION</string>
     <key>NSHighResolutionCapable</key><true/>
-    <key>NSCameraUsageDescription</key><string>Miasma uses the camera only to read a contact QR code.</string>
+    <key>NSCameraUsageDescription</key><string>Miasma uses the camera for video calls with your contacts and to read a contact QR code.</string>
+    <key>NSMicrophoneUsageDescription</key><string>Miasma uses the microphone for voice and video calls with your contacts.</string>
     <key>NSLocalNetworkUsageDescription</key><string>Miasma discovers and connects to nearby peers to store and retrieve content.</string>
 </dict></plist>
 EOF
@@ -48,9 +49,12 @@ plutil -lint "$APP/Contents/Info.plist"
 # Remove only these packaging attributes; preserve other extended attributes.
 xattr -rd com.apple.FinderInfo "$APP" 2>/dev/null || true
 xattr -rd com.apple.ResourceFork "$APP" 2>/dev/null || true
-for name in miasma miasma-bridge; do
+for name in miasma-desktop miasma miasma-bridge; do
     codesign --force --sign - "$APP/Contents/MacOS/$name"
 done
+# Copies can regain Finder metadata; remove it before signing the enclosing bundle.
+xattr -rd com.apple.FinderInfo "$APP" 2>/dev/null || true
+xattr -rd com.apple.ResourceFork "$APP" 2>/dev/null || true
 codesign --force --sign - "$APP"
 codesign --verify --deep --strict "$APP"
 echo "Built: $APP"

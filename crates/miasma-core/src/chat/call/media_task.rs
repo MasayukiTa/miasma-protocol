@@ -3,6 +3,8 @@
 use super::audio_bridge::{build_real_audio, DeviceSelection};
 #[cfg(all(feature = "call-audio", any(windows, target_os = "macos"), not(test)))]
 use super::audio_device::DeviceChoice;
+#[cfg(feature = "call-video")]
+use super::video_codec::{JpegDecoder, JpegEncoder, VIDEO_HEIGHT, VIDEO_WIDTH};
 use super::{
     controller::{CallController, CallPorts},
     device::{AudioSink, AudioSource, RecordingSink, ToneSource},
@@ -40,10 +42,16 @@ use tokio::{
 pub struct MediaStats {
     pub frames_sent: Arc<AtomicU64>,
     pub frames_played: Arc<AtomicU64>,
+    pub last_received_ms: Arc<AtomicU64>,
     pub video_frames_sent: Arc<AtomicU64>,
     pub video_frames_played: Arc<AtomicU64>,
     pub camera_in_use: Arc<AtomicBool>,
     pub screen_sharing: Arc<AtomicBool>,
+    /// Set true when the macOS microphone preflight found the permission not
+    /// granted, so the call status can report a neutral `mic_permission`
+    /// reason to the UI. Never set on Windows or Linux, where the preflight
+    /// reports granted.
+    pub mic_permission_needed: Arc<AtomicBool>,
     pub(super) control: Arc<Mutex<Option<mpsc::Sender<MediaControl>>>>,
     /// Set true to mute the local microphone mid-call. The media task reads it
     /// each tick and tells the capture source; with no input device it has no
@@ -228,15 +236,29 @@ pub(super) struct AudioChoice {
 /// Build the camera's video parts from an opened camera source: the source
 /// drives capture, the sink discards any decoded loopback (the remote picture
 /// is published through `take_decoded_picture`, not this sink), and the codec
-/// pair carries the raw pictures through fragmentation. The passthrough codec
-/// embeds each picture's geometry, so the camera's own capture size is
-/// reproduced on the far side without a fixed-size codec. Holds no key, nonce,
-/// call id or peer id.
+/// pair compresses fixed-size camera pictures before fragmentation.
+struct IdleCamera;
+impl VideoSource for IdleCamera {
+    fn next_picture(&mut self) -> Option<RawPicture> {
+        None
+    }
+}
+
 fn camera_parts(source: Box<dyn VideoSource + Send>) -> VideoParts {
     VideoParts {
         source,
         sink: Box::new(DiscardVideoSink),
+        #[cfg(feature = "call-video")]
+        encoder: Box::new(
+            JpegEncoder::new(VIDEO_WIDTH, VIDEO_HEIGHT).expect("fixed JPEG dimensions"),
+        ),
+        #[cfg(feature = "call-video")]
+        decoder: Box::new(
+            JpegDecoder::new(VIDEO_WIDTH, VIDEO_HEIGHT).expect("fixed JPEG dimensions"),
+        ),
+        #[cfg(not(feature = "call-video"))]
         encoder: Box::new(PassthroughCodec::new()),
+        #[cfg(not(feature = "call-video"))]
         decoder: Box::new(PassthroughCodec::new()),
     }
 }
@@ -263,7 +285,11 @@ pub(super) fn maybe_start_media<P: CallPorts>(
     // production parts here. The injected parts win when both are present, so
     // the existing test hooks keep their exact behaviour.
     let video = if negotiated {
-        video.or_else(|| camera_source.map(camera_parts))
+        video.or_else(|| {
+            Some(camera_parts(
+                camera_source.unwrap_or_else(|| Box::new(IdleCamera)),
+            ))
+        })
     } else {
         None
     };
@@ -321,6 +347,13 @@ async fn run_media(
         };
         match build_real_audio(&selection) {
             Ok((source, sink)) => {
+                // Carry the microphone preflight result to the call status, so
+                // the UI can show the `mic_permission` reason when macOS has
+                // not granted the permission. On Windows and Linux the
+                // preflight always reports granted, so this stays false.
+                stats
+                    .mic_permission_needed
+                    .store(source.mic_permission_needed(), Ordering::SeqCst);
                 return drive_session(
                     roots,
                     call_id,
@@ -404,7 +437,7 @@ where
         return false;
     };
     drop(roots);
-    let mut video = video.map(|p| VideoDriver::new(p.source, p.sink, p.encoder, p.decoder, 20));
+    let mut video = video.map(|p| VideoDriver::new(p.source, p.sink, p.encoder, p.decoder, 200));
     // The screen stream is a second video-like stream (media_type 0x02).
     // It captures from its own source, discards any decoded frames (no
     // local screen playback is wired here) and shares the camera codec
@@ -432,11 +465,16 @@ where
             match control {
                 MediaControl::AttachCamera(source) => {
                     let p = camera_parts(source);
-                    video = Some(VideoDriver::new(p.source, p.sink, p.encoder, p.decoder, 20));
+                    video = Some(VideoDriver::new(
+                        p.source, p.sink, p.encoder, p.decoder, 200,
+                    ));
                     stats.camera_in_use.store(true, Ordering::SeqCst);
                 }
                 MediaControl::DetachCamera => {
-                    video = None;
+                    let p = camera_parts(Box::new(IdleCamera));
+                    video = Some(VideoDriver::new(
+                        p.source, p.sink, p.encoder, p.decoder, 200,
+                    ));
                     stats.camera_in_use.store(false, Ordering::SeqCst);
                 }
                 MediaControl::AttachScreen(source) => {
@@ -528,6 +566,7 @@ where
                 height,
                 pixels,
             } = picture;
+            let pixels = i420_to_rgba(width, height, &pixels).unwrap_or(pixels);
             store_remote_frame(&remote_frames, width, height, pixels);
         }
         if let Some(driver) = video.as_mut() {
@@ -538,6 +577,9 @@ where
                 .video_frames_played
                 .store(driver.frames_played, Ordering::Relaxed);
         }
+        stats
+            .last_received_ms
+            .store(session.stats().last_received_ms, Ordering::Relaxed);
         stats
             .frames_sent
             .store(session.stats().sent, Ordering::Relaxed);
@@ -562,6 +604,37 @@ fn remote_picture_to_publish(
     screen: Option<RawPicture>,
 ) -> Option<RawPicture> {
     camera.or(screen)
+}
+
+// The JPEG decoder emits I420, while the desktop frame store expects RGBA.
+fn i420_to_rgba(width: u16, height: u16, pixels: &[u8]) -> Option<Vec<u8>> {
+    let (w, h) = (usize::from(width), usize::from(height));
+    if w == 0 || h == 0 || w % 2 != 0 || h % 2 != 0 {
+        return None;
+    }
+    let y_len = w.checked_mul(h)?;
+    if pixels.len() != y_len.checked_add(y_len / 2)? {
+        return None;
+    }
+    let mut rgba = Vec::with_capacity(y_len.checked_mul(4)?);
+    for y in 0..h {
+        for x in 0..w {
+            let luma = i32::from(pixels[y * w + x]);
+            let c = (y / 2) * (w / 2) + x / 2;
+            let cb = i32::from(pixels[y_len + c]) - 128;
+            let cr = i32::from(pixels[y_len + y_len / 4 + c]) - 128;
+            let r = luma + ((359 * cr) >> 8);
+            let g = luma - ((88 * cb + 183 * cr) >> 8);
+            let b = luma + ((454 * cb) >> 8);
+            rgba.extend_from_slice(&[
+                r.clamp(0, 255) as u8,
+                g.clamp(0, 255) as u8,
+                b.clamp(0, 255) as u8,
+                255,
+            ]);
+        }
+    }
+    Some(rgba)
 }
 
 /// Turn a chosen device name into the backend's [`DeviceChoice`]: a name picks
