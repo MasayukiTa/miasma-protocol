@@ -559,6 +559,7 @@ where
                     height,
                     pixels,
                 } = picture;
+                let pixels = i420_to_rgba(width, height, &pixels).unwrap_or(pixels);
                 store_remote_frame(&remote_frames, width, height, pixels);
             }
             stats
@@ -581,6 +582,37 @@ where
             return false;
         }
     }
+}
+
+// The JPEG decoder emits I420, while the desktop frame store expects RGBA.
+fn i420_to_rgba(width: u16, height: u16, pixels: &[u8]) -> Option<Vec<u8>> {
+    let (w, h) = (usize::from(width), usize::from(height));
+    if w == 0 || h == 0 || w % 2 != 0 || h % 2 != 0 {
+        return None;
+    }
+    let y_len = w.checked_mul(h)?;
+    if pixels.len() != y_len.checked_add(y_len / 2)? {
+        return None;
+    }
+    let mut rgba = Vec::with_capacity(y_len.checked_mul(4)?);
+    for y in 0..h {
+        for x in 0..w {
+            let luma = i32::from(pixels[y * w + x]);
+            let c = (y / 2) * (w / 2) + x / 2;
+            let cb = i32::from(pixels[y_len + c]) - 128;
+            let cr = i32::from(pixels[y_len + y_len / 4 + c]) - 128;
+            let r = luma + ((359 * cr) >> 8);
+            let g = luma - ((88 * cb + 183 * cr) >> 8);
+            let b = luma + ((454 * cb) >> 8);
+            rgba.extend_from_slice(&[
+                r.clamp(0, 255) as u8,
+                g.clamp(0, 255) as u8,
+                b.clamp(0, 255) as u8,
+                255,
+            ]);
+        }
+    }
+    Some(rgba)
 }
 
 /// Turn a chosen device name into the backend's [`DeviceChoice`]: a name picks
