@@ -359,7 +359,7 @@ impl CallRuntime {
                         Some(inbound) => { let mut state = task_inner.lock().unwrap_or_else(|e| e.into_inner()); state.controller.on_inbound(inbound); state.collect(); }
                         None => break,
                     },
-                    _ = interval.tick() => { let mut state = task_inner.lock().unwrap_or_else(|e| e.into_inner()); state.controller.on_tick(); state.collect(); },
+                    _ = interval.tick() => { let mut state = task_inner.lock().unwrap_or_else(|e| e.into_inner()); let last = state.media_stats.as_ref().map_or(0, |s| s.last_received_ms.load(Ordering::Relaxed)); if last != 0 { state.controller.on_peer_media(last); } state.controller.on_tick(); state.collect(); },
                     _ = task_wake.notified() => {},
                     result = sending.join_next(), if !sending.is_empty() => {
                         if let Some(Ok((ticket, ok))) = result {
@@ -681,6 +681,7 @@ fn notice_word(notice: CallNotice) -> &'static str {
         CallNotice::NoAnswer => "no_answer",
         CallNotice::Connected => "connected",
         CallNotice::CallEnded => "call_ended",
+        CallNotice::PeerLost => "peer_lost",
         CallNotice::EstablishmentFailed => "establishment_failed",
         CallNotice::ClearIncoming => "clear_incoming",
         CallNotice::SendFailed => "send_failed",

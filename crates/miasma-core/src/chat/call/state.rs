@@ -38,6 +38,7 @@ pub const OFFER_TTL_MS: u64 = 45_000;
 
 /// Media-silence timeout in milliseconds: 20 s (section 3.5.6). A connected
 /// call with neither media nor keepalive for this long is treated as dropped.
+/// This allows more than 18 round trips at 1.1 s and tolerates short stalls.
 /// Injected as [`Event::MediaSilence`]; kept here as the single source of the
 /// number.
 pub const MEDIA_SILENCE_MS: u64 = 20_000;
@@ -180,6 +181,8 @@ pub enum Notice {
     Connected,
     /// The call ended (bye, hang up or silence).
     CallEnded,
+    /// No authenticated peer traffic arrived before the silence deadline.
+    PeerLost,
     /// Media could not be established after approval (device open failure).
     EstablishmentFailed,
     /// Clear any incoming-call UI without further notice.
@@ -520,7 +523,7 @@ impl CallMachine {
                 self.clear();
                 Transition::to(
                     State::Idle,
-                    vec![Effect::ZeroizeKeys, Effect::Show(Notice::CallEnded)],
+                    vec![Effect::ZeroizeKeys, Effect::Show(Notice::PeerLost)],
                 )
             }
 
@@ -953,7 +956,7 @@ mod tests {
         assert!(has_show(&t.effects, Notice::CallEnded));
     }
 
-    // Row: connected + 20 s media silence -> idle, zeroize, show CallEnded.
+    // Row: connected + 20 s media silence -> idle, zeroize, show PeerLost.
     #[test]
     fn row_connected_media_silence() {
         let id = rand_id();
@@ -961,7 +964,7 @@ mod tests {
         let t = m.step(Event::MediaSilence, MEDIA_SILENCE_MS + 1);
         assert_eq!(t.next, State::Idle);
         assert!(has_zeroize(&t.effects));
-        assert!(has_show(&t.effects, Notice::CallEnded));
+        assert!(has_show(&t.effects, Notice::PeerLost));
     }
 
     // Row (any state): state-reachable-but-impossible known-call-id control is

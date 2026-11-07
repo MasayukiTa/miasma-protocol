@@ -3438,7 +3438,7 @@ call_strings! {
     // that stands for the host's own default device.
     device_heading, device_input_label, device_output_label, device_default,
     // Short notices.
-    ended, unavailable,
+    ended, unavailable, peer_lost,
     // The line shown instead of "calling" when the daemon did not accept the dial. `dial_busy`
     // for a contact already in a call, `dial_securing` while the secure connection with the
     // contact is still being set up (the call is retried on its own), and `dial_refused` for a
@@ -3496,6 +3496,7 @@ static CALL_EN: CallStrings = CallStrings {
     device_output_label: "Speaker",
     device_default: "Default device",
     ended: "Call ended",
+    peer_lost: "The connection to the other person was lost.",
     unavailable: "Calls are not available right now.",
     dial_busy: "That contact is already in a call.",
     dial_securing: "Setting up a secure connection, then calling...",
@@ -3504,6 +3505,7 @@ static CALL_EN: CallStrings = CallStrings {
 };
 
 static CALL_JA: CallStrings = CallStrings {
+    peer_lost: "??????????????",
     call: "通話",
     a11y_call: "この相手に通話を発信する",
     incoming_title: "着信中",
@@ -3554,6 +3556,7 @@ static CALL_JA: CallStrings = CallStrings {
 
 // zh-CN: a first translation; to be reviewed by a native speaker before it is called finished.
 static CALL_ZH_CN: CallStrings = CallStrings {
+    peer_lost: "??????????",
     call: "通话",
     a11y_call: "向此联系人发起通话",
     incoming_title: "来电",
