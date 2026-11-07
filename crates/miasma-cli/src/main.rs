@@ -19,6 +19,7 @@ use zeroize::{Zeroize, Zeroizing};
 mod chat_cmd;
 mod chat_group_cmd;
 mod i18n;
+mod offline_check;
 mod push_cmd;
 mod recovery_cmd;
 mod storage_cmd;
@@ -252,6 +253,18 @@ enum Commands {
     /// Collects node config, daemon status, transport readiness, storage,
     /// and recent errors into a single text or JSON report.
     Diagnostics {
+        /// Output as JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Self-check whether offline delivery would work right now.
+    ///
+    /// Prints bootstrap reachability, connected peers, holders reachable via
+    /// iroh, whether custody is enabled, and whether a deposit would currently
+    /// succeed. Sends no user data: it reads local config, the daemon status
+    /// snapshot, and the contact list only.
+    OfflineCheck {
         /// Output as JSON instead of human-readable text.
         #[arg(long)]
         json: bool,
@@ -690,6 +703,8 @@ async fn main() -> Result<()> {
         }
 
         Commands::Diagnostics { json } => cmd_diagnostics(&data_dir, json).await,
+
+        Commands::OfflineCheck { json } => offline_check::run(&data_dir, json).await,
 
         Commands::SharingKey => cmd_sharing_key(&data_dir).await,
         Commands::Send {
@@ -2885,7 +2900,7 @@ async fn cmd_network_publish(
 
     let id = match daemon_request(
         data_dir,
-        ControlRequest::TransferStartPublish {
+        ControlRequest::TransferStartNetworkPublish {
             file_path: abs_path.to_string_lossy().into_owned(),
             data_shards: data_shards as u8,
             total_shards: total_shards as u8,

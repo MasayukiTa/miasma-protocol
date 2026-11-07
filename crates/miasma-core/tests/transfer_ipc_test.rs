@@ -75,6 +75,46 @@ async fn wait_until_finished(d: &Daemon, id: &str) -> TransferStatus {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn network_publish_without_remote_holders_fails_instead_of_completing() {
+    timeout(Duration::from_secs(120), async {
+        let a = start_daemon(0x54, None).await;
+        let src_dir = tempfile::tempdir().unwrap();
+        let src = src_dir.path().join("payload.bin");
+        std::fs::write(&src, b"offline network publish").unwrap();
+        let id = match daemon_request(
+            &a.dir,
+            ControlRequest::TransferStartNetworkPublish {
+                file_path: src.to_string_lossy().into_owned(),
+                data_shards: 2,
+                total_shards: 3,
+                password: None,
+                restart: false,
+                object_format: None,
+            },
+        )
+        .await
+        .unwrap()
+        {
+            ControlResponse::TransferStarted { id } => id,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let s = wait_until_finished(&a, &id).await;
+        assert_eq!(s.state, TransferState::Failed);
+        assert!(
+            s.last_error
+                .as_deref()
+                .unwrap_or("")
+                .contains("stored only on this device"),
+            "{:?}",
+            s.last_error
+        );
+        let _ = a.shutdown.send(()).await;
+    })
+    .await
+    .expect("timed out");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_weak_publish_password_is_refused_with_machine_readable_codes() {
     timeout(Duration::from_secs(120), async {
         let a = start_daemon(0x53, None).await;
