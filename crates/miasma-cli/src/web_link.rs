@@ -51,13 +51,12 @@ pub fn read_bridge_port(data_dir: &Path) -> Result<u16> {
 /// whitespace or credentials.  The token is only ever put in a link to this
 /// computer, never one to a remote page.
 pub fn is_loopback_http_url(url: &str) -> bool {
-    let rest = match url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-    {
-        Some(r) => r,
-        None => return false,
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return false;
     };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return false;
+    }
     if url
         .chars()
         .any(|c| c.is_whitespace() || c == '#' || c == '@')
@@ -74,7 +73,7 @@ pub fn is_loopback_http_url(url: &str) -> bool {
     } else {
         authority.split(':').next().unwrap_or("")
     };
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
+    host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1")
 }
 
 /// Build the launch link.

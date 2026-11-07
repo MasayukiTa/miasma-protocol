@@ -186,6 +186,16 @@ pub enum ControlRequest {
         #[serde(default)]
         object_format: Option<crate::config::ObjectFormat>,
     },
+    /// Start a network publish requiring a remote holder.
+    TransferStartNetworkPublish {
+        file_path: String,
+        data_shards: u8,
+        total_shards: u8,
+        password: Option<String>,
+        restart: bool,
+        #[serde(default)]
+        object_format: Option<crate::config::ObjectFormat>,
+    },
     /// Progress of one transfer, by the id `TransferStartReceive` /
     /// `TransferStartPublish` returned.
     TransferStatus { id: String },
@@ -390,6 +400,13 @@ impl fmt::Debug for ControlRequest {
                 password,
                 restart,
                 ..
+            }
+            | Self::TransferStartNetworkPublish {
+                data_shards,
+                total_shards,
+                password,
+                restart,
+                ..
             } => f
                 .debug_struct("TransferStartPublish")
                 .field("file_path", &"<redacted>")
@@ -554,7 +571,8 @@ impl Zeroize for ControlRequest {
             Self::PublishFileProtected { password, .. } => password.zeroize(),
             Self::TransferStartReceive { password, .. }
             | Self::TransferPeekName { password, .. }
-            | Self::TransferStartPublish { password, .. } => {
+            | Self::TransferStartPublish { password, .. }
+            | Self::TransferStartNetworkPublish { password, .. } => {
                 if let Some(p) = password.as_mut() {
                     p.zeroize();
                 }

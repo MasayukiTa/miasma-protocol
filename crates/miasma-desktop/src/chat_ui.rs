@@ -4301,6 +4301,7 @@ mod tests {
         // Draw one frame the way app.rs does: the chat screen, then the call screens on the same
         // ui just below it. The call screens are an overlay (an Area), so they must not take any
         // height from this flow.
+        #[cfg(feature = "pqc")]
         fn frame_with_call_screens(&mut self) {
             let mut raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(

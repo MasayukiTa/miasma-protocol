@@ -1289,22 +1289,10 @@ async fn daemon_ipc_publish_get_roundtrip() {
         let dir_a_path = dir_a.path().to_owned();
         tokio::spawn(server_a.run());
 
-        // ── Publish via IPC client (network-publish behaviour) ────────────────
-        let content = b"daemon IPC round-trip test payload";
-        let req = ControlRequest::Publish {
-            data: content.to_vec(),
-            data_shards: 2,
-            total_shards: 3,
-        };
-        let mid_str = match daemon_request(&dir_a_path, req).await.unwrap() {
-            ControlResponse::Published { mid } => mid,
-            other => panic!("unexpected: {other:?}"),
-        };
-        println!("[ipc] Published MID: {mid_str}");
-
-        // After publish, network-publish EXITS — only the daemon stays alive.
-
         // ── Node B daemon ─────────────────────────────────────────────────────
+        // Brought up and connected to A BEFORE A publishes, so that the daemon's
+        // network_default publish policy (>=1 distinct remote holder) can be
+        // satisfied by B acknowledging a shard copy.
         let dir_b = tempfile::tempdir().unwrap();
         let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
         let key_b = [0x99u8; 32];
@@ -1341,8 +1329,27 @@ async fn daemon_ipc_publish_get_roundtrip() {
         server_b.bootstrap_dht().await.unwrap();
         tokio::spawn(server_b.run());
 
-        // Wait for DHT convergence.
+        // Wait for the B → A connection to come up so a remote copy can land.
         tokio::time::sleep(Duration::from_millis(2000)).await;
+
+        // ── Publish via IPC client (network-publish behaviour) ────────────────
+        // Under the daemon default this now requires >=1 distinct remote holder;
+        // B is connected, so one shard copy is acknowledged and the publish
+        // succeeds.
+        let content = b"daemon IPC round-trip test payload";
+        let req = ControlRequest::Publish {
+            data: content.to_vec(),
+            data_shards: 2,
+            total_shards: 3,
+        };
+        let mid_str = match daemon_request(&dir_a_path, req).await.unwrap() {
+            ControlResponse::Published { mid } => mid,
+            other => panic!("unexpected: {other:?}"),
+        };
+        println!("[ipc] Published MID: {mid_str}");
+
+        // Give the DHT a moment to converge before B fetches.
+        tokio::time::sleep(Duration::from_millis(1000)).await;
 
         // ── Get via IPC client (network-get behaviour) ────────────────────────
         let req = ControlRequest::Get {
@@ -1398,18 +1405,9 @@ async fn daemon_ipc_get_to_file_roundtrip() {
         let dir_a_path = dir_a.path().to_owned();
         tokio::spawn(server_a.run());
 
-        let content = b"daemon IPC GetToFile round-trip test payload -- streamed to disk";
-        let req = ControlRequest::Publish {
-            data: content.to_vec(),
-            data_shards: 2,
-            total_shards: 3,
-        };
-        let mid_str = match daemon_request(&dir_a_path, req).await.unwrap() {
-            ControlResponse::Published { mid } => mid,
-            other => panic!("unexpected: {other:?}"),
-        };
-
         // ── Node B daemon ─────────────────────────────────────────────────────
+        // Connected to A before A publishes so the daemon's network_default
+        // policy (>=1 distinct remote holder) is satisfied by B.
         let dir_b = tempfile::tempdir().unwrap();
         let store_b = Arc::new(LocalShareStore::open(dir_b.path(), 100).unwrap());
         let key_b = [0xBBu8; 32];
@@ -1445,7 +1443,22 @@ async fn daemon_ipc_get_to_file_roundtrip() {
         server_b.bootstrap_dht().await.unwrap();
         tokio::spawn(server_b.run());
 
+        // Wait for the B → A connection so a remote copy can land.
         tokio::time::sleep(Duration::from_millis(2000)).await;
+
+        let content = b"daemon IPC GetToFile round-trip test payload -- streamed to disk";
+        let req = ControlRequest::Publish {
+            data: content.to_vec(),
+            data_shards: 2,
+            total_shards: 3,
+        };
+        let mid_str = match daemon_request(&dir_a_path, req).await.unwrap() {
+            ControlResponse::Published { mid } => mid,
+            other => panic!("unexpected: {other:?}"),
+        };
+
+        // Give the DHT a moment to converge before B fetches.
+        tokio::time::sleep(Duration::from_millis(1000)).await;
 
         // ── GetToFile via IPC client (network-get -o behaviour) ────────────────
         let out_dir = tempfile::tempdir().unwrap();
@@ -2240,6 +2253,63 @@ async fn dissolve_and_publish_strict_fails_without_enough_remote_peers() {
     .await;
 
     result.expect("dissolve_and_publish_strict_fails_without_enough_remote_peers timed out (15s)");
+}
+
+/// The daemon's own publish default (`PublishOptions::network_default`) must
+/// require at least one *distinct remote* holder acknowledgement before a
+/// publish is reported as done. With no peers connected at all, a publish made
+/// with that default must fail loudly with `InsufficientShares{need:1,got:0}`
+/// and publish no DHT record -- it must never report success for content that
+/// lives only on this device. The pre-2.1 `default()` (zero remote copies
+/// accepted) must still succeed in the same zero-peer situation, proving only
+/// the daemon default was tightened, not the backward-compatible lenient path.
+#[tokio::test(flavor = "multi_thread")]
+async fn dissolve_and_publish_network_default_fails_without_a_remote_copy() {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let result = timeout(Duration::from_secs(15), async {
+        let (coord_a, _store_a) = spawn_phase21_node(0xA4, 0).await;
+
+        let content = b"network-default publish with zero peers must not report success";
+        let params = DissolutionParams {
+            data_shards: 2,
+            total_shards: 3,
+        };
+
+        // The daemon default: at least one distinct remote acknowledgement.
+        let result = coord_a
+            .dissolve_and_publish_with_options(content, params, PublishOptions::network_default())
+            .await;
+
+        match result {
+            Err(MiasmaError::InsufficientShares { need, got }) => {
+                // network_default asks for exactly one remote copy, and with no
+                // peers connected zero were acknowledged.
+                assert_eq!(need, 1, "network_default must require one remote copy");
+                assert_eq!(got, 0, "no peers were connected, so none acknowledged");
+            }
+            other => panic!(
+                "expected InsufficientShares{{need:1,got:0}} for a zero-peer \
+                 network-default publish, got: {other:?}"
+            ),
+        }
+
+        // The lenient (pre-2.1-compatible) default must still succeed in the
+        // exact same zero-peer situation -- only the daemon default was
+        // tightened, the backward-compatible path is unchanged.
+        let mid = coord_a
+            .dissolve_and_publish(content, params)
+            .await
+            .expect("lenient (default) publish must still succeed with zero peers connected");
+        assert_ne!(mid.as_bytes(), &[0u8; 32]);
+
+        coord_a.shutdown().await;
+    })
+    .await;
+
+    result
+        .expect("dissolve_and_publish_network_default_fails_without_a_remote_copy timed out (15s)");
 }
 
 // Note: the inbound `Store` authorization gate itself (unverified peer
