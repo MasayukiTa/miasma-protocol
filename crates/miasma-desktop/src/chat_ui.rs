@@ -1498,6 +1498,7 @@ impl ChatUi {
 
     /// Turn a pressed call action into the matching request and local state change. Shared by the
     /// call window; kept as its own method so the mapping lives in one place.
+    #[cfg(feature = "pqc")]
     fn apply_call_action(&mut self, pressed: Option<CallAction>) {
         use miasma_core::chat::ipc::CallRequest;
         match pressed {
