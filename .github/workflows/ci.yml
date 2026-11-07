@@ -74,7 +74,7 @@ jobs:
       # not-delivered verdict are actually exercised, not green by never
       # running. Platform-neutral (pure simulator, no network).
       - name: Test mailbox custody (private and directed invite)
-        run: cargo test -p miasma-core --lib --locked -- chat::mailbox::
+        run: cargo test -p miasma-core --lib --locked -- "chat::mailbox::"
 
       # The history hand-over wire test (ADR-012) is named here explicitly so a
       # regression in it fails this job by name, not only through the
@@ -146,6 +146,7 @@ jobs:
       - name: Test desktop and check CLI without the hybrid feature
         run: |
           cargo test -p miasma-desktop --no-default-features --locked --bin miasma-desktop -- the_chat_protection_radios
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo check -p miasma-cli --no-default-features --locked
 
       # The bridge's tests were only ever built, never run, so its entire
@@ -167,10 +168,10 @@ jobs:
 
       # The CLI unit tests were only ever built, never run, so the
       # offline-check self-check verdict logic (pure, no network) was
-      # invisible to CI. Run the library tests here where the CLI already
+      # invisible to CI. Run the binary unit tests here where the CLI already
       # builds. Platform-neutral (no network, no feature flags).
       - name: Test CLI
-        run: cargo test -p miasma-cli --locked --lib
+        run: cargo test -p miasma-cli --locked --bin miasma
 
       - name: Build CLI
         run: cargo build -p miasma-cli --locked

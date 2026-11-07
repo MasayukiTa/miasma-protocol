@@ -2900,7 +2900,7 @@ async fn cmd_network_publish(
 
     let id = match daemon_request(
         data_dir,
-        ControlRequest::TransferStartPublish {
+        ControlRequest::TransferStartNetworkPublish {
             file_path: abs_path.to_string_lossy().into_owned(),
             data_shards: data_shards as u8,
             total_shards: total_shards as u8,
