@@ -156,6 +156,13 @@ jobs:
       - name: Test root key wrap
         run: cargo test -p miasma-core --lib --locked -- "root_key::"
 
+      # The CLI unit tests were only ever built, never run, so the
+      # offline-check self-check verdict logic (pure, no network) was
+      # invisible to CI. Run the library tests here where the CLI already
+      # builds. Platform-neutral (no network, no feature flags).
+      - name: Test CLI
+        run: cargo test -p miasma-cli --locked --lib
+
       - name: Build CLI
         run: cargo build -p miasma-cli --locked
 
