@@ -632,6 +632,36 @@ pub struct PushConfig {
     /// at once each pace to this value independently.
     #[serde(default)]
     pub max_send_kib_per_sec: u32,
+    /// Hold end-to-end encrypted *files* on disk for trusted contacts who are
+    /// offline, so a sender can deposit a file and go offline and the recipient
+    /// fetches it later (default off, like chat custody). When on, this node
+    /// answers the custody verbs for the contacts it trusts against a
+    /// disk-backed, quota-bounded store. What is held is ciphertext only.
+    #[serde(default)]
+    pub file_custody_enabled: bool,
+    /// Total bytes a file holder keeps across every depositor (default 256
+    /// MiB). Chosen to hold one 64 MiB file comfortably with room for more
+    /// without letting the store grow without bound; a hard ceiling of 2 GiB
+    /// applies on top so settings cannot fill the disk.
+    #[serde(default = "default_file_custody_total_bytes")]
+    pub file_custody_total_bytes: u64,
+    /// Bytes one depositor may use of that total (default 128 MiB). Half the
+    /// default total, so a single contact cannot take it all and still has room
+    /// for a 64 MiB file.
+    #[serde(default = "default_file_custody_per_depositor_bytes")]
+    pub file_custody_per_depositor_bytes: u64,
+    /// How long a held file item is kept before it expires, in milliseconds
+    /// (default 14 days). Long enough for a recipient who is away for a
+    /// fortnight to still collect, short enough that abandoned deposits do not
+    /// linger; a hard ceiling of 30 days applies.
+    #[serde(default = "default_file_custody_ttl_ms")]
+    pub file_custody_ttl_ms: u64,
+    /// Holder acknowledgements required before a file deposit counts as
+    /// "deposited" and the sender may go offline (1-8, default 1). With one
+    /// holder a single acknowledgement is enough; raise it to require a file be
+    /// held by several holders before the sender leaves.
+    #[serde(default = "default_file_custody_threshold")]
+    pub file_custody_threshold: usize,
 }
 
 pub const DEFAULT_PUSH_PART_RETENTION_DAYS: u64 = 7;
@@ -659,6 +689,23 @@ fn default_push_part_retention_days() -> u64 {
     DEFAULT_PUSH_PART_RETENTION_DAYS
 }
 
+pub const DEFAULT_FILE_CUSTODY_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+pub const DEFAULT_FILE_CUSTODY_PER_DEPOSITOR_BYTES: u64 = 128 * 1024 * 1024;
+pub const DEFAULT_FILE_CUSTODY_TTL_MS: u64 = 14 * 86_400_000;
+pub const DEFAULT_FILE_CUSTODY_THRESHOLD: usize = 1;
+fn default_file_custody_total_bytes() -> u64 {
+    DEFAULT_FILE_CUSTODY_TOTAL_BYTES
+}
+fn default_file_custody_per_depositor_bytes() -> u64 {
+    DEFAULT_FILE_CUSTODY_PER_DEPOSITOR_BYTES
+}
+fn default_file_custody_ttl_ms() -> u64 {
+    DEFAULT_FILE_CUSTODY_TTL_MS
+}
+fn default_file_custody_threshold() -> usize {
+    DEFAULT_FILE_CUSTODY_THRESHOLD
+}
+
 impl Default for PushConfig {
     fn default() -> Self {
         Self {
@@ -670,6 +717,11 @@ impl Default for PushConfig {
             retry_window_hours: DEFAULT_PUSH_RETRY_WINDOW_HOURS,
             stall_timeout_secs: DEFAULT_PUSH_STALL_SECS,
             max_send_kib_per_sec: 0,
+            file_custody_enabled: false,
+            file_custody_total_bytes: DEFAULT_FILE_CUSTODY_TOTAL_BYTES,
+            file_custody_per_depositor_bytes: DEFAULT_FILE_CUSTODY_PER_DEPOSITOR_BYTES,
+            file_custody_ttl_ms: DEFAULT_FILE_CUSTODY_TTL_MS,
+            file_custody_threshold: DEFAULT_FILE_CUSTODY_THRESHOLD,
         }
     }
 }

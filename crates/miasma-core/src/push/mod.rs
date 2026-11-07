@@ -5,7 +5,9 @@
 //! `miasma/push/1`); identity is the endpoint ID proven by the handshake.
 
 pub mod contact;
+pub mod deposit;
 pub mod disk;
+pub mod file_holder;
 pub mod ipc;
 pub mod outbox;
 pub mod pacer;
