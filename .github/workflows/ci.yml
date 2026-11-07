@@ -67,6 +67,15 @@ jobs:
       - name: Test miasma-core
         run: cargo test -p miasma-core --tests --locked
 
+      # The mailbox custody unit tests (chat::mailbox) live behind
+      # #[cfg(test)] and so run only under --lib, which the --tests line
+      # above does not cover. Name them here so the directed-invite and
+      # private-message custody round trips, tag separation, and the
+      # not-delivered verdict are actually exercised, not green by never
+      # running. Platform-neutral (pure simulator, no network).
+      - name: Test mailbox custody (private and directed invite)
+        run: cargo test -p miasma-core --lib --locked -- chat::mailbox::
+
       # The history hand-over wire test (ADR-012) is named here explicitly so a
       # regression in it fails this job by name, not only through the
       # auto-collected `--tests` run above. It is platform-neutral (no network,
