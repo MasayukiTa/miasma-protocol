@@ -170,7 +170,7 @@ fn sender_deposits_64mib_then_leaves_and_recipient_fetches() {
     let recipient = Identity::from_seed(&[22u8; 32]);
     let holder_id = [7u8; 32];
     let store = file_holder(&tmp.path().join("holder"), sender.id(), recipient.id());
-    let salt = [3u8; 16];
+    let salt: [u8; 16] = rand::random();
 
     // A real 64 MiB file on disk.
     let src_path = tmp.path().join("src.bin");
@@ -253,7 +253,7 @@ fn a_deposit_that_misses_the_threshold_is_not_reported_as_delivered() {
         &dh_secret(&[11u8; 32]),
         &sender.id(),
         &recipient.id(),
-        [4u8; 16],
+        rand::random(),
         &file[..],
         0,
         2,
