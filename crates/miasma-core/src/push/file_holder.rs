@@ -221,6 +221,10 @@ impl DiskFileCustody {
 }
 
 impl CustodyStore for DiskFileCustody {
+    fn trust(&self, id: [u8; 32]) {
+        DiskFileCustody::trust(self, id);
+    }
+
     fn deposit(
         &self,
         who: &[u8; 32],
