@@ -83,7 +83,7 @@ async fn network_publish_without_remote_holders_fails_instead_of_completing() {
         std::fs::write(&src, b"offline network publish").unwrap();
         let id = match daemon_request(
             &a.dir,
-            ControlRequest::TransferStartPublish {
+            ControlRequest::TransferStartNetworkPublish {
                 file_path: src.to_string_lossy().into_owned(),
                 data_shards: 2,
                 total_shards: 3,

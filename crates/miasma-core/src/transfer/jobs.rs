@@ -230,6 +230,7 @@ impl TransferRegistry {
         password: Option<Zeroizing<String>>,
         restart: bool,
         object_format: crate::config::ObjectFormat,
+        network_publish: bool,
     ) -> String {
         let id = send_id(&file_path);
         let progress = {
@@ -247,7 +248,11 @@ impl TransferRegistry {
         let spec = PublishSpec {
             file_path,
             params,
-            options: PublishOptions::network_default(),
+            options: if network_publish {
+                PublishOptions::network_default()
+            } else {
+                PublishOptions::default()
+            },
             password,
             journal_dir: Some(self.journal_dir()),
             restart,

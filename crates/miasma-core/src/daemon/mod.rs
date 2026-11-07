@@ -1292,6 +1292,7 @@ async fn process_request_inner(
             return ControlResponse::Error(format!("output path rejected: {e}"));
         }
     }
+    let network_publish = matches!(&req, ControlRequest::TransferStartNetworkPublish { .. });
     match req {
         ControlRequest::Publish {
             data,
@@ -1475,6 +1476,14 @@ async fn process_request_inner(
             password,
             restart,
             object_format,
+        }
+        | ControlRequest::TransferStartNetworkPublish {
+            file_path,
+            data_shards,
+            total_shards,
+            password,
+            restart,
+            object_format,
         } => {
             let password = password.map(Zeroizing::new);
             let params = DissolutionParams {
@@ -1493,6 +1502,7 @@ async fn process_request_inner(
                 password,
                 restart,
                 object_format,
+                network_publish,
             );
             ControlResponse::TransferStarted { id }
         }
