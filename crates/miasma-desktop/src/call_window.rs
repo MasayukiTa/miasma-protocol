@@ -159,7 +159,8 @@ fn draw_contents(
     let safety_height = 72.0;
     let avail = ui.available_size();
     let video_height = (avail.y - controls_height - safety_height).max(48.0);
-    let (area, _) = ui.allocate_exact_size(egui::vec2(avail.x, video_height), egui::Sense::hover());
+    let (area, video_resp) = ui.allocate_exact_size(egui::vec2(avail.x, video_height), egui::Sense::hover());
+    video_resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Image, c.a11y_video));
     ui.painter().rect_filled(area, 0.0, egui::Color32::BLACK);
     if let Some((texture, size)) = video {
         let rect = fit_video_rect(area, size);

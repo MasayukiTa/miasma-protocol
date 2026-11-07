@@ -701,6 +701,12 @@ pub(crate) mod inventory {
             role: Role::Named,
             names: |l| vec![locale::chat_strings(l).state_read],
         },
+        Entry {
+            file: "call_window.rs",
+            func: "draw_contents",
+            role: Role::Named,
+            names: |l| vec![locale::call_strings(l).a11y_video],
+        },
     ];
 
     /// Calls that put a hand-painted rectangle in the layout.

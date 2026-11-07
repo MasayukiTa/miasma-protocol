@@ -3437,7 +3437,7 @@ call_strings! {
     // The separate call window: a line that says closing the window ends the call, the marker
     // shown on the header Call button while a call exists, and the labels for the small tile that
     // shows what you are sending (your camera, or your screen) while it is active.
-    window_hint, in_a_call, self_camera_tile, self_screen_tile,
+    window_hint, in_a_call, self_camera_tile, self_screen_tile, a11y_video,
 }
 
 pub fn call_strings(locale: Locale) -> &'static CallStrings {
@@ -3493,6 +3493,7 @@ static CALL_EN: CallStrings = CallStrings {
     in_a_call: "In a call",
     self_camera_tile: "Your camera",
     self_screen_tile: "Sharing your screen",
+    a11y_video: "Video from the other person",
 };
 
 static CALL_JA: CallStrings = CallStrings {
@@ -3540,6 +3541,7 @@ static CALL_JA: CallStrings = CallStrings {
     in_a_call: "通話中",
     self_camera_tile: "自分のカメラ",
     self_screen_tile: "自分の画面を共有中",
+    a11y_video: "相手の映像",
 };
 
 // zh-CN: a first translation; to be reviewed by a native speaker before it is called finished.
@@ -3587,6 +3589,7 @@ static CALL_ZH_CN: CallStrings = CallStrings {
     in_a_call: "通话中",
     self_camera_tile: "你的摄像头",
     self_screen_tile: "正在共享你的屏幕",
+    a11y_video: "对方的视频",
 };
 
 // ─── Logs (memory-only logging, opt-in diagnostic logging) ──────────────────
