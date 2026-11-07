@@ -1312,11 +1312,15 @@ async fn process_request_inner(
                     &queue,
                     &store,
                     &listen_addrs,
+                    crate::network::PublishOptions::network_default(),
                 ))
                 .await
             {
                 Ok(mid) => ControlResponse::Published { mid },
-                Err(e) => ControlResponse::Error(e.to_string()),
+                // Route through the same mapper the file path uses so a
+                // zero-remote-ack publish surfaces as "stored only on this
+                // device" rather than a raw InsufficientShares debug string.
+                Err(e) => ControlResponse::Error(publish_error_text(e)),
             }
         }
 
@@ -2412,8 +2416,20 @@ async fn process_directed_send(
         data_shards: 10,
         total_shards: 20,
     };
-    let mid_str =
-        publish_content(&protected_data, params, coord, queue, store, listen_addrs).await?;
+    // Directed send keeps its own legacy best-effort content publish: its
+    // "sent" decision is the invite-deposit acknowledgement below, handled by
+    // the directed-send path (separate scope), not the remote-shard ACK count.
+    // Passing the min=0 default preserves that behaviour unchanged.
+    let mid_str = publish_content(
+        &protected_data,
+        params,
+        coord,
+        queue,
+        store,
+        listen_addrs,
+        crate::network::PublishOptions::default(),
+    )
+    .await?;
 
     // Finalize envelope with the MID.
     directed::finalize_envelope(&mut envelope, &envelope_key, &mid_str, 10, 20)?;
@@ -2683,28 +2699,34 @@ async fn publish_content(
     params: DissolutionParams,
     coord: &MiasmaCoordinator,
     queue: &Arc<Mutex<ReplicationQueue>>,
-    store: &LocalShareStore,
-    listen_addrs: &[String],
+    _store: &LocalShareStore,
+    _listen_addrs: &[String],
+    options: crate::network::PublishOptions,
 ) -> Result<String, MiasmaError> {
     // Dissolve into shares.
     let (mid, shares) = dissolve(data, params)?;
 
-    // Store shares locally.
-    for share in &shares {
-        store.put(share)?;
-    }
+    // Store the shares locally AND try to push distinct shards to real remote
+    // holders, exactly like the file publish path. `remote_distinct` is the
+    // number of *distinct* shards a remote peer acknowledged holding; the
+    // returned `locations` already reflect remote placements where they
+    // succeeded. Previously this path stored every shard only on this node,
+    // never attempted remote distribution, and published unconditionally --
+    // so an offline publish reported success even though nothing left the
+    // device.
+    let (locations, remote_distinct) =
+        coord.store_locally_and_distribute(shares, params).await?;
 
-    // Build the DhtRecord (needed both for DHT PUT and the replication queue).
-    let peer_bytes = coord.peer_id().to_bytes();
-    let locations: Vec<ShardLocation> = shares
-        .iter()
-        .map(|s| ShardLocation {
-            peer_id_bytes: peer_bytes.clone(),
-            shard_index: s.slot_index,
-            segment_index: s.segment_index,
-            addrs: listen_addrs.to_vec(),
-        })
-        .collect();
+    // Enforce the publish policy BEFORE announcing. Under the daemon default
+    // (`PublishOptions::network_default()`, min = 1) a publish with zero
+    // distinct remote acknowledgements fails with `InsufficientShares { got: 0 }`
+    // instead of silently publishing an on-this-device-only record. The daemon
+    // maps that to the "stored only on this device" message (see
+    // `publish_error_text`). Callers that must preserve the legacy best-effort
+    // behaviour pass `PublishOptions::default()` (min = 0).
+    if let Err((need, got)) = options.accepts(remote_distinct) {
+        return Err(MiasmaError::InsufficientShares { need, got });
+    }
 
     let record = DhtRecord {
         mid_digest: *mid.as_bytes(),
@@ -3057,5 +3079,89 @@ mod large_file_stream_integrity_tests {
         let mut hasher = blake3::Hasher::new();
         hasher.update(b"tampered");
         assert_ne!(finalize_streamed_mid(hasher, params), expected);
+    }
+}
+
+#[cfg(test)]
+mod publish_content_remote_ack_tests {
+    //! The raw-data publish path (`ControlRequest::Publish` -> `publish_content`)
+    //! must honour the same "at least one distinct remote holder" default that
+    //! the file publish path does. These tests stand up a single real node with
+    //! NO peers, so `store_locally_and_distribute` can never record a remote
+    //! acknowledgement (remote_distinct == 0), and assert:
+    //!   - under the daemon default (`network_default`, min = 1) the publish is
+    //!     reported as a failure (`InsufficientShares { got: 0 }`), never as a
+    //!     success, and
+    //!   - under the opt-in legacy default (`PublishOptions::default`, min = 0)
+    //!     the same offline publish still succeeds (back-compat preserved).
+    use super::*;
+
+    async fn single_offline_node(
+        dir: &std::path::Path,
+    ) -> (MiasmaCoordinator, Arc<Mutex<ReplicationQueue>>, Arc<crate::LocalShareStore>) {
+        crate::state_crypto::provision_master_key(dir).unwrap();
+        let store = Arc::new(crate::LocalShareStore::open(dir, 1000).unwrap());
+        let queue = Arc::new(Mutex::new(ReplicationQueue::load_or_create(dir).unwrap()));
+        let key: [u8; 32] = rand::random();
+        let mut node =
+            crate::MiasmaNode::new(&key, crate::NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+        let addrs = node.collect_listen_addrs(400).await;
+        let coord = MiasmaCoordinator::start(node, store.clone(), vec![addrs[0].to_string()]).await;
+        (coord, queue, store)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn raw_publish_default_requires_a_remote_ack_and_reports_failure_when_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let (coord, queue, store) = single_offline_node(dir.path()).await;
+        let listen = coord.listen_addrs().to_vec();
+
+        let result = publish_content(
+            b"offline raw publish must not be reported as done",
+            DissolutionParams::default(),
+            &coord,
+            &queue,
+            &store,
+            &listen,
+            crate::network::PublishOptions::network_default(),
+        )
+        .await;
+
+        match result {
+            Err(MiasmaError::InsufficientShares { need, got }) => {
+                assert_eq!(got, 0, "no peers means zero remote acknowledgements");
+                assert_eq!(need, 1, "the daemon default must demand one remote copy");
+            }
+            other => panic!(
+                "offline raw publish under the default must fail with InsufficientShares, got: {other:?}"
+            ),
+        }
+
+        // And the user-facing text is the "stored only on this device" message.
+        let msg = publish_error_text(MiasmaError::InsufficientShares { need: 1, got: 0 });
+        assert!(msg.contains("stored only on this device"), "got: {msg}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn raw_publish_legacy_default_still_succeeds_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let (coord, queue, store) = single_offline_node(dir.path()).await;
+        let listen = coord.listen_addrs().to_vec();
+
+        let result = publish_content(
+            b"legacy best-effort publish still returns a mid",
+            DissolutionParams::default(),
+            &coord,
+            &queue,
+            &store,
+            &listen,
+            crate::network::PublishOptions::default(),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "legacy min=0 publish must still succeed offline, got: {result:?}"
+        );
     }
 }
