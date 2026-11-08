@@ -547,21 +547,30 @@ where
                 },
             )
         };
+        // Publish the newest decoded remote picture for the UI. A driver hands
+        // back at most one picture per tick; the store gives it the next counter
+        // so a reader sees only new frames. The remote view carries the peer's
+        // camera video OR the peer's shared screen: when the peer sends camera
+        // its picture is shown, and when the peer sends only a shared screen the
+        // screen picture is shown instead. The camera takes precedence when both
+        // arrive in the same tick. Taking from the screen driver each tick also
+        // clears its slot, so a stale screen frame is never shown over a live
+        // camera. Earlier only the camera stream fed the view and the screen
+        // stream's decoded frames were discarded, so a peer that shared only its
+        // screen was never visible on the receiving side.
+        let camera_picture = video.as_mut().and_then(|d| d.take_decoded_picture());
+        let screen_picture = screen.as_mut().and_then(|d| d.take_decoded_picture());
+        if let Some(picture) = remote_picture_to_publish(camera_picture, screen_picture) {
+            let RawPicture {
+                width,
+                height,
+                pixels,
+            } = picture;
+            // The JPEG decoder emits I420; the desktop frame store expects RGBA.
+            let pixels = i420_to_rgba(width, height, &pixels).unwrap_or(pixels);
+            store_remote_frame(&remote_frames, width, height, pixels);
+        }
         if let Some(driver) = video.as_mut() {
-            // Publish the newest decoded remote picture for the UI. The
-            // camera driver hands back at most one picture per tick; the
-            // store gives it the next counter so a reader sees only new
-            // frames. Only the camera stream feeds the remote view; the
-            // screen stream's decoded frames are discarded.
-            if let Some(picture) = driver.take_decoded_picture() {
-                let RawPicture {
-                    width,
-                    height,
-                    pixels,
-                } = picture;
-                let pixels = i420_to_rgba(width, height, &pixels).unwrap_or(pixels);
-                store_remote_frame(&remote_frames, width, height, pixels);
-            }
             stats
                 .video_frames_sent
                 .store(driver.frames_sent, Ordering::Relaxed);
@@ -582,6 +591,20 @@ where
             return false;
         }
     }
+}
+
+/// Choose which decoded remote picture to publish to the UI for one tick, given
+/// the camera driver's latest picture and the screen driver's latest picture.
+///
+/// The remote view carries the peer's camera video OR the peer's shared screen.
+/// A camera picture is preferred when both are present in the same tick; the
+/// screen picture is used when there is no camera picture (the peer is sharing
+/// only its screen). `None` when neither driver produced a picture this tick.
+fn remote_picture_to_publish(
+    camera: Option<RawPicture>,
+    screen: Option<RawPicture>,
+) -> Option<RawPicture> {
+    camera.or(screen)
 }
 
 // The JPEG decoder emits I420, while the desktop frame store expects RGBA.
@@ -656,5 +679,41 @@ mod mute_tests {
         assert!(source.next_frame() == Some([0; FRAME_PLAINTEXT_LEN]));
         muted.store(false, Ordering::SeqCst);
         assert!(source.next_frame() == Some([1; FRAME_PLAINTEXT_LEN]));
+    }
+}
+
+#[cfg(test)]
+mod remote_picture_tests {
+    use super::*;
+
+    fn picture(width: u16) -> RawPicture {
+        // A width distinguishes the camera picture from the screen picture; the
+        // pixel bytes are a short fixed pattern whose content is not asserted on.
+        RawPicture {
+            width,
+            height: 1,
+            pixels: vec![0, 1, 2, 3],
+        }
+    }
+
+    #[test]
+    fn the_camera_picture_is_preferred_when_both_arrive() {
+        // Camera width 10, screen width 20: with both present the camera wins.
+        let chosen = remote_picture_to_publish(Some(picture(10)), Some(picture(20)));
+        assert_eq!(chosen, Some(picture(10)));
+    }
+
+    #[test]
+    fn the_screen_picture_is_shown_when_there_is_no_camera_picture() {
+        // The peer shares only its screen: no camera picture this tick, so the
+        // screen picture is published and the remote screen share becomes
+        // visible on the receiving side (the fix for item 4).
+        let chosen = remote_picture_to_publish(None, Some(picture(20)));
+        assert_eq!(chosen, Some(picture(20)));
+    }
+
+    #[test]
+    fn nothing_is_published_when_neither_driver_produced_a_picture() {
+        assert_eq!(remote_picture_to_publish(None, None), None);
     }
 }
