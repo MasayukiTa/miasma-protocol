@@ -277,8 +277,12 @@ pub fn deposit_file<R: std::io::Read>(
 
     // Holders that have acknowledged *every* item so far. Start with all the
     // offered holders; intersect after each item with the ones that took it.
-    let mut surviving: Vec<[u8; 32]> = holders.iter().copied().filter(|h| h != recipient).collect();
-    surviving.dedup();
+    let mut surviving: Vec<[u8; 32]> = Vec::new();
+    for holder in holders {
+        if holder != recipient && !surviving.contains(holder) {
+            surviving.push(*holder);
+        }
+    }
 
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; CHUNK_PLAINTEXT];
@@ -657,6 +661,31 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, DepositError::NotDeposited { held: 1, needed: 2 });
+    }
+
+    #[test]
+    fn duplicate_holder_ids_do_not_satisfy_threshold() {
+        let (sender, recipient) = ids();
+        let a = [7u8; 32];
+        let b = [8u8; 32];
+        let tx = InProcess {
+            holders: vec![
+                (a, file_holder(sender.id(), recipient.id())),
+                (b, file_holder(sender.id(), recipient.id())),
+            ],
+            who: sender.id(),
+        };
+        let err = deposit_file(
+            &tx,
+            &[a, b, a],
+            &recipient.id(),
+            rand::random(),
+            &b"data"[..],
+            0,
+            3,
+        )
+        .unwrap_err();
+        assert_eq!(err, DepositError::NotDeposited { held: 2, needed: 3 });
     }
 
     #[test]
