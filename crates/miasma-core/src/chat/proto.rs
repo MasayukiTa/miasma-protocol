@@ -63,6 +63,83 @@ pub const CLOSE_RATE: u32 = 429;
 
 const KIND_TEXT: u8 = 1;
 const KIND_READ: u8 = 2;
+/// Reserved for a file deposit notice inside a sealed chat envelope.
+pub const KIND_FILE_DEPOSIT: u8 = 3;
+
+/// Metadata needed to retrieve a file from custody. The key must only travel
+/// inside an authenticated, encrypted chat envelope.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FileDepositNotice {
+    pub file_key: [u8; 32],
+    pub salt: [u8; 16],
+    pub manifest_id: [u8; 16],
+    pub holders: Vec<[u8; 32]>,
+    pub file_name: String,
+    pub size: u64,
+    pub sha256: [u8; 32],
+}
+
+impl FileDepositNotice {
+    /// Encode a bounded notice; at most eight holders are supported.
+    pub fn encode(&self) -> Result<Vec<u8>, ProtoError> {
+        let name = self.file_name.as_bytes();
+        if self.holders.is_empty() || self.holders.len() > 8 || name.is_empty() || name.len() > 255
+        {
+            return Err(ProtoError::Malformed("file deposit notice"));
+        }
+        let mut out = Vec::new();
+        out.push(KIND_FILE_DEPOSIT);
+        out.extend_from_slice(&self.file_key);
+        out.extend_from_slice(&self.salt);
+        out.extend_from_slice(&self.manifest_id);
+        out.push(self.holders.len() as u8);
+        for holder in &self.holders {
+            out.extend_from_slice(holder);
+        }
+        out.push(name.len() as u8);
+        out.extend_from_slice(name);
+        out.extend_from_slice(&self.size.to_be_bytes());
+        out.extend_from_slice(&self.sha256);
+        Ok(out)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtoError> {
+        let bad = |_| ProtoError::Malformed("file deposit notice");
+        let mut r = Rd::new(bytes);
+        if r.u8().map_err(bad)? != KIND_FILE_DEPOSIT {
+            return Err(ProtoError::Malformed("file deposit notice kind"));
+        }
+        let file_key = r.arr::<32>().map_err(bad)?;
+        let salt = r.arr::<16>().map_err(bad)?;
+        let manifest_id = r.arr::<16>().map_err(bad)?;
+        let count = r.u8().map_err(bad)? as usize;
+        if count == 0 || count > 8 {
+            return Err(ProtoError::Malformed("file deposit holders"));
+        }
+        let mut holders = Vec::with_capacity(count);
+        for _ in 0..count {
+            holders.push(r.arr::<32>().map_err(bad)?);
+        }
+        let len = r.u8().map_err(bad)? as usize;
+        if len == 0 {
+            return Err(ProtoError::Malformed("file deposit name"));
+        }
+        let file_name = std::str::from_utf8(r.bytes(len).map_err(bad)?)
+            .map_err(|_| ProtoError::Malformed("file deposit name"))?
+            .to_owned();
+        let size = r.u64().map_err(bad)?;
+        let sha256 = r.arr::<32>().map_err(bad)?;
+        Ok(Self {
+            file_key,
+            salt,
+            manifest_id,
+            holders,
+            file_name,
+            size,
+            sha256,
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProtoError {
@@ -446,6 +523,29 @@ impl Record {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_deposit_notice_round_trips_and_old_decoders_ignore_it() {
+        let notice = FileDepositNotice {
+            file_key: [1; 32],
+            salt: [2; 16],
+            manifest_id: [3; 16],
+            holders: vec![[4; 32], [5; 32]],
+            file_name: "example.txt".into(),
+            size: 123,
+            sha256: [6; 32],
+        };
+        let bytes = notice.encode().unwrap();
+        assert!(FileDepositNotice::decode(&bytes).unwrap() == notice);
+        // Record::decode models the existing peer's unknown-kind handling.
+        assert_eq!(
+            Record::decode(&bytes).unwrap(),
+            Record::Unknown(KIND_FILE_DEPOSIT)
+        );
+        for n in 0..bytes.len() {
+            assert!(FileDepositNotice::decode(&bytes[..n]).is_err());
+        }
+    }
 
     #[test]
     fn receipts_round_trip_and_reject_damage() {
