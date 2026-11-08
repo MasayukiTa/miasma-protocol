@@ -13,9 +13,9 @@
 //! ## What a holder learns
 //!
 //! Nothing a relay would not. Every chunk and the manifest are sealed under a
-//! key derived from the identities' X25519 shared secret and their established
-//! hybrid chat session key, so a holder stores
-//! ciphertext only and can never read the file. Deposits are bound to the
+//! fresh random key K. K is delivered to the recipient inside an end-to-end
+//! chat message (hybrid protected, custody-backed), so a holder never sees K.
+//! Deposits are bound to the
 //! recipient by [`RecipientTag`], exactly as a chat custody deposit is, and the
 //! item IDs are opaque.
 //!
@@ -38,9 +38,9 @@ use chacha20poly1305::{
     Tag, XChaCha20Poly1305, XNonce,
 };
 use hkdf::Hkdf;
+use rand::RngCore;
 use sha2::Sha256;
 
-use crate::chat::crypto::peer_dh_public;
 use crate::chat::mailbox::{
     client::{MailboxError, MailboxTransport},
     holder::DepositOutcome,
@@ -54,9 +54,7 @@ use crate::chat::mailbox::{
 /// enough that a single holder's per-item cap is never the limit.
 pub const CHUNK_PLAINTEXT: usize = 16 * 1024;
 
-/// Domain-separation label for the file-deposit key agreement. Distinct from
-/// every chat label so the same identity keys never derive the same key for a
-/// chat message and for a deposited file.
+/// Domain-separation label for the per-deposit file key.
 const DEPOSIT_KDF_LABEL: &[u8] = b"miasma/push/deposit/v1/filekey";
 /// Info string that binds a chunk's key/nonce to its index, so a chunk can
 /// never be decrypted as another index even under the same file key.
@@ -69,31 +67,13 @@ const NONCE_LEN: usize = 24;
 /// Poly1305 tag length.
 const TAG_LEN: usize = 16;
 
-/// A file key agreed from the two identities. Zeroed on drop by the caller
-/// keeping it in a `Zeroizing` if long-lived; here it lives only for one
-/// deposit or one fetch.
+/// A key derived from the random per-deposit key and salt.
 #[derive(Clone)]
 struct FileKey([u8; 32]);
 
 impl FileKey {
-    /// Derive the file key from the sender's and recipient's endpoint IDs and a
-    /// per-file salt. Both the shared X25519 secret and the established hybrid
-    /// session key are input key material; the salt binds
-    /// it to this file, and the direction is fixed (sender first) so the two
-    /// ends agree regardless of who derives it.
-    fn derive(
-        shared: &[u8; 32],
-        hybrid: &[u8; 32],
-        sender: &[u8; 32],
-        recipient: &[u8; 32],
-        salt: &[u8; 16],
-    ) -> Self {
-        let mut ikm = zeroize::Zeroizing::new(Vec::with_capacity(32 * 4));
-        ikm.extend_from_slice(shared);
-        ikm.extend_from_slice(hybrid);
-        ikm.extend_from_slice(sender);
-        ikm.extend_from_slice(recipient);
-        let hk = Hkdf::<Sha256>::new(Some(salt), &ikm);
+    fn derive(input: &[u8; 32], salt: &[u8; 16]) -> Self {
+        let hk = Hkdf::<Sha256>::new(Some(salt), input);
         let mut key = [0u8; 32];
         hk.expand(DEPOSIT_KDF_LABEL, &mut key)
             .expect("32 is a valid HKDF-SHA256 output length");
@@ -154,12 +134,6 @@ fn open(
 /// A problem met while depositing or fetching.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DepositError {
-    /// The two identities did not agree a shared secret (a bad endpoint ID).
-    #[error("cannot agree a key with this recipient")]
-    BadRecipient,
-    /// No established hybrid session key is available for this contact.
-    #[error("an established hybrid session with this contact is required for file deposit")]
-    HybridSessionRequired,
     /// Not enough holders acknowledged the deposit; the file is NOT delivered.
     #[error("only {held} of {needed} holders took the deposit")]
     NotDeposited { held: usize, needed: usize },
@@ -249,33 +223,36 @@ impl Manifest {
 }
 
 /// What a deposit achieved.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct DepositReceipt {
     /// The manifest the recipient will fetch.
     pub manifest: Manifest,
+    /// Opaque identifier of the deposited manifest.
+    pub manifest_id: ItemId,
+    /// Random key to deliver to the recipient over the protected chat.
+    pub file_key: [u8; 32],
     /// Holders that acknowledged every item (manifest and all chunks).
     pub held_by: Vec<[u8; 32]>,
 }
 
-/// Agree the shared X25519 secret between the local identity secret scalar and
-/// the peer endpoint id. `my_dh_secret` is the 32-byte X25519 scalar of this
-/// node (from `Identity`); `peer` is the peer's ed25519 endpoint id.
-fn agree(my_dh_secret: &[u8; 32], peer: &[u8; 32]) -> Result<[u8; 32], DepositError> {
-    let peer_x = peer_dh_public(peer).map_err(|_| DepositError::BadRecipient)?;
-    let secret = x25519_dalek::StaticSecret::from(*my_dh_secret);
-    let shared = secret.diffie_hellman(&x25519_dalek::PublicKey::from(peer_x));
-    Ok(shared.to_bytes())
+impl std::fmt::Debug for DepositReceipt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DepositReceipt")
+            .field("manifest", &self.manifest)
+            .field("manifest_id", &self.manifest_id)
+            .field("file_key", &"[REDACTED]")
+            .field("held_by", &self.held_by)
+            .finish()
+    }
 }
 
 /// Deposit the plaintext read from `src` as an end-to-end encrypted file for
 /// `recipient`, using `holders` (in order) and requiring at least `threshold`
 /// of them to acknowledge every item.
 ///
-/// `my_dh_secret` is this node's X25519 secret scalar (from `Identity`);
-/// `sender`/`recipient` are the two ed25519 endpoint ids. `salt` binds this
-/// deposit to this file; pass fresh random bytes per file. `hybrid_key` must be
-/// the active chat session key for this contact, obtained from `PqState::seal_key`
-/// for the current chat session. Without it no holder is contacted.
+/// `salt` binds this deposit to this file; pass fresh random bytes per file.
+/// The receipt contains the manifest ID and the random key for delivery to the
+/// recipient through the protected chat.
 ///
 /// Memory is bounded: at most one chunk (`CHUNK_PLAINTEXT` bytes) is held at a
 /// time regardless of file size. On success every chunk and the manifest are
@@ -286,19 +263,16 @@ fn agree(my_dh_secret: &[u8; 32], peer: &[u8; 32]) -> Result<[u8; 32], DepositEr
 pub fn deposit_file<R: std::io::Read>(
     transport: &dyn MailboxTransport,
     holders: &[[u8; 32]],
-    my_dh_secret: &[u8; 32],
-    hybrid_key: Option<&[u8; 32]>,
-    sender: &[u8; 32],
     recipient: &[u8; 32],
     salt: [u8; 16],
     mut src: R,
     now_ms: u64,
     threshold: usize,
 ) -> Result<DepositReceipt, DepositError> {
-    let hybrid_key = hybrid_key.ok_or(DepositError::HybridSessionRequired)?;
     let needed = threshold.max(1);
-    let shared = agree(my_dh_secret, recipient)?;
-    let fk = FileKey::derive(&shared, hybrid_key, sender, recipient, &salt);
+    let mut file_key = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut file_key);
+    let fk = FileKey::derive(&file_key, &salt);
     let tag = RecipientTag::for_recipient(recipient);
 
     // Holders that have acknowledged *every* item so far. Start with all the
@@ -347,6 +321,8 @@ pub fn deposit_file<R: std::io::Read>(
 
     Ok(DepositReceipt {
         manifest,
+        manifest_id: mid,
+        file_key,
         held_by: surviving,
     })
 }
@@ -383,26 +359,20 @@ fn deposit_one(
 /// Fetch, verify, decrypt and reassemble a file deposited by [`deposit_file`]
 /// into `sink`, writing each chunk before fetching the next (bounded memory).
 ///
-/// `my_dh_secret` is the recipient's X25519 secret scalar; `sender`/`recipient`
-/// are the two endpoint ids; `salt` is the per-file salt from the manifest's
-/// id space (the caller learns it from the deposit side or by trying the
-/// manifest id). `hybrid_key` must be the corresponding established chat session
-/// key, retained until collection. Returns the verified [`Manifest`] on success.
+/// `file_key` is the random key delivered by the sender; `recipient` is the
+/// endpoint id and `salt` is the per-file salt. Returns the verified
+/// [`Manifest`] on success.
 #[allow(clippy::too_many_arguments)]
 pub fn fetch_file<W: std::io::Write>(
     transport: &dyn MailboxTransport,
     holders: &[[u8; 32]],
-    my_dh_secret: &[u8; 32],
-    hybrid_key: Option<&[u8; 32]>,
-    sender: &[u8; 32],
+    file_key: &[u8; 32],
     recipient: &[u8; 32],
     salt: [u8; 16],
     mut sink: W,
     now_ms: u64,
 ) -> Result<Manifest, DepositError> {
-    let hybrid_key = hybrid_key.ok_or(DepositError::HybridSessionRequired)?;
-    let shared = agree(my_dh_secret, sender)?;
-    let fk = FileKey::derive(&shared, hybrid_key, sender, recipient, &salt);
+    let fk = FileKey::derive(file_key, &salt);
     let tag = RecipientTag::for_recipient(recipient);
 
     let mid = item_id(0, KIND_MANIFEST, &salt);
@@ -580,14 +550,6 @@ mod tests {
         )
     }
 
-    /// We need the X25519 secret scalar of each identity to agree the file key.
-    /// `Identity` exposes its public DH key but not the secret, so the test
-    /// derives the scalar the same way `Identity::from_seed` does.
-    fn dh_secret(seed: &[u8; 32]) -> [u8; 32] {
-        use ed25519_dalek::SigningKey;
-        SigningKey::from_bytes(seed).to_scalar_bytes()
-    }
-
     #[test]
     fn sender_deposits_then_goes_away_and_recipient_receives_later() {
         let (sender, recipient) = ids();
@@ -608,9 +570,6 @@ mod tests {
             deposit_file(
                 &tx,
                 &[holder_id],
-                &dh_secret(&[11u8; 32]),
-                Some(&[42u8; 32]),
-                &sender.id(),
                 &recipient.id(),
                 salt,
                 &file[..],
@@ -621,6 +580,7 @@ mod tests {
             // tx is dropped here: the sender is gone.
         };
         assert_eq!(receipt.held_by, vec![holder_id]);
+        assert_eq!(receipt.manifest_id, item_id(0, KIND_MANIFEST, &salt));
         assert_eq!(receipt.manifest.chunks, 4);
         assert_eq!(receipt.manifest.size as usize, file.len());
 
@@ -633,9 +593,7 @@ mod tests {
         let m = fetch_file(
             &rx,
             &[holder_id],
-            &dh_secret(&[22u8; 32]),
-            Some(&[42u8; 32]),
-            &sender.id(),
+            &receipt.file_key,
             &recipient.id(),
             salt,
             &mut out,
@@ -644,6 +602,21 @@ mod tests {
         .expect("recipient fetches after the sender left");
         assert_eq!(out, file);
         assert_eq!(m.file_hash, receipt.manifest.file_hash);
+    }
+
+    #[test]
+    fn each_deposit_gets_a_fresh_key() {
+        let (sender, recipient) = ids();
+        let holder = [7u8; 32];
+        let tx = InProcess {
+            holders: vec![(holder, file_holder(sender.id(), recipient.id()))],
+            who: sender.id(),
+        };
+        let first =
+            deposit_file(&tx, &[holder], &recipient.id(), [1; 16], &b"file"[..], 0, 1).unwrap();
+        let second =
+            deposit_file(&tx, &[holder], &recipient.id(), [2; 16], &b"file"[..], 0, 1).unwrap();
+        assert_ne!(first.file_key, second.file_key);
     }
 
     #[test]
@@ -660,9 +633,6 @@ mod tests {
         let err = deposit_file(
             &tx,
             &[holder_id],
-            &dh_secret(&[11u8; 32]),
-            Some(&[42u8; 32]),
-            &sender.id(),
             &recipient.id(),
             rand::random(),
             &file[..],
@@ -685,9 +655,6 @@ mod tests {
         let err = deposit_file(
             &tx,
             &[[7u8; 32]],
-            &dh_secret(&[11u8; 32]),
-            Some(&[42u8; 32]),
-            &sender.id(),
             &recipient.id(),
             rand::random(),
             &file[..],
@@ -699,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_recipient_key_cannot_open_the_file() {
+    fn a_wrong_file_key_cannot_open_the_file() {
         let (sender, recipient) = ids();
         let holder_id = [7u8; 32];
         let store = file_holder(sender.id(), recipient.id());
@@ -709,21 +676,11 @@ mod tests {
             holders: vec![(holder_id, store.clone())],
             who: sender.id(),
         };
-        deposit_file(
-            &tx,
-            &[holder_id],
-            &dh_secret(&[11u8; 32]),
-            Some(&[42u8; 32]),
-            &sender.id(),
-            &recipient.id(),
-            salt,
-            &file[..],
-            0,
-            1,
-        )
-        .unwrap();
-        // The stranger holds a copy (as a holder would) but cannot derive the
-        // file key, so the manifest does not open.
+        let receipt =
+            deposit_file(&tx, &[holder_id], &recipient.id(), salt, &file[..], 0, 1).unwrap();
+        // A different key cannot open the manifest.
+        let mut wrong_key = receipt.file_key;
+        wrong_key[0] ^= 1;
         let rx = InProcess {
             holders: vec![(holder_id, store)],
             who: recipient.id(),
@@ -732,9 +689,7 @@ mod tests {
         let err = fetch_file(
             &rx,
             &[holder_id],
-            &dh_secret(&[33u8; 32]),
-            Some(&[42u8; 32]),
-            &sender.id(),
+            &wrong_key,
             &recipient.id(),
             salt,
             &mut out,
@@ -743,90 +698,6 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, DepositError::Corrupt);
         assert!(out.is_empty());
-    }
-
-    #[test]
-    fn deposit_requires_a_hybrid_session_before_contacting_holders() {
-        let (sender, recipient) = ids();
-        let holder = [7u8; 32];
-        let store = file_holder(sender.id(), recipient.id());
-        let tx = InProcess {
-            holders: vec![(holder, store.clone())],
-            who: sender.id(),
-        };
-        let err = deposit_file(
-            &tx,
-            &[holder],
-            &dh_secret(&[11; 32]),
-            None,
-            &sender.id(),
-            &recipient.id(),
-            rand::random(),
-            &b"secret"[..],
-            0,
-            1,
-        )
-        .unwrap_err();
-        assert_eq!(err, DepositError::HybridSessionRequired);
-        let rx = InProcess {
-            holders: vec![(holder, store)],
-            who: recipient.id(),
-        };
-        assert!(rx
-            .list(&holder, RecipientTag::for_recipient(&recipient.id()), 0)
-            .unwrap()
-            .is_empty());
-    }
-
-    #[test]
-    fn classical_shared_secret_alone_cannot_open_hybrid_deposit() {
-        let (sender, recipient) = ids();
-        let holder = [7u8; 32];
-        let store = file_holder(sender.id(), recipient.id());
-        let salt = rand::random();
-        let tx = InProcess {
-            holders: vec![(holder, store.clone())],
-            who: sender.id(),
-        };
-        deposit_file(
-            &tx,
-            &[holder],
-            &dh_secret(&[11; 32]),
-            Some(&[42; 32]),
-            &sender.id(),
-            &recipient.id(),
-            salt,
-            &b"secret"[..],
-            0,
-            1,
-        )
-        .unwrap();
-        let rx = InProcess {
-            holders: vec![(holder, store)],
-            who: recipient.id(),
-        };
-        let blob = rx
-            .fetch(
-                &holder,
-                RecipientTag::for_recipient(&recipient.id()),
-                item_id(0, KIND_MANIFEST, &salt),
-                0,
-            )
-            .unwrap()
-            .unwrap();
-        let shared = agree(&dh_secret(&[22; 32]), &sender.id()).unwrap();
-        let mut ikm = Vec::new();
-        ikm.extend_from_slice(&shared);
-        ikm.extend_from_slice(&sender.id());
-        ikm.extend_from_slice(&recipient.id());
-        let hk = Hkdf::<Sha256>::new(Some(&salt), &ikm);
-        let mut key = [0; 32];
-        hk.expand(DEPOSIT_KDF_LABEL, &mut key).unwrap();
-        let (key, nonce) = FileKey(key).item_key_nonce(MANIFEST_INFO, 0);
-        assert_eq!(
-            open(&key, &nonce, &manifest_aad(&salt), &blob),
-            Err(DepositError::Corrupt)
-        );
     }
 
     #[test]

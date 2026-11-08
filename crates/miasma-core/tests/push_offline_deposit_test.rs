@@ -13,21 +13,12 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
 
-use ed25519_dalek::SigningKey;
-
 use miasma_core::chat::crypto::Identity;
 use miasma_core::chat::mailbox::client::{MailboxError, MailboxTransport};
 use miasma_core::chat::mailbox::holder::{CustodyStore, DepositOutcome};
 use miasma_core::chat::mailbox::ids::{ItemId, RecipientTag};
 use miasma_core::push::deposit::{deposit_file, fetch_file, DepositError};
 use miasma_core::push::file_holder::{DiskFileCustody, FileCustodyLimits};
-
-/// The X25519 secret scalar of an identity seed. `Identity` keeps its secret to
-/// itself, so the test derives the scalar the same way `Identity::from_seed`
-/// does, to agree the file key from both ends.
-fn dh_secret(seed: &[u8; 32]) -> [u8; 32] {
-    SigningKey::from_bytes(seed).to_scalar_bytes()
-}
 
 /// An in-process transport for one node over a set of shared holders. The node
 /// authenticates as `who`; each holder is a `DiskFileCustody`.
@@ -186,19 +177,8 @@ fn sender_deposits_64mib_then_leaves_and_recipient_fetches() {
         };
         let mut src = File::open(&src_path).expect("open source");
         src.seek(SeekFrom::Start(0)).unwrap();
-        deposit_file(
-            &tx,
-            &[holder_id],
-            &dh_secret(&[11u8; 32]),
-            Some(&[42u8; 32]),
-            &sender.id(),
-            &recipient.id(),
-            salt,
-            &mut src,
-            1_000,
-            1,
-        )
-        .expect("deposit of a 64 MiB file succeeds with one holder")
+        deposit_file(&tx, &[holder_id], &recipient.id(), salt, &mut src, 1_000, 1)
+            .expect("deposit of a 64 MiB file succeeds with one holder")
         // tx dropped here.
     };
     assert_eq!(receipt.held_by, vec![holder_id]);
@@ -216,9 +196,7 @@ fn sender_deposits_64mib_then_leaves_and_recipient_fetches() {
         let m = fetch_file(
             &rx,
             &[holder_id],
-            &dh_secret(&[22u8; 32]),
-            Some(&[42u8; 32]),
-            &sender.id(),
+            &receipt.file_key,
             &recipient.id(),
             salt,
             std::io::BufWriter::new(out),
@@ -252,9 +230,6 @@ fn a_deposit_that_misses_the_threshold_is_not_reported_as_delivered() {
     let err = deposit_file(
         &tx,
         &[holder_id],
-        &dh_secret(&[11u8; 32]),
-        Some(&[42u8; 32]),
-        &sender.id(),
         &recipient.id(),
         rand::random(),
         &file[..],
@@ -332,12 +307,9 @@ fn altered_chunk_is_rejected() {
         holders: vec![(holder_id, store.clone())],
         who: sender.id(),
     };
-    deposit_file(
+    let receipt = deposit_file(
         &tx,
         &[holder_id],
-        &dh_secret(&[11u8; 32]),
-        Some(&[42u8; 32]),
-        &sender.id(),
         &recipient.id(),
         salt,
         &vec![1u8; 20 * 1024][..],
@@ -352,9 +324,7 @@ fn altered_chunk_is_rejected() {
     let err = fetch_file(
         &rx,
         &[holder_id],
-        &dh_secret(&[22u8; 32]),
-        Some(&[42u8; 32]),
-        &sender.id(),
+        &receipt.file_key,
         &recipient.id(),
         salt,
         Vec::new(),
