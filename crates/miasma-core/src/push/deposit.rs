@@ -612,10 +612,26 @@ mod tests {
             holders: vec![(holder, file_holder(sender.id(), recipient.id()))],
             who: sender.id(),
         };
-        let first =
-            deposit_file(&tx, &[holder], &recipient.id(), [1; 16], &b"file"[..], 0, 1).unwrap();
-        let second =
-            deposit_file(&tx, &[holder], &recipient.id(), [2; 16], &b"file"[..], 0, 1).unwrap();
+        let first = deposit_file(
+            &tx,
+            &[holder],
+            &recipient.id(),
+            rand::random(),
+            &b"file"[..],
+            0,
+            1,
+        )
+        .unwrap();
+        let second = deposit_file(
+            &tx,
+            &[holder],
+            &recipient.id(),
+            rand::random(),
+            &b"file"[..],
+            0,
+            1,
+        )
+        .unwrap();
         assert_ne!(first.file_key, second.file_key);
     }
 
