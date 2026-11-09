@@ -4,7 +4,8 @@
   See scripts/build-installer.ps1 for build instructions.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:fw="http://wixtoolset.org/schemas/v4/wxs/firewall">
 
   <!--
     Version is injected at build time via -d Version=a.b.c. It is the MSI form of
@@ -71,6 +72,9 @@
       <Directory Id="MiasmaMenuFolder" Name="Miasma Protocol" />
     </StandardDirectory>
 
+    <!-- Referenced by the custom action that clears stale inbound Block rules. -->
+    <StandardDirectory Id="SystemFolder" />
+
     <!-- ── Binaries ──────────────────────────────────────────────── -->
 
     <ComponentGroup Id="Binaries" Directory="INSTALLFOLDER">
@@ -78,18 +82,45 @@
         <File Id="miasma_desktop.exe"
               Source="$(var.BinDir)\miasma-desktop.exe"
               KeyPath="yes" />
+        <!-- Inbound allow rule so direct connections work without the firewall prompt.
+             Program scope, all profiles, any protocol; removed on uninstall. -->
+        <fw:FirewallException Id="MiasmaDesktopInbound"
+                              Name="Miasma (miasma-desktop.exe)"
+                              Program="[#miasma_desktop.exe]"
+                              Profile="all"
+                              Outbound="no"
+                              Scope="any"
+                              Description="Allow inbound connections to Miasma desktop." />
       </Component>
 
       <Component Id="MiasmaCliExe" Bitness="always64" Guid="A1B2C3D4-0001-4000-8000-000000000002">
         <File Id="miasma.exe"
               Source="$(var.BinDir)\miasma.exe"
               KeyPath="yes" />
+        <!-- Inbound allow rule so direct connections work without the firewall prompt.
+             Program scope, all profiles, any protocol; removed on uninstall. -->
+        <fw:FirewallException Id="MiasmaCliInbound"
+                              Name="Miasma (miasma.exe)"
+                              Program="[#miasma.exe]"
+                              Profile="all"
+                              Outbound="no"
+                              Scope="any"
+                              Description="Allow inbound connections to Miasma." />
       </Component>
 
       <Component Id="MiasmaBridgeExe" Bitness="always64" Guid="A1B2C3D4-0001-4000-8000-000000000003">
         <File Id="miasma_bridge.exe"
               Source="$(var.BinDir)\miasma-bridge.exe"
               KeyPath="yes" />
+        <!-- Inbound allow rule so direct connections work without the firewall prompt.
+             Program scope, all profiles, any protocol; removed on uninstall. -->
+        <fw:FirewallException Id="MiasmaBridgeInbound"
+                              Name="Miasma (miasma-bridge.exe)"
+                              Program="[#miasma_bridge.exe]"
+                              Profile="all"
+                              Outbound="no"
+                              Scope="any"
+                              Description="Allow inbound connections to Miasma bridge." />
       </Component>
     </ComponentGroup>
 
@@ -266,6 +297,28 @@
                      Type="string"
                      Value="Miasma.TorrentFile" />
     </Component>
+
+    <!-- ── Remove stale inbound BLOCK rules before adding the allow rules ──
+         When the firewall prompt is dismissed or denied, Windows creates an
+         inbound Block rule for the program. A Block rule beats an Allow rule, so
+         any existing inbound Block rule whose program path points at one of the
+         installed executables must be removed first. Deferred, elevated
+         (perMachine, no impersonation), powershell.exe directly so no
+         custom-action DLL is needed. ExeCommand is a formatted field, so
+         [#fileId] resolves to the installed program path. Return=ignore so a
+         clean machine with no such rules still installs. -->
+    <CustomAction Id="RemoveMiasmaInboundBlockRules"
+                  Directory="SystemFolder"
+                  ExeCommand="powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command &quot;$ErrorActionPreference='SilentlyContinue'; foreach ($exe in @('[#miasma.exe]','[#miasma_desktop.exe]','[#miasma_bridge.exe]')) { Get-NetFirewallApplicationFilter -Program $exe | Get-NetFirewallRule | Where-Object { $_.Action -eq 'Block' -and $_.Direction -eq 'Inbound' } | Remove-NetFirewallRule }; exit 0&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- After the files are on disk (so the program paths resolve) and before
+           the firewall allow rules are scheduled. -->
+      <Custom Action="RemoveMiasmaInboundBlockRules" After="InstallFiles" Condition="NOT REMOVE" />
+    </InstallExecuteSequence>
 
   </Package>
 </Wix>
