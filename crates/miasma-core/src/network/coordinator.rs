@@ -377,9 +377,19 @@ impl ShareSink for NetworkShareSink {
                 .map(|(peer, _)| *peer)
                 .collect()
         };
-        // Peers that already said "no room" are not offered this share either.
-        at_cap.extend(self.push_state.refusing_peers());
-        at_cap.extend(self.push_state.conflicting_peers_for(&share));
+        for peer in &at_cap {
+            tracing::info!(%peer, reason = "per_holder_cap", "storage candidate excluded");
+        }
+        let refused = self.push_state.refusing_peers();
+        for peer in &refused {
+            tracing::info!(%peer, reason = "quota", "storage candidate excluded");
+        }
+        at_cap.extend(refused);
+        let conflicts = self.push_state.conflicting_peers_for(&share);
+        for peer in &conflicts {
+            tracing::info!(%peer, reason = "piece_conflict", "storage candidate excluded");
+        }
+        at_cap.extend(conflicts);
 
         let mut candidates = self.dht_handle.select_storage_candidates(at_cap).await?;
         if candidates.is_empty() {
@@ -400,10 +410,18 @@ impl ShareSink for NetworkShareSink {
         let piece_for_conflict = (share.mid_prefix, segment_index, slot_index);
 
         self.push_state.note_attempt();
-        match self.dht_handle.store_share_on_peer(peer_id, share).await? {
+        let response = match self.dht_handle.store_share_on_peer(peer_id, share).await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(%peer_id, segment_index, slot_index, outcome = "request_failed", "share placement failed");
+                return Err(error);
+            }
+        };
+        match response {
             super::node::StoreResponse::Accepted {
                 advertised_addrs, ..
             } => {
+                tracing::info!(%peer_id, segment_index, slot_index, outcome = "accepted", "share placement");
                 *self
                     .per_holder_count
                     .lock()
@@ -418,6 +436,7 @@ impl ShareSink for NetworkShareSink {
                 })
             }
             super::node::StoreResponse::Rejected(reason) => {
+                tracing::warn!(%peer_id, segment_index, slot_index, %reason, outcome = "refused", "share placement");
                 // A full quota (global or this node's per-peer budget for us) is
                 // a standing answer; "held for another publisher" is standing
                 // for that one piece only; anything else may be transient (not
