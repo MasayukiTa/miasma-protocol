@@ -23,7 +23,7 @@ use tracing::{debug, info};
 use super::{
     contact::{fingerprint, ContactCode},
     link::{BoxRx, BoxTx, CloseInfo, Dialer, IrohDialer, IrohLink, Link},
-    outbox::{OutJob, Outbox},
+    outbox::{OutJob, Outbox, PublishPlacement, SegmentPlacement},
     proto::{
         self, Done, Header, ProtoError, RejectReason, Reply, CLOSE_BAD_REQUEST, CLOSE_NOT_ALLOWED,
         CLOSE_OK, PROTOCOL_VERSION,
@@ -233,7 +233,7 @@ pub struct PushService {
     own_id: [u8; 32],
     dialer: Arc<dyn Dialer>,
     /// Files waiting to be sent; survives a restart.
-    outbox: Outbox,
+    outbox: Arc<Outbox>,
     wake: broadcast::Sender<Wake>,
     inbound_slots: Arc<Semaphore>,
     /// `.part` files being written, each with the handle that asks the writer
@@ -315,14 +315,55 @@ async fn network_source_hash(path: &Path) -> Result<[u8; 32], String> {
     .map_err(|e| e.to_string())?
 }
 
+struct OutboxPlacementObserver {
+    outbox: Arc<Outbox>,
+    state: Mutex<(OutJob, Option<String>)>,
+}
+
+impl crate::network::coordinator::PlacementObserver for OutboxPlacementObserver {
+    fn on_dissolved(&self, mid: &str, segments: &[(u32, Vec<u16>)], needed: u16) {
+        let mut state = self.state.lock().unwrap();
+        let placement = state
+            .0
+            .publish_placement
+            .get_or_insert_with(|| PublishPlacement {
+                mid: mid.to_owned(),
+                segments: Vec::new(),
+                needed_remote_per_segment: needed,
+                created_ms: now_ms(),
+            });
+        for (index, slots) in segments {
+            if !placement.segments.iter().any(|s| s.index == *index) {
+                placement.segments.push(SegmentPlacement {
+                    index: *index,
+                    local_slots: slots.clone(),
+                    remote_slots: Vec::new(),
+                });
+            }
+        }
+        if let Err(error) = self.outbox.put_checked(&state.0, true) {
+            state.1 = Some(error);
+        }
+    }
+    fn on_remote_accept(&self, segment: u32, slot: u16, peer: [u8; 32]) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(placement) = &mut state.0.publish_placement {
+            placement.record_accept(segment, slot, peer);
+        }
+        if let Err(error) = self.outbox.put_checked(&state.0, true) {
+            state.1 = Some(error);
+        }
+    }
+}
+
 async fn ensure_network_share<F, Fut>(
-    outbox: &Outbox,
+    outbox: &Arc<Outbox>,
     rec: &mut OutJob,
     path: &Path,
     publish: F,
 ) -> Result<(), String>
 where
-    F: FnOnce(PathBuf, String) -> Fut,
+    F: FnOnce(PathBuf, String, Arc<dyn crate::network::coordinator::PlacementObserver>) -> Fut,
     Fut: std::future::Future<Output = Result<String, String>>,
 {
     if rec.network_share_id.is_none() {
@@ -343,6 +384,7 @@ where
                 && intent.sha256 == sha256
         });
         if !matches {
+            rec.publish_placement = None;
             rec.size = size;
             rec.mtime_ms = mtime_ms;
             rec.hash = None;
@@ -376,7 +418,19 @@ where
                 Some("not deposited: publish interrupted; partial local shares may exist".into());
         }
         outbox.put_checked(rec, true)?;
-        let share_id = match publish(path.to_owned(), password.clone()).await {
+        let observer = Arc::new(OutboxPlacementObserver {
+            outbox: Arc::clone(outbox),
+            state: Mutex::new((rec.clone(), None)),
+        });
+        let result = publish(path.to_owned(), password.clone(), observer.clone()).await;
+        {
+            let state = observer.state.lock().unwrap();
+            rec.publish_placement = state.0.publish_placement.clone();
+            if let Some(error) = &state.1 {
+                return Err(error.clone());
+            }
+        }
+        let share_id = match result {
             Ok(id) => id,
             Err(error) => {
                 let message = format!("not deposited: network publish failed: {error}");
@@ -406,6 +460,7 @@ impl PushService {
         self: &Arc<Self>,
         path: &Path,
         password: &str,
+        observer: Arc<dyn crate::network::coordinator::PlacementObserver>,
     ) -> Result<String, String> {
         let coord = self
             .coordinator
@@ -417,13 +472,11 @@ impl PushService {
         let format = crate::config::NodeConfig::load(&self.data_dir)
             .map(|c| c.transfer.object_format)
             .unwrap_or_default();
+        let mut options = crate::network::PublishOptions::strict(params);
+        options.placement_sink = Some(observer);
         let report = coord
             .dissolve_and_publish_file_protected_with_format(
-                path,
-                params,
-                crate::network::PublishOptions::strict(params),
-                password,
-                format,
+                path, params, options, password, format,
             )
             .await
             .map_err(|e| e.to_string())?;
@@ -450,9 +503,14 @@ impl PushService {
         {
             return Err("no holder accepted the deposit".into());
         }
-        ensure_network_share(&self.outbox, rec, path, |path, password| async move {
-            self.publish_to_network(&path, &password).await
-        })
+        ensure_network_share(
+            &self.outbox,
+            rec,
+            path,
+            |path, password, observer| async move {
+                self.publish_to_network(&path, &password, observer).await
+            },
+        )
         .await?;
         let sha256 = match &rec.network_intent {
             Some(intent) => intent.sha256,
@@ -525,7 +583,7 @@ impl PushService {
             history: History::open(data_dir),
             own_id,
             dialer,
-            outbox: Outbox::open(data_dir),
+            outbox: Arc::new(Outbox::open(data_dir)),
             wake,
             active_parts: Mutex::new(HashMap::new()),
             limiter: Mutex::new(Limiter::new()),
@@ -2661,19 +2719,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("file");
         std::fs::write(&path, b"original").unwrap();
-        let outbox = Outbox::open(dir.path());
+        let outbox = Arc::new(Outbox::open(dir.path()));
         let mut rec = network_job(&path);
         let calls = std::sync::atomic::AtomicUsize::new(0);
-        let first = ensure_network_share(&outbox, &mut rec, &path, |_, _| {
+        let first = ensure_network_share(&outbox, &mut rec, &path, |_, _, _| {
             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             std::future::ready(Err("crash before share".into()))
         })
         .await;
         assert!(first.is_err());
         drop(outbox);
-        let outbox = Outbox::open(dir.path());
+        let outbox = Arc::new(Outbox::open(dir.path()));
         let mut rec = outbox.get(&rec.id).unwrap();
-        let error = ensure_network_share(&outbox, &mut rec, &path, |_, _| {
+        let error = ensure_network_share(&outbox, &mut rec, &path, |_, _, _| {
             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             std::future::ready(Ok("share".into()))
         })
@@ -2689,20 +2747,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("file");
         std::fs::write(&path, b"original").unwrap();
-        let outbox = Outbox::open(dir.path());
+        let outbox = Arc::new(Outbox::open(dir.path()));
         let mut rec = network_job(&path);
         let calls = std::sync::atomic::AtomicUsize::new(0);
-        ensure_network_share(&outbox, &mut rec, &path, |_, _| {
+        ensure_network_share(&outbox, &mut rec, &path, |_, _, _| {
             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             std::future::ready(Ok("share".into()))
         })
         .await
         .unwrap();
         drop(outbox);
-        let outbox = Outbox::open(dir.path());
+        let outbox = Arc::new(Outbox::open(dir.path()));
         let mut rec = outbox.get(&rec.id).unwrap();
         std::fs::remove_file(&path).unwrap();
-        ensure_network_share(&outbox, &mut rec, &path, |_, _| {
+        ensure_network_share(&outbox, &mut rec, &path, |_, _, _| {
             calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             std::future::ready(Ok("another share".into()))
         })
@@ -2717,15 +2775,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("file");
         std::fs::write(&path, b"original").unwrap();
-        let outbox = Outbox::open(dir.path());
+        let outbox = Arc::new(Outbox::open(dir.path()));
         let mut rec = network_job(&path);
-        let _ = ensure_network_share(&outbox, &mut rec, &path, |_, _| async {
+        let _ = ensure_network_share(&outbox, &mut rec, &path, |_, _, _| async {
             Err("interrupted".into())
         })
         .await;
         let old = rec.network_intent.as_ref().unwrap().password.clone();
         std::fs::write(&path, b"changed source").unwrap();
-        ensure_network_share(&outbox, &mut rec, &path, |_, password| {
+        ensure_network_share(&outbox, &mut rec, &path, |_, password, _| {
             assert_ne!(password, old);
             std::future::ready(Ok("share".into()))
         })
@@ -2738,9 +2796,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("file");
         std::fs::write(&path, b"original").unwrap();
-        let outbox = Outbox::open(dir.path());
+        let outbox = Arc::new(Outbox::open(dir.path()));
         let mut rec = network_job(&path);
-        let _ = ensure_network_share(&outbox, &mut rec, &path, |_, _| async {
+        let _ = ensure_network_share(&outbox, &mut rec, &path, |_, _, _| async {
             Err("interrupted".into())
         })
         .await;
@@ -2750,12 +2808,37 @@ mod tests {
         let intent = rec.network_intent.as_mut().unwrap();
         intent.size = size;
         intent.mtime_ms = mtime_ms;
-        ensure_network_share(&outbox, &mut rec, &path, |_, password| {
+        ensure_network_share(&outbox, &mut rec, &path, |_, password, _| {
             assert_ne!(password, old);
             std::future::ready(Ok("share".into()))
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_publish_keeps_accepted_placements_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        std::fs::write(&path, b"content").unwrap();
+        let outbox = Arc::new(Outbox::open(dir.path()));
+        let mut rec = network_job(&path);
+        let peer: [u8; 32] = rand::random();
+        let error = ensure_network_share(&outbox, &mut rec, &path, |_, _, observer| async move {
+            observer.on_dissolved("mid", &[(0, vec![0, 1, 2])], 2);
+            observer.on_remote_accept(0, 1, peer);
+            Err("insufficient shares".into())
+        })
+        .await
+        .unwrap_err();
+        assert!(error.contains("insufficient shares"));
+        drop(outbox);
+        let reopened = Outbox::open(dir.path());
+        let placement = reopened.get(&rec.id).unwrap().publish_placement.unwrap();
+        assert_eq!(placement.mid, "mid");
+        assert_eq!(placement.segments[0].local_slots, vec![0, 1, 2]);
+        assert_eq!(placement.segments[0].remote_slots, vec![(1, peer)]);
+        assert_eq!(placement.needed_remote_per_segment, 2);
     }
 
     struct OfflineDialer;

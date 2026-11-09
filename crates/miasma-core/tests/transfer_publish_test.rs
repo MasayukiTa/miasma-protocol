@@ -89,6 +89,43 @@ fn write_temp(bytes: &[u8]) -> std::path::PathBuf {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn failed_strict_publish_reports_dissolved_slots() {
+    use miasma_core::network::coordinator::PlacementObserver;
+    use std::sync::Mutex;
+    #[derive(Default)]
+    struct Observer(Mutex<Vec<String>>);
+    impl PlacementObserver for Observer {
+        fn on_dissolved(&self, mid: &str, segments: &[(u32, Vec<u16>)], needed: u16) {
+            assert!(!mid.is_empty());
+            assert_eq!(segments, &[(0, vec![0, 1, 2])]);
+            assert_eq!(needed, 2);
+            self.0.lock().unwrap().push("dissolved".into());
+        }
+        fn on_remote_accept(&self, segment: u32, slot: u16, _peer: [u8; 32]) {
+            self.0.lock().unwrap().push(format!("{segment}:{slot}"));
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    miasma_core::state_crypto::provision_master_key(dir.path()).unwrap();
+    let store = Arc::new(LocalShareStore::open(dir.path(), 1000).unwrap());
+    let key: [u8; 32] = rand::random();
+    let mut node = MiasmaNode::new(&key, NodeType::Full, "/ip4/127.0.0.1/tcp/0").unwrap();
+    let addrs = node.collect_listen_addrs(400).await;
+    let coord = MiasmaCoordinator::start(node, store, vec![addrs[0].to_string()]).await;
+    let observer = Arc::new(Observer::default());
+    let mut options = PublishOptions::strict(params());
+    options.placement_sink = Some(observer.clone());
+    let result = coord
+        .dissolve_and_publish_file_with_options(&write_temp(b"placement"), params(), options)
+        .await;
+    assert!(matches!(
+        result,
+        Err(MiasmaError::InsufficientShares { .. })
+    ));
+    assert_eq!(*observer.0.lock().unwrap(), vec!["dissolved"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn streamed_publishes_notify_observer_with_the_announced_format() {
     use miasma_core::{config::ObjectFormat, daemon::replication::PendingReplication};
     use std::sync::Mutex;

@@ -2890,7 +2890,9 @@ async fn publish_content(
     // never attempted remote distribution, and published unconditionally --
     // so an offline publish reported success even though nothing left the
     // device.
-    let (locations, remote_distinct) = coord.store_locally_and_distribute(shares, params).await?;
+    let (locations, remote_distinct) = coord
+        .store_locally_and_distribute(shares, params, None)
+        .await?;
 
     // Enforce the publish policy BEFORE announcing. Under the network default
     // (`PublishOptions::network_default()`, min = 1) a publish with zero

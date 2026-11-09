@@ -412,7 +412,17 @@ impl MiasmaCoordinator {
             let entry = manifest.segments[seg as usize].clone();
 
             let push_started = Instant::now();
-            let stored = self.store_locally_and_distribute(shares, params).await;
+            let mid_string = mid.to_string();
+            let observer = options.placement_sink.as_ref().map(|sink| {
+                (
+                    mid_string.as_str(),
+                    sink,
+                    options.min_remote_distinct_shards.min(u16::MAX as usize) as u16,
+                )
+            });
+            let stored = self
+                .store_locally_and_distribute(shares, params, observer)
+                .await;
             let (mut locations, remote_distinct) = match stored {
                 Ok(v) => v,
                 // Out of disk or similar: keep the journal; resuming after the
