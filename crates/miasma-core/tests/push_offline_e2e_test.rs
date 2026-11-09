@@ -30,7 +30,7 @@ use miasma_core::chat::mailbox::client::{MailboxError, MailboxTransport};
 use miasma_core::chat::mailbox::holder::{CustodyStore, DepositOutcome};
 use miasma_core::chat::mailbox::ids::{ItemId, RecipientTag};
 use miasma_core::chat::outbox::Outbox;
-use miasma_core::chat::proto::{AckStatus, FileDepositNotice};
+use miasma_core::chat::proto::{AckStatus, FileDepositNotice, Message};
 use miasma_core::chat::store::{ChatStore, StoreSettings};
 use miasma_core::push::deposit::{self, deposit_file, DepositReceipt};
 use miasma_core::push::file_holder::{DiskFileCustody, FileCustodyLimits};
@@ -221,10 +221,21 @@ fn sender_deposits_and_leaves_then_recipient_receives_through_chat() {
         assert_eq!(receipt.held_by, vec![holder_id]);
         assert!(receipt.manifest.chunks >= 3);
         let notice = notice_from_receipt(&receipt, salt, "report.bin");
-        let text = notice_to_text(&notice);
+        // The notice travels as an ordinary sealed chat message whose text is
+        // the encoded notice, exactly as the send path does (seal_for over an
+        // encoded Record::Text). Sealing the raw text bytes would not decode as
+        // a chat record on the far side.
+        let plain = Message {
+            id: rand::random(),
+            seq: 1,
+            sent_ms: 1_700_000_000_000,
+            text: notice_to_text(&notice),
+        }
+        .encode()
+        .expect("encode the notice chat message");
         let (wire, _id) = sender_chat
             .core
-            .seal_for(&recipient.id(), text.as_bytes())
+            .seal_for(&recipient.id(), &plain)
             .expect("seal the notice message for the recipient");
         (wire, file.clone())
         // tx, sender_chat and the receipt are dropped here: the sender is gone.
