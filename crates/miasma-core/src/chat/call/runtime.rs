@@ -472,7 +472,15 @@ impl CallRuntime {
         }
         let response = match request {
             CallRequest::Dial { .. } => match peer {
-                Some(peer) => dial_result(state.controller.dial(peer)),
+                Some(peer) => {
+                    let result = state.controller.dial(peer);
+                    // A new contact may have no chat session yet. Start the
+                    // hybrid exchange so the next dial can pass the media gate.
+                    if matches!(result, Err(CallError::NotReady)) {
+                        self.svc.kick(&peer);
+                    }
+                    dial_result(result)
+                }
                 None => CallResponse::Error("unavailable".into()),
             },
             CallRequest::Accept { token } => {
