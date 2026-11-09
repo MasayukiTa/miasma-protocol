@@ -665,8 +665,10 @@ mod tests {
             holders: vec![(holder, store.clone())],
             who: sender.id(),
         };
-        let key = [42; 32];
-        let salt = [24; 16];
+        let (key, salt) = {
+            use rand::{rngs::OsRng, Rng};
+            (OsRng.gen::<[u8; 32]>(), OsRng.gen::<[u8; 16]>())
+        };
         let first = deposit_file_with_key(
             &tx,
             &[holder],

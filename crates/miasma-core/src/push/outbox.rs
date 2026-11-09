@@ -332,11 +332,15 @@ mod tests {
     #[test]
     fn deposit_notice_survives_reopen_before_message_id() {
         let dir = tempfile::tempdir().unwrap();
+        let (file_key, salt) = {
+            use rand::{rngs::OsRng, Rng};
+            (OsRng.gen::<[u8; 32]>(), OsRng.gen::<[u8; 16]>())
+        };
         let mut j = job(1);
         j.deposit_notice = Some(vec![9; 96]);
         j.deposit_intent = Some(DepositIntent {
-            file_key: [42; 32],
-            salt: [24; 16],
+            file_key,
+            salt,
             path: j.path.clone(),
             size: j.size,
         });
