@@ -52,3 +52,4 @@ miasma-core/src/root_key/wipe.rs | 3 | wipe marker, and the zero-overwrite of th
 miasma-core/src/root_key/durable.rs | 3 | crash-safe writes of the key files: restricted staging file, move into place, copy fallback for the plain key's second name
 miasma-core/src/root_key/filewrap.rs | 1 | data dir creation before the file wrap's secret is written
 miasma-core/src/root_key/sealed.rs | 3 | data dir creation for a new sealed key, the migration lock file, setting a damaged sealed file aside
+miasma-core/src/chat/introduced_holders.rs | 1 | chat directory creation for the protected introduced holders document
