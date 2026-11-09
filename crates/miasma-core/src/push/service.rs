@@ -625,6 +625,10 @@ impl PushService {
         let _ = std::fs::remove_dir(&dir); // only if empty
     }
 
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
     pub fn contact_dir(&self, label: &str) -> PathBuf {
         let leaf = sanitize_file_name(label).unwrap_or_else(|| "contact".to_owned());
         self.settings.inbox_dir.join(leaf)
