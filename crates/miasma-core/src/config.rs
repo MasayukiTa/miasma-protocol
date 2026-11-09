@@ -248,11 +248,11 @@ pub fn set_custody_enabled_persistent(data_dir: &Path, on: bool) -> std::io::Res
 }
 
 /// Read the saved "hold messages for offline contacts" value, or the default
-/// (off) when the file cannot be read.
+/// (on) when the file cannot be read.
 pub fn load_custody_enabled(data_dir: &Path) -> bool {
     NodeConfig::load(data_dir)
         .map(|c| c.chat.custody_enabled)
-        .unwrap_or(false)
+        .unwrap_or_else(|_| ChatConfig::default().custody_enabled)
 }
 
 pub const DEFAULT_LOG_BUFFER_MIB: u32 = 2;
@@ -378,10 +378,10 @@ pub struct ChatConfig {
     #[serde(default = "default_true")]
     pub read_receipts: bool,
     /// Hold sealed messages in memory for trusted contacts who are offline
-    /// (default off). When on, this node answers the custody verbs for the
+    /// (default on). When on, this node answers the custody verbs for the
     /// contacts it trusts, and a message that cannot be delivered directly is
     /// left with trusted holders and collected on reconnect.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub custody_enabled: bool,
     /// How many trusted holders get a copy of a message that could not be
     /// delivered directly (1-8, default 2). Only used when a direct send
@@ -472,7 +472,7 @@ impl Default for ChatConfig {
             outbox_max: DEFAULT_CHAT_OUTBOX_MAX,
             retention_days: 0,
             read_receipts: true,
-            custody_enabled: false,
+            custody_enabled: true,
             custody_copies: DEFAULT_CHAT_CUSTODY_COPIES,
             custody_max_total_bytes: DEFAULT_CHAT_CUSTODY_MAX_TOTAL_BYTES,
             custody_max_items: DEFAULT_CHAT_CUSTODY_MAX_ITEMS,
@@ -668,10 +668,10 @@ pub struct PushConfig {
     pub max_send_kib_per_sec: u32,
     /// Hold end-to-end encrypted *files* on disk for trusted contacts who are
     /// offline, so a sender can deposit a file and go offline and the recipient
-    /// fetches it later (default off, like chat custody). When on, this node
+    /// fetches it later (default on, like chat custody). When on, this node
     /// answers the custody verbs for the contacts it trusts against a
     /// disk-backed, quota-bounded store. What is held is ciphertext only.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub file_custody_enabled: bool,
     /// Total bytes a file holder keeps across every depositor (default 256
     /// MiB). Chosen to hold one 64 MiB file comfortably with room for more
@@ -752,7 +752,7 @@ impl Default for PushConfig {
             retry_window_hours: DEFAULT_PUSH_RETRY_WINDOW_HOURS,
             stall_timeout_secs: DEFAULT_PUSH_STALL_SECS,
             max_send_kib_per_sec: 0,
-            file_custody_enabled: false,
+            file_custody_enabled: true,
             file_custody_total_bytes: DEFAULT_FILE_CUSTODY_TOTAL_BYTES,
             file_custody_per_depositor_bytes: DEFAULT_FILE_CUSTODY_PER_DEPOSITOR_BYTES,
             file_custody_ttl_ms: DEFAULT_FILE_CUSTODY_TTL_MS,
@@ -2230,5 +2230,21 @@ mod default_bootstrap_reachability_tests {
         ] {
             assert!(!multiaddr_has_nonroutable_ipv4(a), "should allow {a}");
         }
+    }
+}
+
+#[cfg(test)]
+mod custody_default_tests {
+    use super::*;
+
+    #[test]
+    fn custody_defaults_are_enabled_even_when_fields_are_missing() {
+        let config = NodeConfig::default();
+        assert!(config.chat.custody_enabled);
+        assert!(config.push.file_custody_enabled);
+        let chat: ChatConfig = toml::from_str("").unwrap();
+        let push: PushConfig = toml::from_str("").unwrap();
+        assert!(chat.custody_enabled);
+        assert!(push.file_custody_enabled);
     }
 }
