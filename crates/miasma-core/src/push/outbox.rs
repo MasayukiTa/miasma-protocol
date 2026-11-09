@@ -37,6 +37,10 @@ pub struct NetworkPublishIntent {
     pub size: u64,
     pub mtime_ms: u64,
     pub sha256: [u8; 32],
+    /// An unsuccessful publish may already have written local shares. Do not
+    /// dissolve the file again until that partial publish can be resumed.
+    #[serde(default)]
+    pub publish_error: Option<String>,
 }
 
 /// One file queued for a contact, as it is stored.
