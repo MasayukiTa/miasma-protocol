@@ -38,7 +38,6 @@ use chacha20poly1305::{
     Tag, XChaCha20Poly1305, XNonce,
 };
 use hkdf::Hkdf;
-use rand::RngCore;
 use sha2::Sha256;
 
 use tracing::warn;
@@ -299,8 +298,7 @@ pub fn deposit_file<R: std::io::Read>(
     now_ms: u64,
     threshold: usize,
 ) -> Result<DepositReceipt, DepositError> {
-    let mut file_key = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut file_key);
+    let file_key: [u8; 32] = rand::random();
     deposit_file_with_key(
         transport, holders, recipient, file_key, salt, src, now_ms, threshold,
     )
@@ -695,8 +693,7 @@ mod tests {
     #[cfg(feature = "iroh")]
     #[test]
     fn verified_receive_places_only_matching_file() {
-        let mut salt = [0u8; 16];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
+        let salt: [u8; 16] = rand::random();
         use crate::chat::proto::FileDepositNotice;
         use crate::push::receive_offline::fetch_verified;
         use sha2::{Digest, Sha256};
@@ -915,7 +912,7 @@ mod tests {
     #[test]
     fn the_manifest_round_trips_through_its_bytes() {
         let m = Manifest {
-            salt: [1u8; 16],
+            salt: rand::random(),
             size: 123456,
             chunks: 8,
             chunk_plaintext: CHUNK_PLAINTEXT as u32,
