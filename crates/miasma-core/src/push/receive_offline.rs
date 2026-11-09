@@ -192,12 +192,111 @@ pub fn spawn_fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat::mailbox::holder::CustodyStore;
     use crate::chat::mailbox::{
         client::MailboxError,
         holder::DepositOutcome,
         ids::{ItemId, RecipientTag},
     };
+    use crate::push::file_holder::{DiskFileCustody, FileCustodyLimits};
     use std::sync::Arc;
+
+    struct DiskTransport {
+        store: DiskFileCustody,
+        who: [u8; 32],
+    }
+    impl MailboxTransport for DiskTransport {
+        fn deposit(
+            &self,
+            _: &[u8; 32],
+            tag: RecipientTag,
+            id: ItemId,
+            blob: &[u8],
+            now: u64,
+        ) -> Result<DepositOutcome, MailboxError> {
+            self.store
+                .deposit(&self.who, tag, id, blob, now)
+                .map_err(MailboxError::Refused)
+        }
+        fn list(
+            &self,
+            _: &[u8; 32],
+            tag: RecipientTag,
+            now: u64,
+        ) -> Result<Vec<ItemId>, MailboxError> {
+            self.store
+                .list(&self.who, tag, now)
+                .map_err(MailboxError::Refused)
+        }
+        fn fetch(
+            &self,
+            _: &[u8; 32],
+            tag: RecipientTag,
+            id: ItemId,
+            now: u64,
+        ) -> Result<Option<Vec<u8>>, MailboxError> {
+            self.store
+                .fetch(&self.who, tag, id, now)
+                .map_err(MailboxError::Refused)
+        }
+        fn delete(
+            &self,
+            _: &[u8; 32],
+            tag: RecipientTag,
+            id: ItemId,
+        ) -> Result<bool, MailboxError> {
+            self.store
+                .delete(&self.who, tag, id)
+                .map_err(MailboxError::Refused)
+        }
+    }
+
+    #[test]
+    fn disk_custody_fetch_and_corrupt_chunk() {
+        let root = tempfile::tempdir().unwrap();
+        let holder_dir = root.path().join("holder");
+        let dir = root.path().join("inbox");
+        let recipient = [3; 32];
+        let holder = [4; 32];
+        let store = DiskFileCustody::new(
+            FileCustodyLimits {
+                enabled: true,
+                ..Default::default()
+            },
+            &holder_dir,
+        )
+        .unwrap();
+        store.trust(recipient);
+        let transport = DiskTransport {
+            store,
+            who: recipient,
+        };
+        let data = vec![42; deposit::CHUNK_PLAINTEXT * 3 + 17];
+        let salt = [8; 16];
+        let receipt =
+            deposit::deposit_file(&transport, &[holder], &recipient, salt, &data[..], 1000, 1)
+                .unwrap();
+        let notice = FileDepositNotice {
+            file_key: receipt.file_key,
+            salt,
+            manifest_id: receipt.manifest_id.0,
+            holders: receipt.held_by,
+            file_name: "file.bin".into(),
+            size: data.len() as u64,
+            sha256: Sha256::digest(&data).into(),
+        };
+        let chunk = holder_dir.join("item-00000000000000000000.bin");
+        let mut bytes = fs::read(&chunk).unwrap();
+        bytes[0] ^= 1;
+        fs::write(&chunk, &bytes).unwrap();
+        assert!(fetch_verified(&transport, &recipient, &notice, &dir, 2000).is_err());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        bytes[0] ^= 1;
+        fs::write(&chunk, bytes).unwrap();
+        let path = fetch_verified(&transport, &recipient, &notice, &dir, 2000).unwrap();
+        assert_eq!(fs::read(path).unwrap(), data);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+    }
 
     struct UnusedTransport;
     impl MailboxTransport for UnusedTransport {
