@@ -45,6 +45,8 @@ pub struct OutJob {
     /// Failed attempts in a row at that moment.
     #[serde(default)]
     pub attempt: u32,
+    #[serde(default)]
+    pub notice_id: Option<[u8; 16]>,
     pub created_at_ms: u64,
 }
 
@@ -298,6 +300,7 @@ mod tests {
             hash: None,
             offset: 0,
             attempt: 0,
+            notice_id: None,
             created_at_ms: i as u64,
         }
     }

@@ -86,6 +86,7 @@ fn job(i: usize) -> OutJob {
         hash: Some("ab".repeat(32)),
         offset: 0,
         attempt: 0,
+        notice_id: None,
         created_at_ms: i as u64,
     }
 }

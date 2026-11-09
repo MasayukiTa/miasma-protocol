@@ -233,6 +233,25 @@ pub struct DepositReceipt {
     pub file_key: [u8; 32],
     /// Holders that acknowledged every item (manifest and all chunks).
     pub held_by: Vec<[u8; 32]>,
+    pub sha256: [u8; 32],
+}
+
+impl DepositReceipt {
+    pub(crate) fn into_notice(
+        self,
+        salt: [u8; 16],
+        file_name: String,
+    ) -> crate::chat::proto::FileDepositNotice {
+        crate::chat::proto::FileDepositNotice {
+            file_key: self.file_key,
+            salt,
+            manifest_id: self.manifest_id.0,
+            holders: self.held_by,
+            file_name,
+            size: self.manifest.size,
+            sha256: self.sha256,
+        }
+    }
 }
 
 impl std::fmt::Debug for DepositReceipt {
@@ -284,6 +303,8 @@ pub fn deposit_file<R: std::io::Read>(
         }
     }
 
+    use sha2::{Digest, Sha256};
+    let mut sha256 = Sha256::new();
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; CHUNK_PLAINTEXT];
     let mut index: u64 = 0;
@@ -295,6 +316,7 @@ pub fn deposit_file<R: std::io::Read>(
         }
         let plain = &buf[..n];
         hasher.update(plain);
+        sha256.update(plain);
         total += n as u64;
         let (key, nonce) = fk.item_key_nonce(CHUNK_INFO, index);
         let id = item_id(index, KIND_CHUNK, &salt);
@@ -328,6 +350,7 @@ pub fn deposit_file<R: std::io::Read>(
         manifest_id: mid,
         file_key,
         held_by: surviving,
+        sha256: sha256.finalize().into(),
     })
 }
 
@@ -587,6 +610,14 @@ mod tests {
         assert_eq!(receipt.manifest_id, item_id(0, KIND_MANIFEST, &salt));
         assert_eq!(receipt.manifest.chunks, 4);
         assert_eq!(receipt.manifest.size as usize, file.len());
+        use sha2::{Digest, Sha256};
+        let notice = receipt.clone().into_notice(salt, "example.bin".into());
+        let decoded =
+            crate::chat::proto::FileDepositNotice::decode(&notice.encode().unwrap()).unwrap();
+        assert!(decoded == notice);
+        assert_eq!(decoded.sha256, <[u8; 32]>::from(Sha256::digest(&file)));
+        assert_eq!(decoded.size, file.len() as u64);
+        assert_eq!(decoded.holders, vec![holder_id]);
 
         // Later, the recipient connects (a fresh transport) and fetches.
         let rx = InProcess {

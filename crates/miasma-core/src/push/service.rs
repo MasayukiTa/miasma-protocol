@@ -83,6 +83,7 @@ pub struct PushSettings {
     pub max_send_kib_per_sec: u32,
     /// Replaces the real disk query (tests).
     pub free_space: Option<FreeSpaceFn>,
+    pub offline_deposit_threshold: usize,
 }
 
 impl PushSettings {
@@ -99,6 +100,7 @@ impl PushSettings {
             part_retention: Duration::from_secs(cfg.part_retention_days.saturating_mul(86_400)),
             max_send_kib_per_sec: cfg.max_send_kib_per_sec,
             free_space: None,
+            offline_deposit_threshold: cfg.offline_deposit_threshold,
         }
     }
 }
@@ -679,6 +681,7 @@ impl PushService {
             hash: None,
             offset: 0,
             attempt: 0,
+            notice_id: None,
             created_at_ms: now_ms(),
         };
         self.outbox.put(&rec, true);
@@ -786,7 +789,12 @@ impl PushService {
         }
     }
 
-    async fn run_job(&self, contact_id: &str, conn: &mut Option<Arc<dyn Link>>, mut job: Job) {
+    async fn run_job(
+        self: &Arc<Self>,
+        contact_id: &str,
+        conn: &mut Option<Arc<dyn Link>>,
+        mut job: Job,
+    ) {
         let id = job.id.clone();
         let mut stop = self.shutdown.subscribe();
         if *job.cancel.borrow() {
@@ -819,6 +827,10 @@ impl PushService {
             );
         };
 
+        if job.rec.notice_id.is_some() {
+            self.wait_for_notice(&mut job, &target, &mut stop).await;
+            return;
+        }
         // The file must still be the one that was queued.
         if let Err((kind, m)) = self.check_source(&job) {
             return self.finish_kind(&id, PushState::Failed, Some(m), None, Some(kind));
@@ -892,6 +904,16 @@ impl PushService {
                         IrohClientError::Unreachable(_) => error_kind::UNREACHABLE,
                         _ => error_kind::CONNECTION_LOST,
                     };
+                    if kind == error_kind::UNREACHABLE
+                        && self
+                            .try_offline_deposit(&contact, &job.path, &id)
+                            .await
+                            .is_ok()
+                    {
+                        job.rec.notice_id = self.outbox.get(&id).and_then(|r| r.notice_id);
+                        self.wait_for_notice(&mut job, &target, &mut stop).await;
+                        return;
+                    }
                     if self
                         .wait_retry(&mut job, &mut st, kind, describe_dial_error(&e), &mut stop)
                         .await
@@ -986,6 +1008,108 @@ impl PushService {
                     }
                 }
             }
+        }
+    }
+
+    async fn try_offline_deposit(
+        self: &Arc<Self>,
+        contact: &Contact,
+        path: &Path,
+        transfer_id: &str,
+    ) -> Result<(), String> {
+        use rand::RngCore;
+        let chat = crate::chat::service::service_for(&self.data_dir).ok_or("no chat service")?;
+        let peer = contact.endpoint_bytes().ok_or("no protected session")?;
+        if !chat.core().has_protected_session(&peer) {
+            return Err("no protected session".into());
+        }
+        let holders = chat.holders_for(&peer);
+        if holders.is_empty() {
+            return Err("no holder".into());
+        }
+        let transport = chat.file_mailbox_transport();
+        let path = path.to_owned();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or("invalid file name")?
+            .to_owned();
+        let threshold = self.settings.offline_deposit_threshold;
+        let mut salt = [0; 16];
+        rand::rngs::OsRng.fill_bytes(&mut salt);
+        let receipt = tokio::task::spawn_blocking(move || {
+            let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+            super::deposit::deposit_file(
+                &transport,
+                &holders,
+                &peer,
+                salt,
+                file,
+                now_ms(),
+                threshold,
+            )
+            .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let notice = receipt.into_notice(salt, name);
+        notice.encode().map_err(|e| e.to_string())?;
+        if !chat.core().has_protected_session(&peer) {
+            return Err("no protected session".into());
+        }
+        let message_id = chat
+            .send_file_notice(contact, &notice)
+            .map_err(|e| format!("{e:?}"))?;
+        let mut rec = self.outbox.get(transfer_id).ok_or("transfer missing")?;
+        rec.notice_id = Some(message_id);
+        self.outbox.put(&rec, true);
+        self.board
+            .update(transfer_id, |i| i.state = PushState::Deposited);
+        Ok(())
+    }
+
+    async fn wait_for_notice(
+        &self,
+        job: &mut Job,
+        peer: &[u8; 32],
+        stop: &mut watch::Receiver<bool>,
+    ) {
+        self.board
+            .update(&job.id, |i| i.state = PushState::Deposited);
+        loop {
+            if *job.cancel.borrow() {
+                self.finish(&job.id, PushState::Cancelled, None, None);
+                return;
+            }
+            if *stop.borrow() {
+                return;
+            }
+            if let (Some(chat), Some(id)) = (
+                crate::chat::service::service_for(&self.data_dir),
+                job.rec.notice_id,
+            ) {
+                let mut before = None;
+                loop {
+                    let page = chat.core().history(peer, before, 100);
+                    if page.iter().any(|m| {
+                        m.id == id
+                            && matches!(
+                                m.state,
+                                crate::chat::store::MsgState::Delivered
+                                    | crate::chat::store::MsgState::Read
+                            )
+                    }) {
+                        self.finish(&job.id, PushState::Done, None, None);
+                        return;
+                    }
+                    let next = page.iter().filter(|m| m.ord > 0).map(|m| m.ord).min();
+                    if page.len() < 100 || next.is_none() || next == before {
+                        break;
+                    }
+                    before = next;
+                }
+            }
+            tokio::select! { _ = tokio::time::sleep(Duration::from_secs(5)) => {}, _ = job.cancel.changed() => {}, _ = stop.changed() => {} }
         }
     }
 

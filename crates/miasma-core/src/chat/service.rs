@@ -1070,13 +1070,17 @@ impl ChatService {
     }
 
     /// The trusted contacts, other than `peer`, that could hold a copy for it.
-    fn holders_for(&self, peer: &[u8; 32]) -> Vec<[u8; 32]> {
+    pub(crate) fn holders_for(&self, peer: &[u8; 32]) -> Vec<[u8; 32]> {
         self.contacts
             .list()
             .into_iter()
             .filter_map(|c| c.endpoint_bytes())
             .filter(|id| id != peer)
             .collect()
+    }
+
+    pub(crate) fn file_mailbox_transport(&self) -> super::mailbox::transport::ChatMailboxTransport {
+        super::mailbox::transport::ChatMailboxTransport::for_files(self.node.clone())
     }
 
     /// Leave a copy of the sealed envelope for `peer` with trusted holders,
