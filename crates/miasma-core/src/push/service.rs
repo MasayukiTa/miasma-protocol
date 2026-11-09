@@ -55,6 +55,21 @@ const CLOSE_RETRY: u32 = 408;
 /// Close code of a receive that a newer connection for the same file replaced.
 const CLOSE_SUPERSEDED: u32 = 409;
 
+fn fresh_publish_password() -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>())
+}
+
+#[cfg(test)]
+#[test]
+fn publish_password_is_random_and_unpadded() {
+    let first = fresh_publish_password();
+    let second = fresh_publish_password();
+    assert_eq!(first.len(), 43);
+    assert_ne!(first, second);
+    assert!(!first.contains('='));
+}
+
 type FreeSpaceFn = Arc<dyn Fn(&Path) -> Option<u64> + Send + Sync>;
 
 /// Runtime settings (derived from `[push]` in `config.toml`).
@@ -84,6 +99,7 @@ pub struct PushSettings {
     /// Replaces the real disk query (tests).
     pub free_space: Option<FreeSpaceFn>,
     pub offline_deposit_threshold: usize,
+    pub network_publish_fallback: bool,
 }
 
 impl PushSettings {
@@ -101,6 +117,7 @@ impl PushSettings {
             max_send_kib_per_sec: cfg.max_send_kib_per_sec,
             free_space: None,
             offline_deposit_threshold: cfg.offline_deposit_threshold,
+            network_publish_fallback: cfg.network_publish_fallback,
         }
     }
 }
@@ -207,6 +224,7 @@ struct ContactQueue {
 }
 
 pub struct PushService {
+    coordinator: Mutex<Option<Arc<crate::network::MiasmaCoordinator>>>,
     settings: PushSettings,
     contacts: Arc<ContactStore>,
     board: Board,
@@ -276,6 +294,105 @@ fn stamp(m: &std::fs::Metadata) -> (u64, u64) {
 }
 
 impl PushService {
+    pub fn set_coordinator(&self, coord: Arc<crate::network::MiasmaCoordinator>) {
+        *self.coordinator.lock().unwrap() = Some(coord);
+    }
+
+    async fn publish_to_network(
+        self: &Arc<Self>,
+        path: &Path,
+        password: &str,
+    ) -> Result<String, String> {
+        let coord = self
+            .coordinator
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("network coordinator unavailable")?;
+        let params = crate::pipeline::DissolutionParams::default();
+        let format = crate::config::NodeConfig::load(&self.data_dir)
+            .map(|c| c.transfer.object_format)
+            .unwrap_or_default();
+        let report = coord
+            .dissolve_and_publish_file_protected_with_format(
+                path,
+                params,
+                crate::network::PublishOptions::strict(params),
+                password,
+                format,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        report
+            .share_id
+            .map(|id| id.to_string())
+            .ok_or_else(|| "publish returned no share ID".into())
+    }
+
+    async fn send_network_fallback(
+        self: &Arc<Self>,
+        chat: &Arc<crate::chat::service::ChatService>,
+        contact: &Contact,
+        path: &Path,
+        rec: &mut OutJob,
+    ) -> Result<(), String> {
+        if !self.settings.network_publish_fallback {
+            return Err("no holder accepted the deposit".into());
+        }
+        if rec.network_share_id.is_none() {
+            let password = fresh_publish_password();
+            let share_id = self.publish_to_network(path, &password).await?;
+            rec.network_password = Some(password);
+            rec.network_share_id = Some(share_id);
+            self.outbox.put_checked(rec, true)?;
+        }
+        let hash_path = path.to_owned();
+        let sha256 = tokio::task::spawn_blocking(move || -> Result<[u8; 32], String> {
+            use sha2::{Digest, Sha256};
+            use std::io::Read;
+            let mut file = std::fs::File::open(hash_path).map_err(|e| e.to_string())?;
+            let mut hash = Sha256::new();
+            let mut buf = [0u8; 65536];
+            loop {
+                let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+                if n == 0 {
+                    break;
+                }
+                hash.update(&buf[..n]);
+            }
+            Ok(hash.finalize().into())
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
+        if stamp(&metadata) != (rec.size, rec.mtime_ms) {
+            return Err("deposit source changed".into());
+        }
+        let notice = crate::chat::proto::NetworkFileNotice {
+            share_id: rec
+                .network_share_id
+                .clone()
+                .ok_or("network share missing")?,
+            password: rec
+                .network_password
+                .clone()
+                .ok_or("network password missing")?,
+            file_name: rec.name.clone(),
+            size: rec.size,
+            sha256,
+        };
+        rec.notice_id = Some(
+            chat.send_network_file_notice(contact, &notice)
+                .map_err(|e| format!("{e:?}"))?,
+        );
+        if let Err(e) = self.outbox.put_checked(rec, true) {
+            rec.notice_id = None;
+            return Err(e);
+        }
+        self.board
+            .update(&rec.id, |i| i.state = PushState::Deposited);
+        Ok(())
+    }
     /// Create the service and install it as the PUSH_ALPN handler of `node`.
     /// Sends that were queued before the last stop are picked up again.
     pub fn start(data_dir: &Path, node: Arc<IrohNode>, settings: PushSettings) -> Arc<Self> {
@@ -303,6 +420,7 @@ impl PushService {
         let (shutdown, _) = watch::channel(false);
         let (wake, _) = broadcast::channel(64);
         let svc = Arc::new(Self {
+            coordinator: Mutex::new(None),
             inbound_slots: Arc::new(Semaphore::new(settings.max_concurrent_inbound)),
             settings,
             contacts,
@@ -705,6 +823,8 @@ impl PushService {
             notice_id: None,
             deposit_notice: None,
             deposit_intent: None,
+            network_share_id: None,
+            network_password: None,
             created_at_ms: now_ms(),
         };
         self.outbox.put(&rec, true);
@@ -861,7 +981,9 @@ impl PushService {
             last_start: None,
         };
         // A completed deposit owns the transfer even if the source is gone.
-        while (job.rec.deposit_notice.is_some() || job.rec.deposit_intent.is_some())
+        while (job.rec.deposit_notice.is_some()
+            || job.rec.deposit_intent.is_some()
+            || job.rec.network_share_id.is_some())
             && job.rec.notice_id.is_none()
         {
             match self
@@ -959,7 +1081,10 @@ impl PushService {
                         self.wait_for_notice(&mut job, &target, &mut stop).await;
                         return;
                     }
-                    if job.rec.deposit_notice.is_some() || job.rec.deposit_intent.is_some() {
+                    if job.rec.deposit_notice.is_some()
+                        || job.rec.deposit_intent.is_some()
+                        || job.rec.network_share_id.is_some()
+                    {
                         self.retry_deposit_notice(&contact, &mut job, &target, &mut st, &mut stop)
                             .await;
                         return;
@@ -1062,7 +1187,10 @@ impl PushService {
                         self.wait_for_notice(&mut job, &target, &mut stop).await;
                         return;
                     }
-                    if job.rec.deposit_notice.is_some() || job.rec.deposit_intent.is_some() {
+                    if job.rec.deposit_notice.is_some()
+                        || job.rec.deposit_intent.is_some()
+                        || job.rec.network_share_id.is_some()
+                    {
                         self.retry_deposit_notice(&contact, &mut job, &target, &mut st, &mut stop)
                             .await;
                         return;
@@ -1118,7 +1246,10 @@ impl PushService {
         rec: &mut OutJob,
     ) -> Result<(), String> {
         // A changed source needs a new key and salt before another deposit.
-        if rec.deposit_notice.is_none() && rec.deposit_intent.is_some() {
+        if rec.deposit_notice.is_none()
+            && rec.network_share_id.is_none()
+            && rec.deposit_intent.is_some()
+        {
             let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
             if !metadata.is_file() {
                 return Err("deposit source is not a file".into());
@@ -1143,11 +1274,14 @@ impl PushService {
         if !chat.core().has_protected_session(&peer) {
             return Err("no protected session".into());
         }
+        if rec.network_share_id.is_some() {
+            return self.send_network_fallback(&chat, contact, path, rec).await;
+        }
         if rec.deposit_notice.is_none() {
             let mut holders = chat.holders_for(&peer);
             holders.truncate(8);
             if holders.is_empty() {
-                return Err("no holder".into());
+                return self.send_network_fallback(&chat, contact, path, rec).await;
             }
             let transport = chat.file_mailbox_transport();
             let path = path.to_owned();
@@ -1177,7 +1311,7 @@ impl PushService {
             let salt = intent.salt;
             self.outbox.put_checked(rec, true)?;
             let receipt = tokio::task::spawn_blocking(move || {
-                let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+                let file = std::fs::File::open(path).map_err(|e| (false, e.to_string()))?;
                 super::deposit::deposit_file_with_key(
                     &transport,
                     &holders,
@@ -1188,10 +1322,28 @@ impl PushService {
                     now_ms(),
                     threshold,
                 )
-                .map_err(|e| e.to_string())
+                .map_err(|e| {
+                    (
+                        matches!(
+                            &e,
+                            super::deposit::DepositError::NotDeposited { held: 0, .. }
+                        ),
+                        e.to_string(),
+                    )
+                })
             })
             .await
-            .map_err(|e| e.to_string())??;
+            .map_err(|e| e.to_string())?;
+            let receipt = match receipt {
+                Ok(receipt) => receipt,
+                Err((true, _)) => {
+                    let source = PathBuf::from(&rec.path);
+                    return self
+                        .send_network_fallback(&chat, contact, &source, rec)
+                        .await;
+                }
+                Err((false, e)) => return Err(e),
+            };
             let notice = receipt.into_notice(salt, name);
             rec.deposit_notice = Some(notice.encode().map_err(|e| e.to_string())?);
         }
@@ -2375,6 +2527,8 @@ mod tests {
             notice_id: None,
             deposit_notice: None,
             deposit_intent: None,
+            network_share_id: None,
+            network_password: None,
             created_at_ms: 0,
         };
         let contact = Contact {
@@ -2422,6 +2576,8 @@ mod tests {
             attempt: 0,
             notice_id: None,
             deposit_notice: None,
+            network_share_id: None,
+            network_password: None,
             deposit_intent: Some(super::super::outbox::DepositIntent {
                 file_key: old_file_key,
                 salt: old_salt,
@@ -2481,6 +2637,8 @@ mod tests {
             attempt: 0,
             notice_id: None,
             deposit_notice: None,
+            network_share_id: None,
+            network_password: None,
             deposit_intent: Some(super::super::outbox::DepositIntent {
                 file_key: old_file_key,
                 salt: old_salt,

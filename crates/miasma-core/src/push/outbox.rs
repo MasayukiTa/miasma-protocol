@@ -61,6 +61,10 @@ pub struct OutJob {
     pub deposit_notice: Option<Vec<u8>>,
     #[serde(default)]
     pub deposit_intent: Option<DepositIntent>,
+    #[serde(default)]
+    pub network_share_id: Option<String>,
+    #[serde(default)]
+    pub network_password: Option<String>,
     pub created_at_ms: u64,
 }
 
@@ -311,6 +315,17 @@ impl Outbox {
 mod tests {
     use super::*;
 
+    #[test]
+    fn old_job_without_network_fields_loads() {
+        let mut value = serde_json::to_value(job(1)).unwrap();
+        let object = value.as_object_mut().unwrap();
+        object.remove("network_share_id");
+        object.remove("network_password");
+        let restored: OutJob = serde_json::from_value(value).unwrap();
+        assert!(restored.network_share_id.is_none());
+        assert!(restored.network_password.is_none());
+    }
+
     fn job(i: usize) -> OutJob {
         OutJob {
             id: format!("{i:04}"),
@@ -325,6 +340,8 @@ mod tests {
             notice_id: None,
             deposit_notice: None,
             deposit_intent: None,
+            network_share_id: None,
+            network_password: None,
             created_at_ms: i as u64,
         }
     }

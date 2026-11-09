@@ -628,6 +628,9 @@ enabled = true
 /// `[push]` in `config.toml`: where pushed files land and the limits on them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PushConfig {
+    /// Publish a password-protected network share when no contact holder accepts a file (default true).
+    #[serde(default = "default_true")]
+    pub network_publish_fallback: bool,
     /// Requires this many distinct holders to acknowledge every chunk.
     #[serde(default = "default_file_custody_threshold")]
     pub offline_deposit_threshold: usize,
@@ -743,6 +746,7 @@ fn default_file_custody_threshold() -> usize {
 impl Default for PushConfig {
     fn default() -> Self {
         Self {
+            network_publish_fallback: true,
             offline_deposit_threshold: 1,
             inbox_dir: None,
             max_file_size: DEFAULT_PUSH_MAX_FILE_SIZE,
