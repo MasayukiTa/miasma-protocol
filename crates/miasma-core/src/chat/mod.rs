@@ -39,6 +39,8 @@ pub(crate) mod offline_tests;
 #[cfg(all(test, feature = "pqc"))]
 mod pq_tests;
 #[cfg(test)]
+mod push_offline_e2e_test;
+#[cfg(test)]
 mod receipt_tests;
 #[cfg(test)]
 mod restore_tests;

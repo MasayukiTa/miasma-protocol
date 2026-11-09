@@ -12,6 +12,8 @@ pub mod ipc;
 pub mod outbox;
 pub mod pacer;
 pub mod proto;
+#[cfg(feature = "iroh")]
+pub mod receive_offline;
 pub mod retry;
 pub mod speed_fmt;
 pub mod state;

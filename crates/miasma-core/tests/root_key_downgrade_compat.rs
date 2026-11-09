@@ -41,8 +41,7 @@ mod old_v0_1_0 {
                 .map_err(|_| "key derivation failed: master.key has wrong length".to_string())?;
             Ok(arr)
         } else {
-            let mut arr = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut arr);
+            let arr: [u8; 32] = rand::random();
             std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
             atomic_write(&key_path, &arr)?;
             Ok(arr)
@@ -92,8 +91,7 @@ mod old_v0_3_2_beta_11 {
             }
             Ok(arr)
         } else {
-            let mut arr = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut arr);
+            let arr: [u8; 32] = rand::random();
             std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
             miasma_core::secure_file::atomic_write_restricted(&key_path, &arr)
                 .map_err(|e| format!("failed to write master.key: {e}"))?;
