@@ -1108,7 +1108,12 @@ impl PushService {
                 rec.mtime_ms = mtime_ms;
                 rec.hash = None;
                 rec.offset = 0;
-                rec.deposit_intent = None;
+                rec.deposit_intent = Some(super::outbox::DepositIntent {
+                    file_key: rand::random(),
+                    salt: rand::random(),
+                    path: rec.path.clone(),
+                    size,
+                });
                 self.outbox.put_checked(rec, true)?;
             }
         }
@@ -2418,8 +2423,70 @@ mod tests {
             "no chat service"
         );
         let stored = svc.outbox.get(&rec.id).unwrap();
-        assert!(stored.deposit_intent.is_none());
+        let intent = stored.deposit_intent.unwrap();
+        assert_ne!(intent.file_key, [3; 32]);
+        assert_ne!(intent.salt, [4; 16]);
+        assert_eq!(intent.size, 11);
         assert_eq!(stored.size, 11);
+        svc.shutdown();
+    }
+
+    #[tokio::test]
+    async fn mtime_only_change_creates_fresh_deposit_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = PushSettings::from_config(&PushConfig::default(), dir.path());
+        let svc =
+            PushService::start_with_dialer(dir.path(), [1; 32], Arc::new(OfflineDialer), settings);
+        let path = dir.path().join("file");
+        std::fs::write(&path, b"old").unwrap();
+        let (size, mtime_ms) = stamp(&std::fs::metadata(&path).unwrap());
+        let mut rec = OutJob {
+            id: "test".into(),
+            contact_id: "contact".into(),
+            path: path.to_string_lossy().into_owned(),
+            name: "file".into(),
+            size,
+            mtime_ms,
+            hash: None,
+            offset: 0,
+            attempt: 0,
+            notice_id: None,
+            deposit_notice: None,
+            deposit_intent: Some(super::super::outbox::DepositIntent {
+                file_key: [3; 32],
+                salt: [4; 16],
+                path: path.to_string_lossy().into_owned(),
+                size,
+            }),
+            created_at_ms: 0,
+        };
+        let contact = Contact {
+            id: "contact".into(),
+            label: "contact".into(),
+            endpoint_id: hex::encode([2; 32]),
+            added_at: 0,
+            allow_receive: true,
+            allow_send: true,
+            max_file_size: None,
+        };
+        svc.outbox.put_checked(&rec, true).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(modified + Duration::from_secs(5)))
+            .unwrap();
+        assert_eq!(
+            svc.try_offline_deposit(&contact, &path, &mut rec)
+                .await
+                .unwrap_err(),
+            "no chat service"
+        );
+        let stored = svc.outbox.get(&rec.id).unwrap();
+        let intent = stored.deposit_intent.unwrap();
+        assert_ne!(intent.file_key, [3; 32]);
+        assert_ne!(intent.salt, [4; 16]);
+        assert_eq!(intent.size, size);
+        assert_eq!(stored.size, size);
+        assert_ne!(stored.mtime_ms, mtime_ms);
         svc.shutdown();
     }
 
