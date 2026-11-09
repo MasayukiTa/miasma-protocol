@@ -115,6 +115,7 @@ fn error_code(e: CustodyError) -> u8 {
         CustodyError::TooBig => 3,
         CustodyError::Full => 4,
         CustodyError::DepositorBudget => 5,
+        CustodyError::RateLimited => 6,
     }
 }
 
@@ -125,6 +126,7 @@ fn error_from_code(c: u8) -> Option<CustodyError> {
         3 => CustodyError::TooBig,
         4 => CustodyError::Full,
         5 => CustodyError::DepositorBudget,
+        6 => CustodyError::RateLimited,
         _ => return None,
     })
 }
@@ -448,6 +450,9 @@ mod tests {
             Response::Refused(CustodyError::NotTrusted),
             Response::Refused(CustodyError::Disabled),
             Response::Refused(CustodyError::Full),
+            Response::Refused(CustodyError::TooBig),
+            Response::Refused(CustodyError::DepositorBudget),
+            Response::Refused(CustodyError::RateLimited),
         ] {
             let wire = encode_response(&r);
             assert_eq!(decode_response(&wire).unwrap(), (r.clone(), wire.len()));
@@ -455,6 +460,33 @@ mod tests {
                 assert!(decode_response(&wire[..n]).is_err(), "prefix {n}");
             }
         }
+    }
+
+    /// Every custody refusal reason has a distinct wire code and survives a
+    /// round trip, including the new `RateLimited` used when a trusted contact
+    /// hammers the custody store. A gap here would silently turn one refusal
+    /// into another (or into an undecodable frame) on the wire.
+    #[test]
+    fn every_refusal_reason_has_a_distinct_code_and_round_trips() {
+        let all = [
+            CustodyError::Disabled,
+            CustodyError::NotTrusted,
+            CustodyError::TooBig,
+            CustodyError::Full,
+            CustodyError::DepositorBudget,
+            CustodyError::RateLimited,
+        ];
+        let mut codes = std::collections::HashSet::new();
+        for e in all {
+            let c = error_code(e);
+            assert!(codes.insert(c), "duplicate code {c} for {e:?}");
+            assert_eq!(error_from_code(c), Some(e), "code {c} did not round trip");
+        }
+        // The rate-limited reason is the newest code; an older holder never
+        // emits it, and an unknown code still decodes to None (not a panic).
+        assert_eq!(error_code(CustodyError::RateLimited), 6);
+        assert_eq!(error_from_code(0), None);
+        assert_eq!(error_from_code(7), None);
     }
 
     #[test]

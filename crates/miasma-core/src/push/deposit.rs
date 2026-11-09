@@ -41,9 +41,11 @@ use hkdf::Hkdf;
 use rand::RngCore;
 use sha2::Sha256;
 
+use tracing::warn;
+
 use crate::chat::mailbox::{
     client::{MailboxError, MailboxTransport},
-    holder::DepositOutcome,
+    holder::{CustodyError, DepositOutcome},
     ids::{ItemId, RecipientTag},
 };
 
@@ -367,13 +369,28 @@ fn deposit_one(
     needed: usize,
 ) -> Result<(), DepositError> {
     let mut kept: Vec<[u8; 32]> = Vec::with_capacity(surviving.len());
+    // Keep why the last holder that refused did so. A deposit under the
+    // threshold rolls up to `NotDeposited`, which cannot carry a per-holder
+    // reason without changing its shape; recording the last refusal here means
+    // the failure can still say *why* (capacity, trust, budget, ...) instead of
+    // leaving the operator to guess.
+    let mut last_refusal: Option<CustodyError> = None;
     for h in surviving.iter() {
         match transport.deposit(h, tag, id, blob, now_ms) {
             Ok(DepositOutcome::Stored) | Ok(DepositOutcome::Duplicate) => kept.push(*h),
-            Err(MailboxError::Unreachable) | Err(MailboxError::Refused(_)) => {}
+            Err(MailboxError::Unreachable) => {}
+            Err(MailboxError::Refused(e)) => last_refusal = Some(e),
         }
     }
     if kept.len() < needed {
+        if let Some(e) = last_refusal {
+            warn!(
+                held = kept.len(),
+                needed,
+                reason = %e,
+                "a file chunk could not be deposited with enough holders"
+            );
+        }
         return Err(DepositError::NotDeposited {
             held: kept.len(),
             needed,
@@ -439,13 +456,23 @@ fn fetch_any(
     id: ItemId,
     now_ms: u64,
 ) -> Option<Vec<u8>> {
+    // Keep the last refusal so that when no holder yields the item, the log
+    // says why the reachable holders turned it down (not trusted, expired and
+    // swept, ...) rather than silently returning `None`.
+    let mut last_refusal: Option<CustodyError> = None;
     for h in holders {
         if h == recipient {
             continue;
         }
-        if let Ok(Some(blob)) = transport.fetch(h, tag, id, now_ms) {
-            return Some(blob);
+        match transport.fetch(h, tag, id, now_ms) {
+            Ok(Some(blob)) => return Some(blob),
+            Ok(None) => {}
+            Err(MailboxError::Unreachable) => {}
+            Err(MailboxError::Refused(e)) => last_refusal = Some(e),
         }
+    }
+    if let Some(e) = last_refusal {
+        warn!(reason = %e, "an item could not be fetched from any reachable holder");
     }
     None
 }
