@@ -1028,6 +1028,15 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
                 println!("  Listen addr:         {addr}/p2p/{}", s.peer_id);
             }
             println!("  Connected peers:     {}", s.peer_count);
+            println!(
+                "  Network discovery: {}, peers found last round {}",
+                if s.discovery_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+                s.discovery_peers_found
+            );
             println!("  Shares stored:       {}", s.share_count);
             println!(
                 "  Storage used:        {:.1} MiB",
@@ -1141,6 +1150,14 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
     let store = LocalShareStore::open_with_quotas(data_dir, quota_mb, hosted_quota_mb)
         .context("cannot open share store")?;
     println!("Miasma Node Status (daemon not running)");
+    println!(
+        "  Network discovery: {}, peers found last round 0",
+        if config.discovery.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     println!("  Data dir:      {}", data_dir.display());
     println!("  Shares stored: {}", store.list().len());
     println!(
