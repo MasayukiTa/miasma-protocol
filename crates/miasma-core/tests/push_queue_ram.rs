@@ -92,6 +92,7 @@ fn job(i: usize) -> OutJob {
         network_share_id: None,
         network_password: None,
         network_intent: None,
+        publish_placement: None,
         created_at_ms: i as u64,
     }
 }

@@ -284,6 +284,7 @@ pub async fn run(data_dir: &Path, json: bool) -> Result<()> {
             },
             "daemon_running": report.daemon_running,
             "connected_peers": report.peer_count,
+            "storage_candidates_verified_peers": status.as_ref().map(|s| s.verified_peers),
             "iroh_relay_connected": report.iroh_relay_connected,
             "holders_reachable_via_iroh": report.holders_reachable,
             "custody_enabled": report.custody_enabled,
@@ -317,6 +318,10 @@ pub async fn run(data_dir: &Path, json: bool) -> Result<()> {
     match report.peer_count {
         Some(n) => println!("  Connected peers (libp2p):   {n}"),
         None => println!("  Connected peers (libp2p):   unknown (daemon not running)"),
+    }
+    match status.as_ref() {
+        Some(s) => println!("  Storage candidates: {} verified peers", s.verified_peers),
+        None => println!("  Storage candidates: unknown (daemon not running)"),
     }
     println!(
         "  iroh relay connected:       {}",

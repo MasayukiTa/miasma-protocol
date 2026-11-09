@@ -3259,12 +3259,28 @@ impl MiasmaNode {
                 self.pending_share_stores.insert(req_id, (peer_id, reply));
             }
             DhtCommand::SelectStorageCandidates { exclude, reply } => {
+                let connected: Vec<PeerId> = self.swarm.connected_peers().copied().collect();
+                let verified = self.peer_registry.verified_peers();
+                for peer in &connected {
+                    if !self.peer_registry.is_verified(peer) {
+                        info!(%peer, reason = "not_verified", "storage candidate excluded");
+                    }
+                }
+                for peer in &exclude {
+                    info!(%peer, reason = "placement_exclusion", "storage candidate excluded");
+                }
                 let candidates: Vec<PeerId> = self
                     .peer_registry
                     .verified_peers()
                     .into_iter()
                     .filter(|p| !exclude.contains(p))
                     .collect();
+                info!(
+                    connected = connected.len(),
+                    verified = verified.len(),
+                    candidates = candidates.len(),
+                    "storage candidate selection"
+                );
                 let peer_registry = &self.peer_registry;
                 let ranked = self.routing_table.rank_peers(&candidates, |id| {
                     peer_registry
@@ -5876,6 +5892,14 @@ impl MiasmaNode {
                 ..
             } => {
                 let response = self.handle_inbound_store(peer, request.share);
+                match &response {
+                    StoreResponse::Accepted { .. } => {
+                        info!(%peer, outcome = "accepted", "inbound share store")
+                    }
+                    StoreResponse::Rejected(reason) => {
+                        warn!(%peer, %reason, outcome = "refused", "inbound share store")
+                    }
+                }
                 let _ = self
                     .swarm
                     .behaviour_mut()
@@ -5907,7 +5931,7 @@ impl MiasmaNode {
                 error,
                 ..
             } => {
-                warn!("Share store outbound failure: {error}");
+                warn!(%peer, outcome = "request_failed", "share store outbound failure");
                 if let Some(reply) = take_peer_correlated(
                     &mut self.pending_share_stores,
                     &request_id,

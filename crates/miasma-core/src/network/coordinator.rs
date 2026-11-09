@@ -134,7 +134,12 @@ pub(crate) fn estimated_local_share_storage_bytes(
 /// Options controlling how strictly `dissolve_and_publish*_with_options`
 /// enforces real remote distribution before a publish is considered
 /// successful.
-#[derive(Debug, Clone, Copy, Default)]
+pub trait PlacementObserver: Send + Sync {
+    fn on_dissolved(&self, mid: &str, segments: &[(u32, Vec<u16>)], needed: u16);
+    fn on_remote_accept(&self, segment: u32, slot: u16, peer: [u8; 32]);
+}
+
+#[derive(Clone, Default)]
 pub struct PublishOptions {
     /// Minimum number of *distinct* shard slots that must be acknowledged by
     /// *remote* peers (i.e. not counting the publisher's own local copy)
@@ -149,6 +154,7 @@ pub struct PublishOptions {
     /// `PublishOptions::strict` to opt in to the phase's actual "resists
     /// single-node compromise" guarantee.
     pub min_remote_distinct_shards: usize,
+    pub placement_sink: Option<Arc<dyn PlacementObserver>>,
 }
 
 impl PublishOptions {
@@ -161,6 +167,7 @@ impl PublishOptions {
     pub fn strict(params: DissolutionParams) -> Self {
         Self {
             min_remote_distinct_shards: params.data_shards,
+            placement_sink: None,
         }
     }
 
@@ -177,6 +184,7 @@ impl PublishOptions {
     pub fn network_default() -> Self {
         Self {
             min_remote_distinct_shards: 1,
+            placement_sink: None,
         }
     }
 
@@ -333,6 +341,7 @@ pub struct NetworkShareSink {
     /// `MiasmaCoordinator::store_locally_and_distribute`), so this never
     /// needs an explicit reset.
     per_holder_count: Mutex<HashMap<PeerId, usize>>,
+    placement_sink: Option<Arc<dyn PlacementObserver>>,
     /// Shared across segments (and publishes) so a refusal is remembered.
     push_state: Arc<PushState>,
 }
@@ -344,6 +353,7 @@ impl NetworkShareSink {
             total_shards: params.total_shards,
             data_shards: params.data_shards,
             per_holder_count: Mutex::new(HashMap::new()),
+            placement_sink: None,
             push_state: Arc::new(PushState::default()),
         }
     }
@@ -377,9 +387,19 @@ impl ShareSink for NetworkShareSink {
                 .map(|(peer, _)| *peer)
                 .collect()
         };
-        // Peers that already said "no room" are not offered this share either.
-        at_cap.extend(self.push_state.refusing_peers());
-        at_cap.extend(self.push_state.conflicting_peers_for(&share));
+        for peer in &at_cap {
+            tracing::info!(%peer, reason = "per_holder_cap", "storage candidate excluded");
+        }
+        let refused = self.push_state.refusing_peers();
+        for peer in &refused {
+            tracing::info!(%peer, reason = "quota", "storage candidate excluded");
+        }
+        at_cap.extend(refused);
+        let conflicts = self.push_state.conflicting_peers_for(&share);
+        for peer in &conflicts {
+            tracing::info!(%peer, reason = "piece_conflict", "storage candidate excluded");
+        }
+        at_cap.extend(conflicts);
 
         let mut candidates = self.dht_handle.select_storage_candidates(at_cap).await?;
         if candidates.is_empty() {
@@ -400,16 +420,32 @@ impl ShareSink for NetworkShareSink {
         let piece_for_conflict = (share.mid_prefix, segment_index, slot_index);
 
         self.push_state.note_attempt();
-        match self.dht_handle.store_share_on_peer(peer_id, share).await? {
+        let response = match self.dht_handle.store_share_on_peer(peer_id, share).await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(%peer_id, segment_index, slot_index, outcome = "request_failed", "share placement failed");
+                return Err(error);
+            }
+        };
+        match response {
             super::node::StoreResponse::Accepted {
                 advertised_addrs, ..
             } => {
+                tracing::info!(%peer_id, segment_index, slot_index, outcome = "accepted", "share placement");
                 *self
                     .per_holder_count
                     .lock()
                     .unwrap()
                     .entry(peer_id)
                     .or_insert(0) += 1;
+                if let Some(observer) = &self.placement_sink {
+                    let bytes = peer_id.to_bytes();
+                    if let [0, 36, 8, 1, 18, 32, key @ ..] = bytes.as_slice() {
+                        if let Ok(key) = <[u8; 32]>::try_from(key) {
+                            observer.on_remote_accept(segment_index, slot_index, key);
+                        }
+                    }
+                }
                 Ok(ShardLocation {
                     peer_id_bytes: peer_id.to_bytes(),
                     shard_index: slot_index,
@@ -418,6 +454,7 @@ impl ShareSink for NetworkShareSink {
                 })
             }
             super::node::StoreResponse::Rejected(reason) => {
+                tracing::warn!(%peer_id, segment_index, slot_index, %reason, outcome = "refused", "share placement");
                 // A full quota (global or this node's per-peer budget for us) is
                 // a standing answer; "held for another publisher" is standing
                 // for that one piece only; anything else may be transient (not
@@ -880,8 +917,9 @@ impl MiasmaCoordinator {
     ) -> Result<PublishReport, MiasmaError> {
         let (mid, shares) = dissolve(data, params)?;
 
-        let (locations, remote_distinct) =
-            self.store_locally_and_distribute(shares, params).await?;
+        let (locations, remote_distinct) = self
+            .store_locally_and_distribute(shares, params, None)
+            .await?;
 
         if remote_distinct < options.min_remote_distinct_shards {
             return Err(MiasmaError::InsufficientShares {
@@ -1048,11 +1086,18 @@ impl MiasmaCoordinator {
         &self,
         shares: Vec<MiasmaShare>,
         params: DissolutionParams,
+        observer: Option<(&str, &Arc<dyn PlacementObserver>, u16)>,
     ) -> Result<(Vec<ShardLocation>, usize), MiasmaError> {
         for share in &shares {
             self.store.put(share)?;
         }
 
+        if let Some((mid, sink, needed)) = observer {
+            if let Some(share) = shares.first() {
+                let slots = shares.iter().map(|s| s.slot_index).collect();
+                sink.on_dissolved(mid, &[(share.segment_index, slots)], needed);
+            }
+        }
         let peer_bytes = self.peer_id.to_bytes();
         let mut locations: std::collections::HashMap<usize, ShardLocation> = shares
             .iter()
@@ -1069,8 +1114,9 @@ impl MiasmaCoordinator {
             })
             .collect();
 
-        let sink = NetworkShareSink::new(self.dht_handle.clone(), params)
+        let mut sink = NetworkShareSink::new(self.dht_handle.clone(), params)
             .with_push_state(self.push_state.clone());
+        sink.placement_sink = observer.map(|(_, sink, _)| Arc::clone(sink));
         let distributor = ShareDistributor::new(sink, params.data_shards);
         let result = distributor.distribute_segment(shares).await;
         let remote_distinct = result.succeeded.len();
