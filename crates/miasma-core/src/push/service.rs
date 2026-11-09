@@ -840,7 +840,9 @@ impl PushService {
             last_start: None,
         };
         // A completed deposit owns the transfer even if the source is gone.
-        while job.rec.deposit_notice.is_some() && job.rec.notice_id.is_none() {
+        while (job.rec.deposit_notice.is_some() || job.rec.deposit_intent.is_some())
+            && job.rec.notice_id.is_none()
+        {
             match self
                 .try_offline_deposit(&contact, &job.path, &mut job.rec)
                 .await
@@ -1094,16 +1096,20 @@ impl PushService {
         path: &Path,
         rec: &mut OutJob,
     ) -> Result<(), String> {
-        // Never reuse an interrupted deposit's key for a changed source.
-        // Completed deposits no longer depend on the source file.
+        // A changed source needs a new key and salt before another deposit.
         if rec.deposit_notice.is_none() && rec.deposit_intent.is_some() {
-            let unchanged = std::fs::metadata(path)
-                .map(|m| m.is_file() && stamp(&m) == (rec.size, rec.mtime_ms))
-                .unwrap_or(false);
-            if !unchanged {
+            let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
+            if !metadata.is_file() {
+                return Err("deposit source is not a file".into());
+            }
+            let (size, mtime_ms) = stamp(&metadata);
+            if (size, mtime_ms) != (rec.size, rec.mtime_ms) {
+                rec.size = size;
+                rec.mtime_ms = mtime_ms;
+                rec.hash = None;
+                rec.offset = 0;
                 rec.deposit_intent = None;
                 self.outbox.put_checked(rec, true)?;
-                return Err("deposit source changed; send the file again".into());
             }
         }
         let chat = crate::chat::service::service_for(&self.data_dir).ok_or("no chat service")?;
@@ -2366,7 +2372,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn changed_source_discards_interrupted_deposit_intent() {
+    async fn changed_source_resets_interrupted_deposit_intent() {
         let dir = tempfile::tempdir().unwrap();
         let settings = PushSettings::from_config(&PushConfig::default(), dir.path());
         let svc =
@@ -2409,9 +2415,11 @@ mod tests {
             svc.try_offline_deposit(&contact, &path, &mut rec)
                 .await
                 .unwrap_err(),
-            "deposit source changed; send the file again"
+            "no chat service"
         );
-        assert!(svc.outbox.get(&rec.id).unwrap().deposit_intent.is_none());
+        let stored = svc.outbox.get(&rec.id).unwrap();
+        assert!(stored.deposit_intent.is_none());
+        assert_eq!(stored.size, 11);
         svc.shutdown();
     }
 
