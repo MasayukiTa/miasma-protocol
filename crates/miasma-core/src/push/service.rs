@@ -938,7 +938,7 @@ impl PushService {
                         self.wait_for_notice(&mut job, &target, &mut stop).await;
                         return;
                     }
-                    if job.rec.deposit_notice.is_some() {
+                    if job.rec.deposit_notice.is_some() || job.rec.deposit_intent.is_some() {
                         self.retry_deposit_notice(&contact, &mut job, &target, &mut st, &mut stop)
                             .await;
                         return;
@@ -1041,7 +1041,7 @@ impl PushService {
                         self.wait_for_notice(&mut job, &target, &mut stop).await;
                         return;
                     }
-                    if job.rec.deposit_notice.is_some() {
+                    if job.rec.deposit_notice.is_some() || job.rec.deposit_intent.is_some() {
                         self.retry_deposit_notice(&contact, &mut job, &target, &mut st, &mut stop)
                             .await;
                         return;
