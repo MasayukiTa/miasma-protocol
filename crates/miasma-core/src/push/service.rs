@@ -2378,6 +2378,14 @@ mod tests {
 
     #[tokio::test]
     async fn changed_source_resets_interrupted_deposit_intent() {
+        let mut old_file_key = [0u8; 32];
+        let mut old_salt = [0u8; 16];
+        {
+            use rand::rngs::OsRng;
+            use rand::RngCore;
+            OsRng.fill_bytes(&mut old_file_key);
+            OsRng.fill_bytes(&mut old_salt);
+        }
         let dir = tempfile::tempdir().unwrap();
         let settings = PushSettings::from_config(&PushConfig::default(), dir.path());
         let svc =
@@ -2398,8 +2406,8 @@ mod tests {
             notice_id: None,
             deposit_notice: None,
             deposit_intent: Some(super::super::outbox::DepositIntent {
-                file_key: [3; 32],
-                salt: [4; 16],
+                file_key: old_file_key,
+                salt: old_salt,
                 path: path.to_string_lossy().into_owned(),
                 size,
             }),
@@ -2424,8 +2432,8 @@ mod tests {
         );
         let stored = svc.outbox.get(&rec.id).unwrap();
         let intent = stored.deposit_intent.unwrap();
-        assert_ne!(intent.file_key, [3; 32]);
-        assert_ne!(intent.salt, [4; 16]);
+        assert_ne!(intent.file_key, old_file_key);
+        assert_ne!(intent.salt, old_salt);
         assert_eq!(intent.size, 11);
         assert_eq!(stored.size, 11);
         svc.shutdown();
@@ -2433,6 +2441,14 @@ mod tests {
 
     #[tokio::test]
     async fn mtime_only_change_creates_fresh_deposit_intent() {
+        let mut old_file_key = [0u8; 32];
+        let mut old_salt = [0u8; 16];
+        {
+            use rand::rngs::OsRng;
+            use rand::RngCore;
+            OsRng.fill_bytes(&mut old_file_key);
+            OsRng.fill_bytes(&mut old_salt);
+        }
         let dir = tempfile::tempdir().unwrap();
         let settings = PushSettings::from_config(&PushConfig::default(), dir.path());
         let svc =
@@ -2453,8 +2469,8 @@ mod tests {
             notice_id: None,
             deposit_notice: None,
             deposit_intent: Some(super::super::outbox::DepositIntent {
-                file_key: [3; 32],
-                salt: [4; 16],
+                file_key: old_file_key,
+                salt: old_salt,
                 path: path.to_string_lossy().into_owned(),
                 size,
             }),
@@ -2482,8 +2498,8 @@ mod tests {
         );
         let stored = svc.outbox.get(&rec.id).unwrap();
         let intent = stored.deposit_intent.unwrap();
-        assert_ne!(intent.file_key, [3; 32]);
-        assert_ne!(intent.salt, [4; 16]);
+        assert_ne!(intent.file_key, old_file_key);
+        assert_ne!(intent.salt, old_salt);
         assert_eq!(intent.size, size);
         assert_eq!(stored.size, size);
         assert_ne!(stored.mtime_ms, mtime_ms);
