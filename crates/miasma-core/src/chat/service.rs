@@ -93,6 +93,8 @@ pub struct ChatSettings {
     /// copy with trusted holders when a direct send cannot go through
     /// (`chat.custody_enabled`, default off).
     pub custody_enabled: bool,
+    /// Limits and switch for the separate file holder.
+    pub file_custody_limits: crate::push::file_holder::FileCustodyLimits,
     /// How many trusted holders get a copy when a direct send fails
     /// (`chat.custody_copies`, 1-8).
     pub custody_copies: usize,
@@ -125,6 +127,7 @@ impl Default for ChatSettings {
             inbound_per_minute: 30.0,
             group_auto_join: true,
             custody_enabled: false,
+            file_custody_limits: Default::default(),
             custody_copies: crate::config::DEFAULT_CHAT_CUSTODY_COPIES,
             custody_collect_every: Duration::from_secs(300),
             // Baseline for tests and embedders; the daemon takes the mode from
@@ -240,6 +243,7 @@ pub fn start_for_daemon(
         max_message_bytes: cfg.chat.max_message_bytes.clamp(1, proto::MAX_TEXT_BYTES),
         group_auto_join: cfg.chat.group_auto_join,
         custody_enabled: cfg.chat.custody_enabled,
+        file_custody_limits: crate::push::file_holder::FileCustodyLimits::from_config(&cfg.push),
         custody_copies: cfg.chat.custody_copies.clamp(1, 8),
         pqc_mode: cfg.privacy.pqc_mode(),
         anchor_dir: crate::paths::anchor_dir(data_dir),
@@ -314,6 +318,7 @@ pub struct ChatService {
     /// The holder store, when `custody_enabled` is on; `None` keeps the node
     /// holding nothing and answering no custody verb (exactly as before).
     custody: Option<Arc<dyn super::mailbox::holder::CustodyStore>>,
+    file_custody: Option<Arc<dyn super::mailbox::holder::CustodyStore>>,
     /// Wakes the collection task so it asks holders at once (on a fresh inbound
     /// connection, say). The task also runs on its own timer. Unused when
     /// custody is off.
@@ -405,6 +410,28 @@ impl ChatService {
             } else {
                 None
             };
+        let file_custody: Option<Arc<dyn super::mailbox::holder::CustodyStore>> =
+            if settings.file_custody_limits.enabled {
+                match crate::push::file_holder::DiskFileCustody::new(
+                    settings.file_custody_limits.clone(),
+                    crate::paths::chat_file_custody_dir(chat_dir),
+                ) {
+                    Ok(store) => {
+                        for c in contacts.list() {
+                            if let Some(id) = c.endpoint_bytes() {
+                                store.trust(id);
+                            }
+                        }
+                        Some(Arc::new(store))
+                    }
+                    Err(e) => {
+                        warn!("file custody stays off: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
         let svc = Arc::new(Self {
             core,
             contacts,
@@ -423,6 +450,7 @@ impl ChatService {
             shutdown,
             activity: ChatActivity::new(),
             custody,
+            file_custody,
             custody_collect: Arc::new(Notify::new()),
             groups: OnceLock::new(),
             #[cfg(feature = "pqc")]
@@ -987,16 +1015,29 @@ impl ChatService {
         rx: &mut iroh::endpoint::RecvStream,
     ) {
         use super::mailbox::holder::CustodyStore;
-        use super::mailbox::wire::{self, Request, Response};
-        let Some(store) = self.custody.clone() else {
-            return;
-        };
-        store.trust(*who);
+        use super::mailbox::wire::{self, Request, Response, StoreSelector};
         let req =
-            match tokio::time::timeout(self.settings.read_timeout, wire::read_request(rx)).await {
+            match tokio::time::timeout(self.settings.read_timeout, wire::read_selected_request(rx))
+                .await
+            {
                 Ok(Ok(r)) => r,
                 _ => return,
             };
+        let (selector, req) = req;
+        let store = match selector {
+            StoreSelector::Chat => self.custody.clone(),
+            StoreSelector::File => self.file_custody.clone(),
+        };
+        let Some(store) = store else {
+            let _ = wire::write_response(
+                tx,
+                &Response::Refused(super::mailbox::holder::CustodyError::Disabled),
+            )
+            .await;
+            let _ = tx.finish();
+            return;
+        };
+        store.trust(*who);
         let now = now_ms();
         let who = *who;
         let resp = tokio::task::spawn_blocking(move || match req {
@@ -1256,7 +1297,7 @@ impl ChatService {
                 _ => break,
             };
             if first == super::mailbox::wire::CUSTODY_STREAM_TAG {
-                if self.custody.is_some() && self.contact_may_write(&remote) {
+                if self.contact_may_write(&remote) {
                     self.serve_custody(&remote, &mut tx, &mut rx).await;
                 } else {
                     // Not offering custody, or not a contact that may use it.

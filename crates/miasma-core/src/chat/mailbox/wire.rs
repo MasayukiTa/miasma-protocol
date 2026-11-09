@@ -42,6 +42,13 @@ pub enum WireError {
     Malformed(&'static str),
 }
 
+/// The holder store addressed by a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreSelector {
+    Chat,
+    File,
+}
+
 /// A request from a depositor/collector to a holder.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Request {
@@ -162,6 +169,15 @@ pub fn encode_request(r: &Request) -> Vec<u8> {
     }
 }
 
+/// File requests use distinct type bytes that older holders reject.
+pub fn encode_selected_request(store: StoreSelector, r: &Request) -> Vec<u8> {
+    let mut bytes = encode_request(r);
+    if store == StoreSelector::File {
+        bytes[4] += 4;
+    }
+    bytes
+}
+
 pub fn encode_response(r: &Response) -> Vec<u8> {
     match r {
         Response::Deposited(o) => {
@@ -276,6 +292,22 @@ pub fn decode_request(b: &[u8]) -> Result<(Request, usize), WireError> {
     Ok((decode_body_request(body)?, used))
 }
 
+fn decode_selected_body(body: &[u8]) -> Result<(StoreSelector, Request), WireError> {
+    let (&ty, _) = body.split_first().ok_or(WireError::BadLength(0))?;
+    if (REQ_DEPOSIT + 4..=REQ_DELETE + 4).contains(&ty) {
+        let mut original = body.to_vec();
+        original[0] -= 4;
+        Ok((StoreSelector::File, decode_body_request(&original)?))
+    } else {
+        Ok((StoreSelector::Chat, decode_body_request(body)?))
+    }
+}
+
+pub fn decode_selected_request(b: &[u8]) -> Result<((StoreSelector, Request), usize), WireError> {
+    let (body, used) = split_frame(b)?;
+    Ok((decode_selected_body(body)?, used))
+}
+
 /// Decode one response from the front of `b`; returns it and the bytes used.
 pub fn decode_response(b: &[u8]) -> Result<(Response, usize), WireError> {
     let (body, used) = split_frame(b)?;
@@ -316,6 +348,22 @@ pub async fn write_request<W: AsyncWrite + Unpin>(w: &mut W, r: &Request) -> Res
     w.write_all(&encode_request(r))
         .await
         .map_err(|e| WireError::Io(e.to_string()))
+}
+
+pub async fn write_selected_request<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    store: StoreSelector,
+    r: &Request,
+) -> Result<(), WireError> {
+    w.write_all(&encode_selected_request(store, r))
+        .await
+        .map_err(|e| WireError::Io(e.to_string()))
+}
+
+pub async fn read_selected_request<R: AsyncRead + Unpin>(
+    r: &mut R,
+) -> Result<(StoreSelector, Request), WireError> {
+    decode_selected_body(&read_frame(r).await?)
 }
 
 pub async fn write_response<W: AsyncWrite + Unpin>(
@@ -368,7 +416,18 @@ mod tests {
                 item: item(),
             },
         ] {
+            for store in [StoreSelector::Chat, StoreSelector::File] {
+                let wire = encode_selected_request(store, &r);
+                assert_eq!(
+                    decode_selected_request(&wire).unwrap(),
+                    ((store, r.clone()), wire.len())
+                );
+            }
             let wire = encode_request(&r);
+            assert_eq!(
+                decode_selected_request(&wire).unwrap(),
+                ((StoreSelector::Chat, r.clone()), wire.len())
+            );
             assert_eq!(decode_request(&wire).unwrap(), (r.clone(), wire.len()));
             for n in 0..wire.len() {
                 assert!(decode_request(&wire[..n]).is_err(), "prefix {n}");

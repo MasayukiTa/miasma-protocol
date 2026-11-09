@@ -1398,6 +1398,11 @@ pub fn chat_custody_file(chat_dir: &Path) -> PathBuf {
     chat_dir.join("custody.doc")
 }
 
+/// Directory for file custody items, separate from chat custody.
+pub fn chat_file_custody_dir(chat_dir: &Path) -> PathBuf {
+    chat_dir.join("file-custody")
+}
+
 /// `<chat dir>/<stem>.grp`: the state document of one group.
 pub fn chat_group_file(chat_dir: &Path, stem: &str) -> PathBuf {
     chat_dir.join(format!("{stem}.grp"))
