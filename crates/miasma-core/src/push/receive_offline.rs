@@ -86,3 +86,20 @@ pub fn fetch_verified(
     drop(file);
     Ok(place_without_overwrite(&part.0, dir, &name)?)
 }
+
+/// Run a verified fetch away from the async receive loop.
+pub fn spawn_fetch(
+    transport: std::sync::Arc<dyn MailboxTransport + Send + Sync>,
+    recipient: [u8; 32],
+    notice: FileDepositNotice,
+    dir: PathBuf,
+    now_ms: u64,
+) -> tokio::task::JoinHandle<Result<PathBuf, ReceiveError>> {
+    tokio::spawn(async move {
+        tokio::task::spawn_blocking(move || {
+            fetch_verified(transport.as_ref(), &recipient, &notice, &dir, now_ms)
+        })
+        .await
+        .unwrap_or_else(|e| Err(ReceiveError::Io(std::io::Error::other(e))))
+    })
+}
