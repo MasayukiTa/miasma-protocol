@@ -3,7 +3,7 @@
 use std::{
     collections::HashSet,
     fs,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
 };
@@ -18,6 +18,8 @@ use crate::chat::{mailbox::client::MailboxTransport, proto::FileDepositNotice};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReceiveError {
+    #[error("file was already received")]
+    AlreadyReceived,
     #[error("invalid deposit notice")]
     InvalidNotice,
     #[error("deposit fetch failed: {0}")]
@@ -90,6 +92,26 @@ pub fn fetch_verified(
 }
 
 static FETCHED: OnceLock<Mutex<HashSet<[u8; 16]>>> = OnceLock::new();
+static DONE_LOCK: Mutex<()> = Mutex::new(());
+
+fn is_done(dir: &Path, id: &[u8; 16]) -> std::io::Result<bool> {
+    let _guard = DONE_LOCK.lock().unwrap();
+    match fs::read_to_string(dir.join(".offline-done")) {
+        Ok(contents) => Ok(contents.lines().any(|line| line == hex::encode(id))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+fn mark_done(dir: &Path, id: &[u8; 16]) -> std::io::Result<()> {
+    let _guard = DONE_LOCK.lock().unwrap();
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(".offline-done"))?;
+    writeln!(file, "{}", hex::encode(id))?;
+    file.sync_all()
+}
 
 /// Run a verified fetch away from the async receive loop. Duplicate manifest IDs
 /// are ignored for the lifetime of this process, including failed attempts.
@@ -110,7 +132,12 @@ pub fn spawn_fetch(
     }
     Some(tokio::spawn(async move {
         tokio::task::spawn_blocking(move || {
-            fetch_verified(transport.as_ref(), &recipient, &notice, &dir, now_ms)
+            if is_done(&dir, &notice.manifest_id)? {
+                return Err(ReceiveError::AlreadyReceived);
+            }
+            let path = fetch_verified(transport.as_ref(), &recipient, &notice, &dir, now_ms)?;
+            mark_done(&dir, &notice.manifest_id)?;
+            Ok(path)
         })
         .await
         .unwrap_or_else(|e| Err(ReceiveError::Io(std::io::Error::other(e))))
