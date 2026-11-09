@@ -331,14 +331,18 @@ where
             return Err("publish source is not a file".into());
         }
         let (size, mtime_ms) = stamp(&metadata);
+        // Timestamps can be preserved or rounded, so they cannot establish
+        // that a retry still refers to the same source bytes.
+        let sha256 = network_source_hash(path).await?;
+        if stamp(&std::fs::metadata(path).map_err(|e| e.to_string())?) != (size, mtime_ms) {
+            return Err("publish source changed while hashing".into());
+        }
         let matches = rec.network_intent.as_ref().is_some_and(|intent| {
-            intent.path == rec.path && (intent.size, intent.mtime_ms) == (size, mtime_ms)
+            intent.path == rec.path
+                && (intent.size, intent.mtime_ms) == (size, mtime_ms)
+                && intent.sha256 == sha256
         });
         if !matches {
-            let sha256 = network_source_hash(path).await?;
-            if stamp(&std::fs::metadata(path).map_err(|e| e.to_string())?) != (size, mtime_ms) {
-                return Err("publish source changed while hashing".into());
-            }
             rec.size = size;
             rec.mtime_ms = mtime_ms;
             rec.hash = None;
@@ -2719,6 +2723,31 @@ mod tests {
         .await;
         let old = rec.network_intent.as_ref().unwrap().password.clone();
         std::fs::write(&path, b"changed source").unwrap();
+        ensure_network_share(&outbox, &mut rec, &path, |_, password| {
+            assert_ne!(password, old);
+            std::future::ready(Ok("share".into()))
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn changed_source_with_matching_stamp_gets_new_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        std::fs::write(&path, b"original").unwrap();
+        let outbox = Outbox::open(dir.path());
+        let mut rec = network_job(&path);
+        let _ = ensure_network_share(&outbox, &mut rec, &path, |_, _| async {
+            Err("interrupted".into())
+        })
+        .await;
+        let old = rec.network_intent.as_ref().unwrap().password.clone();
+        std::fs::write(&path, b"modified").unwrap();
+        let (size, mtime_ms) = stamp(&std::fs::metadata(&path).unwrap());
+        let intent = rec.network_intent.as_mut().unwrap();
+        intent.size = size;
+        intent.mtime_ms = mtime_ms;
         ensure_network_share(&outbox, &mut rec, &path, |_, password| {
             assert_ne!(password, old);
             std::future::ready(Ok("share".into()))
