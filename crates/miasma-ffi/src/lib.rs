@@ -424,6 +424,7 @@ pub fn initialize_node(
                 bootstrap_peers: vec![],
             },
             transport: Default::default(),
+            discovery: Default::default(),
             push: Default::default(),
             chat: Default::default(),
             privacy: Default::default(),

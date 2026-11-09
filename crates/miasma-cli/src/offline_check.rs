@@ -255,9 +255,28 @@ fn deposit_line(v: DepositVerdict) -> &'static str {
 pub async fn run(data_dir: &Path, json: bool) -> Result<()> {
     let input = collect(data_dir).await;
     let report = evaluate(&input);
+    let status =
+        match miasma_core::daemon_request(data_dir, miasma_core::ControlRequest::Status).await {
+            Ok(miasma_core::ControlResponse::Status(s)) => Some(s),
+            _ => None,
+        };
+    let discovery_enabled = status
+        .as_ref()
+        .map(|s| s.discovery_enabled)
+        .unwrap_or_else(|| {
+            NodeConfig::load(data_dir)
+                .map(|c| c.discovery.enabled)
+                .unwrap_or(false)
+        });
+    let discovery_peers_found = status
+        .as_ref()
+        .map(|s| s.discovery_peers_found)
+        .unwrap_or(0);
 
     if json {
         let obj = serde_json::json!({
+            "discovery_enabled": discovery_enabled,
+            "discovery_peers_found": discovery_peers_found,
             "bootstrap_reachability": match report.bootstrap {
                 BootstrapReach::NoneConfigured => "none_configured",
                 BootstrapReach::OnlyPrivate => "only_private",
@@ -282,6 +301,15 @@ pub async fn run(data_dir: &Path, json: bool) -> Result<()> {
     }
 
     println!("Miasma Offline-Delivery Self-Check");
+    println!(
+        "  Network discovery: {}, peers found last round {}",
+        if discovery_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        discovery_peers_found
+    );
     println!(
         "  Bootstrap reachability:     {}",
         bootstrap_line(report.bootstrap)

@@ -17,6 +17,8 @@ pub mod cover_traffic;
 pub mod crypto;
 pub mod daemon;
 pub mod directed;
+#[cfg(feature = "mainline-discovery")]
+pub mod discovery;
 pub mod dissolution;
 pub mod error;
 pub mod format;

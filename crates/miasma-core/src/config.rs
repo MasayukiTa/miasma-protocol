@@ -15,6 +15,9 @@ pub struct NodeConfig {
     pub storage: StorageConfig,
     #[serde(default)]
     pub network: NetworkConfig,
+    /// Public DHT rendezvous discovery.
+    #[serde(default)]
+    pub discovery: DiscoveryConfig,
     #[serde(default)]
     pub transport: TransportConfig,
     /// Trusted-contact push.
@@ -35,6 +38,34 @@ pub struct NodeConfig {
     /// Calls (on by default; no audio device yet).
     #[serde(default)]
     pub call: CallConfig,
+}
+
+/// Settings for finding peers through the public Mainline DHT.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DiscoveryConfig {
+    /// Disable to prevent all Mainline discovery traffic.
+    pub enabled: bool,
+    /// Disable to look up peers without announcing this node's address.
+    pub announce: bool,
+    /// Override DHT bootstrap nodes; empty uses the Mainline defaults.
+    pub bootstrap: Vec<String>,
+    /// Interval in seconds for refreshing announcements and lookups.
+    pub refresh_secs: u64,
+    /// Permit non-public addresses, intended only for isolated test networks.
+    pub allow_private: bool,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            announce: true,
+            bootstrap: Vec::new(),
+            refresh_secs: 900,
+            allow_private: false,
+        }
+    }
 }
 
 /// `[call]` in `config.toml`: the call runtime.

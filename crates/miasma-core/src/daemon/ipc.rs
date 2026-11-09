@@ -934,6 +934,10 @@ pub struct DaemonStatus {
     /// The iroh direct transport; `None` when it is off or not compiled in.
     #[serde(default)]
     pub iroh: Option<IrohStatus>,
+    #[serde(default)]
+    pub discovery_enabled: bool,
+    #[serde(default)]
+    pub discovery_peers_found: usize,
     pub peer_id: String,
     pub listen_addrs: Vec<String>,
     pub peer_count: usize,

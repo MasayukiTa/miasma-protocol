@@ -789,6 +789,10 @@ pub enum DhtCommand {
         addr: Multiaddr,
         reply: oneshot::Sender<()>,
     },
+    /// Dial discovery hints.
+    DialDiscovery {
+        addresses: Vec<std::net::SocketAddr>,
+    },
     /// Trigger Kademlia FIND_NODE bootstrap for this node's own key.
     BootstrapDht {
         reply: oneshot::Sender<Result<(), MiasmaError>>,
@@ -1680,6 +1684,17 @@ impl DhtHandle {
             .await
             .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))?;
         self.recv_reply(rx, "send_directed_request").await?
+    }
+
+    /// Queue discovery hints for dialing.
+    pub async fn dial_discovery(
+        &self,
+        addresses: Vec<std::net::SocketAddr>,
+    ) -> Result<(), MiasmaError> {
+        self.tx
+            .send(DhtCommand::DialDiscovery { addresses })
+            .await
+            .map_err(|_| MiasmaError::Network("DHT command channel closed".into()))
     }
 
     /// Get all connected peers and their known addresses.
@@ -2892,6 +2907,17 @@ impl MiasmaNode {
                     debug!("bootstrap dial queued error (may be harmless): {e}");
                 }
                 let _ = reply.send(());
+            }
+            DhtCommand::DialDiscovery { addresses } => {
+                let connected = self
+                    .authenticated_dial_addrs
+                    .values()
+                    .map(|(_, addr)| addr.clone())
+                    .collect();
+                for addr in discovery_dial_addrs(addresses, &connected) {
+                    // Swarm dials without a peer ID; QUIC authenticates the remote peer.
+                    let _ = self.swarm.dial(addr);
+                }
             }
             DhtCommand::BootstrapDht { reply } => {
                 let result = self
@@ -8089,5 +8115,51 @@ mod directed_v2_receive_tests {
             }
             other => panic!("a genuine resend under the stored id must be accepted, got {other:?}"),
         }
+    }
+}
+
+fn discovery_dial_addrs(
+    addresses: Vec<std::net::SocketAddr>,
+    connected: &std::collections::HashSet<Multiaddr>,
+) -> Vec<Multiaddr> {
+    let mut seen = connected.clone();
+    addresses
+        .into_iter()
+        .filter_map(|socket| {
+            let addr: Multiaddr = match socket {
+                std::net::SocketAddr::V4(a) => format!("/ip4/{}/udp/{}/quic-v1", a.ip(), a.port()),
+                std::net::SocketAddr::V6(a) => format!("/ip6/{}/udp/{}/quic-v1", a.ip(), a.port()),
+            }
+            .parse()
+            .ok()?;
+            seen.insert(addr.clone()).then_some(addr)
+        })
+        .take(8)
+        .collect()
+}
+
+#[cfg(test)]
+mod discovery_filter_tests {
+    use super::*;
+    #[test]
+    fn skips_connected_duplicates_and_limits_dials() {
+        let addresses: Vec<std::net::SocketAddr> = (1..=12)
+            .map(|port| format!("127.0.0.1:{port}").parse().unwrap())
+            .collect();
+        let connected = ["/ip4/127.0.0.1/udp/1/quic-v1".parse().unwrap()]
+            .into_iter()
+            .collect();
+        let mut input = addresses.clone();
+        input.push(addresses[1]);
+        let result = discovery_dial_addrs(input, &connected);
+        assert_eq!(result.len(), 8);
+        assert!(!result.contains(&"/ip4/127.0.0.1/udp/1/quic-v1".parse().unwrap()));
+        assert_eq!(
+            result
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            8
+        );
     }
 }
