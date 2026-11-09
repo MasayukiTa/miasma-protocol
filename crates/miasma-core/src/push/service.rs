@@ -225,6 +225,7 @@ struct ContactQueue {
 
 pub struct PushService {
     coordinator: Mutex<Option<Arc<crate::network::MiasmaCoordinator>>>,
+    network_coordinator: OnceLock<Arc<crate::network::MiasmaCoordinator>>,
     settings: PushSettings,
     contacts: Arc<ContactStore>,
     board: Board,
@@ -481,6 +482,7 @@ impl PushService {
         let (wake, _) = broadcast::channel(64);
         let svc = Arc::new(Self {
             coordinator: Mutex::new(None),
+            network_coordinator: OnceLock::new(),
             inbound_slots: Arc::new(Semaphore::new(settings.max_concurrent_inbound)),
             settings,
             contacts,
@@ -801,6 +803,18 @@ impl PushService {
             }
         }
         let _ = std::fs::remove_dir(&dir); // only if empty
+    }
+
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    pub(crate) fn set_network_coordinator(&self, coord: Arc<crate::network::MiasmaCoordinator>) {
+        let _ = self.network_coordinator.set(coord);
+    }
+
+    pub(crate) fn network_coordinator(&self) -> Option<Arc<crate::network::MiasmaCoordinator>> {
+        self.network_coordinator.get().cloned()
     }
 
     pub fn contact_dir(&self, label: &str) -> PathBuf {

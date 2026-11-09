@@ -1160,6 +1160,21 @@ impl ChatService {
         rep.held_by.len()
     }
 
+    fn receive_network_notice(&self, peer: [u8; 32], notice: proto::NetworkFileNotice) {
+        let Some(contact) = self.contacts.by_endpoint(&peer).filter(|c| c.allow_receive) else {
+            return;
+        };
+        let Some(push) = self
+            .settings
+            .offline_data_dir
+            .as_deref()
+            .and_then(crate::push::service::service_for)
+        else {
+            return;
+        };
+        crate::push::receive_network::spawn_receive(push, contact, notice);
+    }
+
     fn receive_file_notice(&self, peer: [u8; 32], notice: proto::FileDepositNotice) {
         let Some(contact) = self.contacts.by_endpoint(&peer).filter(|c| c.allow_receive) else {
             return;
@@ -1228,7 +1243,7 @@ impl ChatService {
                 &|notice| {
                     self.receive_file_notice(*sender, notice);
                 },
-                &|_| {},
+                &|notice| self.receive_network_notice(*sender, notice),
             )
             .status
             .is_delivered()
@@ -1456,7 +1471,7 @@ impl ChatService {
                                 );
                             }),
                             &|notice| service.receive_file_notice(remote, notice),
-                            &|_| {},
+                            &|notice| service.receive_network_notice(remote, notice),
                         );
                     }
                     core.accept_with_notice(
@@ -1467,7 +1482,7 @@ impl ChatService {
                         &|notice| {
                             service.receive_file_notice(remote, notice);
                         },
-                        &|_| {},
+                        &|notice| service.receive_network_notice(remote, notice),
                     )
                 })
                 .await
