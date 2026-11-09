@@ -111,7 +111,7 @@ jobs:
       # verified file. Named here so a regression fails this job by name.
       # Platform-neutral (no network, no feature flags).
       - name: Test offline file delivery end-to-end
-        run: cargo test -p miasma-core --locked --test push_offline_e2e_test
+        run: cargo test -p miasma-core --locked --lib chat::push_offline_e2e_test
 
   test-core-pqc:
     name: Core Tests, opt-in hybrid feature (Ubuntu)
