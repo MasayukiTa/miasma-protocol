@@ -556,3 +556,53 @@ fn a_text_record_with_fields_appended_by_a_newer_build_is_read() {
     assert_eq!(b.core.accept(&a.id(), &wire, 2).status, AckStatus::Stored);
     assert_eq!(b.texts(&a.id()), ["hello"]);
 }
+
+#[test]
+fn notice_dispatch_preserves_plain_text_and_deduplicates() {
+    use super::{file_notice::notice_to_text, proto::FileDepositNotice};
+    use std::cell::RefCell;
+
+    let a = side();
+    let b = side();
+    let received = RefCell::new(Vec::new());
+    let notice = FileDepositNotice {
+        file_key: [1; 32],
+        salt: [2; 16],
+        manifest_id: [3; 16],
+        holders: vec![[4; 32]],
+        file_name: "example.bin".into(),
+        size: 5,
+        sha256: [6; 32],
+    };
+    let id = a
+        .core
+        .enqueue(&b.id(), &notice_to_text(&notice), 1)
+        .unwrap();
+    let (wire, _) = a.core.prepare_wire(&id).unwrap();
+    let dispatch = |n| received.borrow_mut().push(n);
+    assert_eq!(
+        b.core
+            .accept_with_notice(&a.id(), &wire, 5, None, &dispatch)
+            .status,
+        AckStatus::Stored
+    );
+    assert!(b.texts(&a.id()).is_empty());
+    assert!(received.borrow().as_slice() == [notice]);
+    assert_eq!(
+        b.core
+            .accept_with_notice(&a.id(), &wire, 6, None, &dispatch)
+            .status,
+        AckStatus::Duplicate
+    );
+    assert_eq!(received.borrow().len(), 1);
+    a.core.mark_delivered(&id, 7);
+    let id = a.core.enqueue(&b.id(), "ordinary text", 8).unwrap();
+    let (wire, _) = a.core.prepare_wire(&id).unwrap();
+    assert_eq!(
+        b.core
+            .accept_with_notice(&a.id(), &wire, 9, None, &dispatch)
+            .status,
+        AckStatus::Stored
+    );
+    assert_eq!(b.texts(&a.id()), vec!["ordinary text"]);
+}
