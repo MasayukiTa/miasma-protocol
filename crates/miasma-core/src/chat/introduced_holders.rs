@@ -99,11 +99,21 @@ impl IntroducedHolders {
         }
         Ok(inserted)
     }
-    pub fn holders_for_deposit(&self, now: u64, exclude: &[[u8; 32]]) -> Vec<[u8; 32]> {
+    pub fn holders_for_deposit(
+        &self,
+        now: u64,
+        exclude: &[[u8; 32]],
+        files: bool,
+    ) -> Vec<[u8; 32]> {
         self.entries
             .iter()
             .filter(|e| {
                 e.expires_ms > now
+                    && (if files {
+                        e.file_custody
+                    } else {
+                        e.chat_custody
+                    })
                     && !exclude.contains(&e.endpoint_id)
                     && !self.contacts.contains(&e.endpoint_id)
             })
@@ -124,6 +134,28 @@ mod tests {
             chat_custody: false,
             first_seen_ms: 1,
         }
+    }
+    #[test]
+    fn selects_only_requested_custody_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let own = rand::random();
+        let contact = rand::random();
+        let mut store = IntroducedHolders::open(dir.path(), own, &[contact], 1).unwrap();
+        let file = entry(contact, 10);
+        let mut chat = entry(contact, 10);
+        chat.file_custody = false;
+        chat.chat_custody = true;
+        store.insert(file.clone(), 1, &[contact]).unwrap();
+        store.insert(chat.clone(), 1, &[contact]).unwrap();
+        assert_eq!(
+            store.holders_for_deposit(1, &[], true),
+            vec![file.endpoint_id]
+        );
+        assert_eq!(
+            store.holders_for_deposit(1, &[], false),
+            vec![chat.endpoint_id]
+        );
+        assert!(store.holders_for_deposit(10, &[], false).is_empty());
     }
     #[test]
     fn limits_expiry_and_persistence() {
@@ -149,19 +181,19 @@ mod tests {
         assert!(!store
             .insert(entry(rand::random(), 10), 1, &[contact])
             .unwrap());
-        let all = store.holders_for_deposit(1, &[]);
+        let all = store.holders_for_deposit(1, &[], true);
         assert_eq!(all.len(), 64);
-        assert_eq!(store.holders_for_deposit(1, &all[..1]).len(), 63);
+        assert_eq!(store.holders_for_deposit(1, &all[..1], true).len(), 63);
         drop(store);
         let mut store = IntroducedHolders::open(dir.path(), own, &[contact], 1).unwrap();
-        assert_eq!(store.holders_for_deposit(1, &[]), all);
-        assert!(store.holders_for_deposit(10, &[]).is_empty());
+        assert_eq!(store.holders_for_deposit(1, &[], true), all);
+        assert!(store.holders_for_deposit(10, &[], true).is_empty());
         assert!(store.insert(entry(contact, 20), 10, &[contact]).unwrap());
         drop(store);
         assert_eq!(
             IntroducedHolders::open(dir.path(), own, &[contact], 10)
                 .unwrap()
-                .holders_for_deposit(10, &[])
+                .holders_for_deposit(10, &[], true)
                 .len(),
             1
         );

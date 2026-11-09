@@ -315,6 +315,7 @@ struct Worker {
 pub struct ChatService {
     core: Arc<ChatCore>,
     contacts: Arc<ContactStore>,
+    introduced_holders: Mutex<super::introduced_holders::IntroducedHolders>,
     node: Arc<IrohNode>,
     settings: ChatSettings,
     unknown: Mutex<Buckets>,
@@ -452,7 +453,25 @@ impl ChatService {
             } else {
                 None
             };
+        let contact_ids: Vec<_> = contacts
+            .list()
+            .iter()
+            .filter_map(|c| c.endpoint_bytes())
+            .collect();
+        let introduced_holders = match super::introduced_holders::IntroducedHolders::open(
+            chat_dir.parent()?,
+            core.own_id(),
+            &contact_ids,
+            now_ms(),
+        ) {
+            Ok(store) => Mutex::new(store),
+            Err(e) => {
+                warn!("chat stays off: {e}");
+                return None;
+            }
+        };
         let svc = Arc::new(Self {
+            introduced_holders,
             core,
             contacts,
             node: node.clone(),
@@ -524,6 +543,21 @@ impl ChatService {
                     tokio::select! {
                         _ = tokio::time::sleep(me.settings.custody_collect_every) => {}
                         _ = wake.notified() => {}
+                        _ = stop.changed() => return,
+                    }
+                }
+            });
+        }
+        if svc.settings.custody_enabled || svc.settings.file_custody_limits.enabled {
+            let me = svc.clone();
+            let mut stop = svc.shutdown.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    for contact in me.contacts.list() {
+                        me.introduce_self(&contact);
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(12 * 3600)) => {}
                         _ = stop.changed() => return,
                     }
                 }
@@ -608,6 +642,36 @@ impl ChatService {
         let id = self.core.enqueue(&peer, text, now_ms())?;
         self.kick(&peer);
         Ok(id)
+    }
+
+    /// Send holder details in a protected chat message.
+    pub fn introduce_holders(
+        self: &Arc<Self>,
+        to: &Contact,
+        holders: &[proto::HolderEntry],
+    ) -> Result<[u8; 16], EnqueueError> {
+        let text = super::file_notice::holder_intro_to_text(&proto::HolderIntro {
+            holders: holders.to_vec(),
+        })
+        .map_err(|e| EnqueueError::Storage(e.to_string()))?;
+        self.send(to, &text)
+    }
+
+    pub(crate) fn introduce_self(self: &Arc<Self>, contact: &Contact) {
+        if !(self.settings.custody_enabled || self.settings.file_custody_limits.enabled)
+            || !contact.allow_send
+        {
+            return;
+        }
+        let holder = proto::HolderEntry {
+            endpoint_id: self.core.own_id(),
+            expires_ms: now_ms().saturating_add(24 * 60 * 60 * 1000),
+            file_custody: self.settings.file_custody_limits.enabled,
+            chat_custody: self.settings.custody_enabled,
+        };
+        if let Err(e) = self.introduce_holders(contact, &[holder]) {
+            warn!("holder introduction: {e:?}");
+        }
     }
 
     /// Queue a file deposit notice as an ordinary chat message.
@@ -1118,12 +1182,52 @@ impl ChatService {
 
     /// The trusted contacts, other than `peer`, that could hold a copy for it.
     pub(crate) fn holders_for(&self, peer: &[u8; 32]) -> Vec<[u8; 32]> {
-        self.contacts
+        self.holders_for_kind(peer, false)
+    }
+
+    pub(crate) fn holders_for_kind(&self, peer: &[u8; 32], files: bool) -> Vec<[u8; 32]> {
+        let mut holders: Vec<_> = self
+            .contacts
             .list()
             .into_iter()
             .filter_map(|c| c.endpoint_bytes())
             .filter(|id| id != peer)
-            .collect()
+            .collect();
+        let mut exclude = holders.clone();
+        exclude.push(*peer);
+        holders.extend(self.introduced_holders.lock().unwrap().holders_for_deposit(
+            now_ms(),
+            &exclude,
+            files,
+        ));
+        holders
+    }
+
+    fn receive_holder_intro(&self, sender: [u8; 32], intro: proto::HolderIntro) {
+        if !self.contact_may_write(&sender) {
+            return;
+        }
+        let contacts: Vec<_> = self
+            .contacts
+            .list()
+            .iter()
+            .filter_map(|c| c.endpoint_bytes())
+            .collect();
+        let now = now_ms();
+        let mut store = self.introduced_holders.lock().unwrap();
+        for holder in intro.holders {
+            let entry = super::introduced_holders::IntroducedHolder {
+                endpoint_id: holder.endpoint_id,
+                introduced_by: sender,
+                expires_ms: holder.expires_ms,
+                file_custody: holder.file_custody,
+                chat_custody: holder.chat_custody,
+                first_seen_ms: now,
+            };
+            if let Err(e) = store.insert(entry, now, &contacts) {
+                warn!("holder introduction: {e}");
+            }
+        }
     }
 
     pub(crate) fn file_mailbox_transport(&self) -> super::mailbox::transport::ChatMailboxTransport {
@@ -1235,7 +1339,7 @@ impl ChatService {
             if !self.contact_may_write(sender) {
                 return false;
             }
-            core.accept_with_notice(
+            core.accept_with_holder_intro(
                 sender,
                 wire,
                 now_ms(),
@@ -1244,6 +1348,7 @@ impl ChatService {
                     self.receive_file_notice(*sender, notice);
                 },
                 &|notice| self.receive_network_notice(*sender, notice),
+                &|intro| self.receive_holder_intro(*sender, intro),
             )
             .status
             .is_delivered()
@@ -1456,7 +1561,7 @@ impl ChatService {
                     #[cfg(feature = "pqc")]
                     if let Some(sink) = sink {
                         let now = now_ms();
-                        return core.accept_with_notice(
+                        return core.accept_with_holder_intro(
                             &remote,
                             &w,
                             now,
@@ -1472,9 +1577,10 @@ impl ChatService {
                             }),
                             &|notice| service.receive_file_notice(remote, notice),
                             &|notice| service.receive_network_notice(remote, notice),
+                            &|intro| service.receive_holder_intro(remote, intro),
                         );
                     }
-                    core.accept_with_notice(
+                    core.accept_with_holder_intro(
                         &remote,
                         &w,
                         now_ms(),
@@ -1483,6 +1589,7 @@ impl ChatService {
                             service.receive_file_notice(remote, notice);
                         },
                         &|notice| service.receive_network_notice(remote, notice),
+                        &|intro| service.receive_holder_intro(remote, intro),
                     )
                 })
                 .await

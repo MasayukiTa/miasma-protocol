@@ -792,7 +792,11 @@ impl PushService {
         code: &ContactCode,
         label: Option<&str>,
     ) -> Result<Contact, ContactError> {
-        self.contacts.add(code, label, Some(&self.own_id))
+        let contact = self.contacts.add(code, label, Some(&self.own_id))?;
+        if let Some(chat) = crate::chat::service::service_for(&self.data_dir) {
+            chat.introduce_self(&contact);
+        }
+        Ok(contact)
     }
 
     /// [`add_contact`](Self::add_contact) with sending and receiving both set to `allowed`.
@@ -802,8 +806,13 @@ impl PushService {
         label: Option<&str>,
         allowed: bool,
     ) -> Result<Contact, ContactError> {
-        self.contacts
-            .add_with(code, label, Some(&self.own_id), allowed)
+        let contact = self
+            .contacts
+            .add_with(code, label, Some(&self.own_id), allowed)?;
+        if let Some(chat) = crate::chat::service::service_for(&self.data_dir) {
+            chat.introduce_self(&contact);
+        }
+        Ok(contact)
     }
 
     pub fn update_contact(
@@ -1477,7 +1486,7 @@ impl PushService {
             return self.send_network_fallback(&chat, contact, path, rec).await;
         }
         if rec.deposit_notice.is_none() {
-            let mut holders = chat.holders_for(&peer);
+            let mut holders = chat.holders_for_kind(&peer, true);
             holders.truncate(8);
             if holders.is_empty() {
                 return self.send_network_fallback(&chat, contact, path, rec).await;
