@@ -141,6 +141,67 @@ impl FileDepositNotice {
     }
 }
 
+/// Metadata for retrieving a password-protected network share.
+#[derive(Clone, PartialEq, Eq)]
+pub struct NetworkFileNotice {
+    pub share_id: String,
+    pub password: String,
+    pub file_name: String,
+    pub size: u64,
+    pub sha256: [u8; 32],
+}
+impl NetworkFileNotice {
+    pub fn encode(&self) -> Result<Vec<u8>, ProtoError> {
+        if self.share_id.is_empty()
+            || self.share_id.len() > 255
+            || !(16..=128).contains(&self.password.len())
+            || self.file_name.is_empty()
+            || self.file_name.len() > 255
+        {
+            return Err(ProtoError::Malformed("network file notice"));
+        }
+        let mut out = vec![4];
+        for field in [&self.share_id, &self.password, &self.file_name] {
+            out.push(field.len() as u8);
+            out.extend_from_slice(field.as_bytes());
+        }
+        out.extend_from_slice(&self.size.to_be_bytes());
+        out.extend_from_slice(&self.sha256);
+        Ok(out)
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtoError> {
+        let bad = |_| ProtoError::Malformed("network file notice");
+        let mut r = Rd::new(bytes);
+        if r.u8().map_err(bad)? != 4 {
+            return Err(ProtoError::Malformed("network file notice kind"));
+        }
+        let mut field = |min: usize, max: usize| -> Result<String, ProtoError> {
+            let len = r.u8().map_err(bad)? as usize;
+            if !(min..=max).contains(&len) {
+                return Err(ProtoError::Malformed("network file notice field"));
+            }
+            Ok(std::str::from_utf8(r.bytes(len).map_err(bad)?)
+                .map_err(|_| ProtoError::Malformed("network file notice utf8"))?
+                .to_owned())
+        };
+        let share_id = field(1, 255)?;
+        let password = field(16, 128)?;
+        let file_name = field(1, 255)?;
+        let size = r.u64().map_err(bad)?;
+        let sha256 = r.arr::<32>().map_err(bad)?;
+        if !r.done() {
+            return Err(ProtoError::Malformed("network file notice trailing bytes"));
+        }
+        Ok(Self {
+            share_id,
+            password,
+            file_name,
+            size,
+            sha256,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProtoError {
     #[error("i/o: {0}")]
