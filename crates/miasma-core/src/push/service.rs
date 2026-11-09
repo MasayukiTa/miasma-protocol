@@ -55,6 +55,21 @@ const CLOSE_RETRY: u32 = 408;
 /// Close code of a receive that a newer connection for the same file replaced.
 const CLOSE_SUPERSEDED: u32 = 409;
 
+fn fresh_publish_password() -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>())
+}
+
+#[cfg(test)]
+#[test]
+fn publish_password_is_random_and_unpadded() {
+    let first = fresh_publish_password();
+    let second = fresh_publish_password();
+    assert_eq!(first.len(), 43);
+    assert_ne!(first, second);
+    assert!(!first.contains('='));
+}
+
 type FreeSpaceFn = Arc<dyn Fn(&Path) -> Option<u64> + Send + Sync>;
 
 /// Runtime settings (derived from `[push]` in `config.toml`).
@@ -84,6 +99,7 @@ pub struct PushSettings {
     /// Replaces the real disk query (tests).
     pub free_space: Option<FreeSpaceFn>,
     pub offline_deposit_threshold: usize,
+    pub network_publish_fallback: bool,
 }
 
 impl PushSettings {
@@ -101,6 +117,7 @@ impl PushSettings {
             max_send_kib_per_sec: cfg.max_send_kib_per_sec,
             free_space: None,
             offline_deposit_threshold: cfg.offline_deposit_threshold,
+            network_publish_fallback: cfg.network_publish_fallback,
         }
     }
 }
@@ -207,6 +224,8 @@ struct ContactQueue {
 }
 
 pub struct PushService {
+    coordinator: Mutex<Option<Arc<crate::network::MiasmaCoordinator>>>,
+    network_coordinator: OnceLock<Arc<crate::network::MiasmaCoordinator>>,
     settings: PushSettings,
     contacts: Arc<ContactStore>,
     board: Board,
@@ -275,7 +294,166 @@ fn stamp(m: &std::fs::Metadata) -> (u64, u64) {
     (m.len(), mtime)
 }
 
+async fn network_source_hash(path: &Path) -> Result<[u8; 32], String> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+        let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        let mut hash = Sha256::new();
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            hash.update(&buf[..n]);
+        }
+        Ok(hash.finalize().into())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+async fn ensure_network_share<F, Fut>(
+    outbox: &Outbox,
+    rec: &mut OutJob,
+    path: &Path,
+    publish: F,
+) -> Result<(), String>
+where
+    F: FnOnce(PathBuf, String) -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
+    if rec.network_share_id.is_none() {
+        let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
+        if !metadata.is_file() {
+            return Err("publish source is not a file".into());
+        }
+        let (size, mtime_ms) = stamp(&metadata);
+        let matches = rec.network_intent.as_ref().is_some_and(|intent| {
+            intent.path == rec.path && (intent.size, intent.mtime_ms) == (size, mtime_ms)
+        });
+        if !matches {
+            let sha256 = network_source_hash(path).await?;
+            if stamp(&std::fs::metadata(path).map_err(|e| e.to_string())?) != (size, mtime_ms) {
+                return Err("publish source changed while hashing".into());
+            }
+            rec.size = size;
+            rec.mtime_ms = mtime_ms;
+            rec.hash = None;
+            rec.offset = 0;
+            rec.network_intent = Some(super::outbox::NetworkPublishIntent {
+                password: fresh_publish_password(),
+                path: rec.path.clone(),
+                size,
+                mtime_ms,
+                sha256,
+            });
+        }
+        outbox.put_checked(rec, true)?;
+        let password = rec
+            .network_intent
+            .as_ref()
+            .ok_or("publish intent missing")?
+            .password
+            .clone();
+        let share_id = publish(path.to_owned(), password.clone()).await?;
+        rec.network_password = Some(password);
+        rec.network_share_id = Some(share_id);
+    }
+    outbox.put_checked(rec, true)?;
+    Ok(())
+}
+
 impl PushService {
+    pub fn set_coordinator(&self, coord: Arc<crate::network::MiasmaCoordinator>) {
+        *self.coordinator.lock().unwrap() = Some(coord);
+    }
+
+    async fn publish_to_network(
+        self: &Arc<Self>,
+        path: &Path,
+        password: &str,
+    ) -> Result<String, String> {
+        let coord = self
+            .coordinator
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("network coordinator unavailable")?;
+        let params = crate::pipeline::DissolutionParams::default();
+        let format = crate::config::NodeConfig::load(&self.data_dir)
+            .map(|c| c.transfer.object_format)
+            .unwrap_or_default();
+        let report = coord
+            .dissolve_and_publish_file_protected_with_format(
+                path,
+                params,
+                crate::network::PublishOptions::strict(params),
+                password,
+                format,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        report
+            .share_id
+            .map(|id| id.to_string())
+            .ok_or_else(|| "publish returned no share ID".into())
+    }
+
+    async fn send_network_fallback(
+        self: &Arc<Self>,
+        chat: &Arc<crate::chat::service::ChatService>,
+        contact: &Contact,
+        path: &Path,
+        rec: &mut OutJob,
+    ) -> Result<(), String> {
+        if !self.settings.network_publish_fallback
+            && rec.network_intent.is_none()
+            && rec.network_share_id.is_none()
+        {
+            return Err("no holder accepted the deposit".into());
+        }
+        ensure_network_share(&self.outbox, rec, path, |path, password| async move {
+            self.publish_to_network(&path, &password).await
+        })
+        .await?;
+        let sha256 = match &rec.network_intent {
+            Some(intent) => intent.sha256,
+            None => {
+                let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
+                if stamp(&metadata) != (rec.size, rec.mtime_ms) {
+                    return Err("deposit source changed".into());
+                }
+                network_source_hash(path).await?
+            }
+        };
+        let notice = crate::chat::proto::NetworkFileNotice {
+            share_id: rec
+                .network_share_id
+                .clone()
+                .ok_or("network share missing")?,
+            password: rec
+                .network_password
+                .clone()
+                .ok_or("network password missing")?,
+            file_name: rec.name.clone(),
+            size: rec.size,
+            sha256,
+        };
+        rec.notice_id = Some(
+            chat.send_network_file_notice(contact, &notice)
+                .map_err(|e| format!("{e:?}"))?,
+        );
+        if let Err(e) = self.outbox.put_checked(rec, true) {
+            rec.notice_id = None;
+            return Err(e);
+        }
+        self.board
+            .update(&rec.id, |i| i.state = PushState::Deposited);
+        Ok(())
+    }
     /// Create the service and install it as the PUSH_ALPN handler of `node`.
     /// Sends that were queued before the last stop are picked up again.
     pub fn start(data_dir: &Path, node: Arc<IrohNode>, settings: PushSettings) -> Arc<Self> {
@@ -303,6 +481,8 @@ impl PushService {
         let (shutdown, _) = watch::channel(false);
         let (wake, _) = broadcast::channel(64);
         let svc = Arc::new(Self {
+            coordinator: Mutex::new(None),
+            network_coordinator: OnceLock::new(),
             inbound_slots: Arc::new(Semaphore::new(settings.max_concurrent_inbound)),
             settings,
             contacts,
@@ -625,6 +805,18 @@ impl PushService {
         let _ = std::fs::remove_dir(&dir); // only if empty
     }
 
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    pub(crate) fn set_network_coordinator(&self, coord: Arc<crate::network::MiasmaCoordinator>) {
+        let _ = self.network_coordinator.set(coord);
+    }
+
+    pub(crate) fn network_coordinator(&self) -> Option<Arc<crate::network::MiasmaCoordinator>> {
+        self.network_coordinator.get().cloned()
+    }
+
     pub fn contact_dir(&self, label: &str) -> PathBuf {
         let leaf = sanitize_file_name(label).unwrap_or_else(|| "contact".to_owned());
         self.settings.inbox_dir.join(leaf)
@@ -705,6 +897,9 @@ impl PushService {
             notice_id: None,
             deposit_notice: None,
             deposit_intent: None,
+            network_share_id: None,
+            network_password: None,
+            network_intent: None,
             created_at_ms: now_ms(),
         };
         self.outbox.put(&rec, true);
@@ -861,7 +1056,10 @@ impl PushService {
             last_start: None,
         };
         // A completed deposit owns the transfer even if the source is gone.
-        while (job.rec.deposit_notice.is_some() || job.rec.deposit_intent.is_some())
+        while (job.rec.deposit_notice.is_some()
+            || job.rec.deposit_intent.is_some()
+            || job.rec.network_share_id.is_some()
+            || job.rec.network_intent.is_some())
             && job.rec.notice_id.is_none()
         {
             match self
@@ -959,7 +1157,11 @@ impl PushService {
                         self.wait_for_notice(&mut job, &target, &mut stop).await;
                         return;
                     }
-                    if job.rec.deposit_notice.is_some() || job.rec.deposit_intent.is_some() {
+                    if job.rec.deposit_notice.is_some()
+                        || job.rec.deposit_intent.is_some()
+                        || job.rec.network_share_id.is_some()
+                        || job.rec.network_intent.is_some()
+                    {
                         self.retry_deposit_notice(&contact, &mut job, &target, &mut st, &mut stop)
                             .await;
                         return;
@@ -1062,7 +1264,11 @@ impl PushService {
                         self.wait_for_notice(&mut job, &target, &mut stop).await;
                         return;
                     }
-                    if job.rec.deposit_notice.is_some() || job.rec.deposit_intent.is_some() {
+                    if job.rec.deposit_notice.is_some()
+                        || job.rec.deposit_intent.is_some()
+                        || job.rec.network_share_id.is_some()
+                        || job.rec.network_intent.is_some()
+                    {
                         self.retry_deposit_notice(&contact, &mut job, &target, &mut st, &mut stop)
                             .await;
                         return;
@@ -1118,7 +1324,11 @@ impl PushService {
         rec: &mut OutJob,
     ) -> Result<(), String> {
         // A changed source needs a new key and salt before another deposit.
-        if rec.deposit_notice.is_none() && rec.deposit_intent.is_some() {
+        if rec.deposit_notice.is_none()
+            && rec.network_share_id.is_none()
+            && rec.deposit_intent.is_some()
+            && rec.network_intent.is_none()
+        {
             let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
             if !metadata.is_file() {
                 return Err("deposit source is not a file".into());
@@ -1143,11 +1353,14 @@ impl PushService {
         if !chat.core().has_protected_session(&peer) {
             return Err("no protected session".into());
         }
+        if rec.network_share_id.is_some() || rec.network_intent.is_some() {
+            return self.send_network_fallback(&chat, contact, path, rec).await;
+        }
         if rec.deposit_notice.is_none() {
             let mut holders = chat.holders_for(&peer);
             holders.truncate(8);
             if holders.is_empty() {
-                return Err("no holder".into());
+                return self.send_network_fallback(&chat, contact, path, rec).await;
             }
             let transport = chat.file_mailbox_transport();
             let path = path.to_owned();
@@ -1177,7 +1390,7 @@ impl PushService {
             let salt = intent.salt;
             self.outbox.put_checked(rec, true)?;
             let receipt = tokio::task::spawn_blocking(move || {
-                let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+                let file = std::fs::File::open(path).map_err(|e| (false, e.to_string()))?;
                 super::deposit::deposit_file_with_key(
                     &transport,
                     &holders,
@@ -1188,10 +1401,28 @@ impl PushService {
                     now_ms(),
                     threshold,
                 )
-                .map_err(|e| e.to_string())
+                .map_err(|e| {
+                    (
+                        matches!(
+                            &e,
+                            super::deposit::DepositError::NotDeposited { held: 0, .. }
+                        ),
+                        e.to_string(),
+                    )
+                })
             })
             .await
-            .map_err(|e| e.to_string())??;
+            .map_err(|e| e.to_string())?;
+            let receipt = match receipt {
+                Ok(receipt) => receipt,
+                Err((true, _)) => {
+                    let source = PathBuf::from(&rec.path);
+                    return self
+                        .send_network_fallback(&chat, contact, &source, rec)
+                        .await;
+                }
+                Err((false, e)) => return Err(e),
+            };
             let notice = receipt.into_notice(salt, name);
             rec.deposit_notice = Some(notice.encode().map_err(|e| e.to_string())?);
         }
@@ -1292,7 +1523,11 @@ impl PushService {
         let id = job.id.clone();
         st.failures += 1;
         let policy = &self.settings.retry;
-        if job.rec.deposit_notice.is_none() && policy.exhausted(st.last_progress.elapsed()) {
+        if job.rec.deposit_notice.is_none()
+            && job.rec.network_intent.is_none()
+            && job.rec.network_share_id.is_none()
+            && policy.exhausted(st.last_progress.elapsed())
+        {
             let text = match policy.window {
                 Some(w) if !w.is_zero() => format!(
                     "gave up after retrying for {} min: {msg}",
@@ -2345,6 +2580,89 @@ pub fn place_without_overwrite(part: &Path, dir: &Path, name: &str) -> std::io::
 mod tests {
     use super::*;
 
+    fn network_job(path: &Path) -> OutJob {
+        let (size, mtime_ms) = stamp(&std::fs::metadata(path).unwrap());
+        OutJob {
+            id: "network".into(),
+            contact_id: "contact".into(),
+            path: path.to_string_lossy().into_owned(),
+            name: "file".into(),
+            size,
+            mtime_ms,
+            hash: None,
+            offset: 0,
+            attempt: 0,
+            notice_id: None,
+            deposit_notice: None,
+            deposit_intent: None,
+            network_share_id: None,
+            network_password: None,
+            network_intent: None,
+            created_at_ms: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn network_intent_survives_crash_and_share_is_not_republished() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        std::fs::write(&path, b"original").unwrap();
+        let outbox = Outbox::open(dir.path());
+        let mut rec = network_job(&path);
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let first = ensure_network_share(&outbox, &mut rec, &path, |_, _| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::future::ready(Err("crash before share".into()))
+        })
+        .await;
+        assert!(first.is_err());
+        let password = rec.network_intent.as_ref().unwrap().password.clone();
+        drop(outbox);
+        let outbox = Outbox::open(dir.path());
+        let mut rec = outbox.get(&rec.id).unwrap();
+        ensure_network_share(&outbox, &mut rec, &path, |_, used| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(used, password);
+            std::future::ready(Ok("share".into()))
+        })
+        .await
+        .unwrap();
+        // Simulate a failed notice and a restart; only the notice needs retrying.
+        drop(outbox);
+        let outbox = Outbox::open(dir.path());
+        let mut rec = outbox.get(&rec.id).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        ensure_network_share(&outbox, &mut rec, &path, |_, _| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            std::future::ready(Ok("another share".into()))
+        })
+        .await
+        .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(rec.network_share_id.as_deref(), Some("share"));
+    }
+
+    #[tokio::test]
+    async fn changed_network_source_gets_fresh_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        std::fs::write(&path, b"original").unwrap();
+        let outbox = Outbox::open(dir.path());
+        let mut rec = network_job(&path);
+        let _ = ensure_network_share(&outbox, &mut rec, &path, |_, _| async {
+            Err("interrupted".into())
+        })
+        .await;
+        let old = rec.network_intent.as_ref().unwrap().password.clone();
+        std::fs::write(&path, b"changed source").unwrap();
+        ensure_network_share(&outbox, &mut rec, &path, |_, password| {
+            assert_ne!(password, old);
+            std::future::ready(Ok("share".into()))
+        })
+        .await
+        .unwrap();
+    }
+
     struct OfflineDialer;
 
     #[async_trait::async_trait]
@@ -2375,6 +2693,9 @@ mod tests {
             notice_id: None,
             deposit_notice: None,
             deposit_intent: None,
+            network_share_id: None,
+            network_password: None,
+            network_intent: None,
             created_at_ms: 0,
         };
         let contact = Contact {
@@ -2422,6 +2743,9 @@ mod tests {
             attempt: 0,
             notice_id: None,
             deposit_notice: None,
+            network_share_id: None,
+            network_password: None,
+            network_intent: None,
             deposit_intent: Some(super::super::outbox::DepositIntent {
                 file_key: old_file_key,
                 salt: old_salt,
@@ -2481,6 +2805,9 @@ mod tests {
             attempt: 0,
             notice_id: None,
             deposit_notice: None,
+            network_share_id: None,
+            network_password: None,
+            network_intent: None,
             deposit_intent: Some(super::super::outbox::DepositIntent {
                 file_key: old_file_key,
                 salt: old_salt,

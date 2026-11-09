@@ -36,7 +36,7 @@ use super::{
     activity::ChatActivity,
     crypto::Identity,
     engine::{now_ms, ChatCore, EnqueueError, MarkOutcome, PrepareError},
-    file_notice::notice_to_text,
+    file_notice::{network_notice_to_text, notice_to_text},
     outbox::{OutKind, Outbox},
     proto::{
         self, fail, Ack, AckStatus, Frame, CLOSE_BAD_REQUEST, CLOSE_NOT_ALLOWED, CLOSE_OK,
@@ -619,6 +619,15 @@ impl ChatService {
         self.send(contact, &notice_to_text(n))
     }
 
+    /// Queue a network file notice as an ordinary chat message.
+    pub fn send_network_file_notice(
+        self: &Arc<Self>,
+        contact: &Contact,
+        n: &proto::NetworkFileNotice,
+    ) -> Result<[u8; 16], EnqueueError> {
+        self.send(contact, &network_notice_to_text(n))
+    }
+
     /// The person is looking at the conversation with `contact` and has seen
     /// the messages received up to number `up_to`: queue a read receipt when
     /// receipts are on.
@@ -1151,6 +1160,21 @@ impl ChatService {
         rep.held_by.len()
     }
 
+    fn receive_network_notice(&self, peer: [u8; 32], notice: proto::NetworkFileNotice) {
+        let Some(contact) = self.contacts.by_endpoint(&peer).filter(|c| c.allow_receive) else {
+            return;
+        };
+        let Some(push) = self
+            .settings
+            .offline_data_dir
+            .as_deref()
+            .and_then(crate::push::service::service_for)
+        else {
+            return;
+        };
+        crate::push::receive_network::spawn_receive(push, contact, notice);
+    }
+
     fn receive_file_notice(&self, peer: [u8; 32], notice: proto::FileDepositNotice) {
         let Some(contact) = self.contacts.by_endpoint(&peer).filter(|c| c.allow_receive) else {
             return;
@@ -1211,9 +1235,16 @@ impl ChatService {
             if !self.contact_may_write(sender) {
                 return false;
             }
-            core.accept_with_notice(sender, wire, now_ms(), None, &|notice| {
-                self.receive_file_notice(*sender, notice);
-            })
+            core.accept_with_notice(
+                sender,
+                wire,
+                now_ms(),
+                None,
+                &|notice| {
+                    self.receive_file_notice(*sender, notice);
+                },
+                &|notice| self.receive_network_notice(*sender, notice),
+            )
             .status
             .is_delivered()
         });
@@ -1440,11 +1471,19 @@ impl ChatService {
                                 );
                             }),
                             &|notice| service.receive_file_notice(remote, notice),
+                            &|notice| service.receive_network_notice(remote, notice),
                         );
                     }
-                    core.accept_with_notice(&remote, &w, now_ms(), None, &|notice| {
-                        service.receive_file_notice(remote, notice);
-                    })
+                    core.accept_with_notice(
+                        &remote,
+                        &w,
+                        now_ms(),
+                        None,
+                        &|notice| {
+                            service.receive_file_notice(remote, notice);
+                        },
+                        &|notice| service.receive_network_notice(remote, notice),
+                    )
                 })
                 .await
                 {

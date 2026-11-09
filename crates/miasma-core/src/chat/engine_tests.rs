@@ -566,8 +566,8 @@ fn notice_dispatch_preserves_plain_text_and_deduplicates() {
     let b = side();
     let received = RefCell::new(Vec::new());
     let notice = FileDepositNotice {
-        file_key: [1; 32],
-        salt: [2; 16],
+        file_key: rand::random(),
+        salt: rand::random(),
         manifest_id: [3; 16],
         holders: vec![[4; 32]],
         file_name: "example.bin".into(),
@@ -590,7 +590,7 @@ fn notice_dispatch_preserves_plain_text_and_deduplicates() {
     let dispatch = |n| received.borrow_mut().push(n);
     assert_eq!(
         b.core
-            .accept_with_notice(&a.id(), &wire, 5, None, &dispatch)
+            .accept_with_notice(&a.id(), &wire, 5, None, &dispatch, &|_| {})
             .status,
         AckStatus::Stored
     );
@@ -598,7 +598,7 @@ fn notice_dispatch_preserves_plain_text_and_deduplicates() {
     assert!(received.borrow().as_slice() == [notice]);
     assert_eq!(
         b.core
-            .accept_with_notice(&a.id(), &wire, 6, None, &dispatch)
+            .accept_with_notice(&a.id(), &wire, 6, None, &dispatch, &|_| {})
             .status,
         AckStatus::Duplicate
     );
@@ -614,9 +614,56 @@ fn notice_dispatch_preserves_plain_text_and_deduplicates() {
     let (wire, _) = a.core.seal_for(&b.id(), &text_plain).unwrap();
     assert_eq!(
         b.core
-            .accept_with_notice(&a.id(), &wire, 9, None, &dispatch)
+            .accept_with_notice(&a.id(), &wire, 9, None, &dispatch, &|_| {})
             .status,
         AckStatus::Stored
     );
     assert_eq!(b.texts(&a.id()), vec!["ordinary text"]);
+}
+
+#[test]
+fn network_notice_dispatch_and_protected_session_gate() {
+    use super::{file_notice::network_notice_to_text, proto::NetworkFileNotice};
+    use std::cell::RefCell;
+    let a = side();
+    let b = side();
+    let notice = NetworkFileNotice {
+        share_id: "miasma-share:example".into(),
+        password: "p".repeat(32),
+        file_name: "example.bin".into(),
+        size: 5,
+        sha256: rand::random(),
+    };
+    let text = network_notice_to_text(&notice);
+    let id = a.core.enqueue(&b.id(), &text, 1).unwrap();
+    assert!(matches!(
+        a.core.prepare_wire(&id),
+        Err(super::engine::PrepareError::Storage(_))
+    ));
+    let plain = super::proto::Message {
+        id: rand::random(),
+        seq: 1,
+        sent_ms: 1_700_000_000_000,
+        text,
+    }
+    .encode()
+    .unwrap();
+    let (wire, _) = a.core.seal_for(&b.id(), &plain).unwrap();
+    let received = RefCell::new(Vec::new());
+    let dispatch = |n| received.borrow_mut().push(n);
+    assert_eq!(
+        b.core
+            .accept_with_notice(&a.id(), &wire, 5, None, &|_| {}, &dispatch)
+            .status,
+        AckStatus::Stored
+    );
+    assert!(b.texts(&a.id()).is_empty());
+    assert!(received.borrow().as_slice() == [notice]);
+    assert_eq!(
+        b.core
+            .accept_with_notice(&a.id(), &wire, 6, None, &|_| {}, &dispatch)
+            .status,
+        AckStatus::Duplicate
+    );
+    assert_eq!(received.borrow().len(), 1);
 }

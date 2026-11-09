@@ -524,6 +524,10 @@ impl DaemonServer {
             )
             .await,
         );
+        #[cfg(feature = "iroh")]
+        if let Some(push) = crate::push::service::service_for(&data_dir) {
+            push.set_coordinator(coord.clone());
+        }
 
         // A streamed file publish announces its own record; keep it in the
         // persistent replication queue so announces are retried and piece
@@ -546,6 +550,11 @@ impl DaemonServer {
                 // marks the item replicated once a remote peer confirms it.
                 Ok(())
             }));
+        }
+
+        #[cfg(feature = "iroh")]
+        if let Some(push) = crate::push::service::service_for(&data_dir) {
+            push.set_network_coordinator(coord.clone());
         }
 
         // 8. Create shared rate limiter, health monitor, environment snapshot.
