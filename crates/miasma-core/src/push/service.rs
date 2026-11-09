@@ -2301,6 +2301,58 @@ pub fn place_without_overwrite(part: &Path, dir: &Path, name: &str) -> std::io::
 mod tests {
     use super::*;
 
+    struct OfflineDialer;
+
+    #[async_trait::async_trait]
+    impl Dialer for OfflineDialer {
+        async fn dial(&self, _target: &[u8; 32]) -> Result<Arc<dyn Link>, IrohClientError> {
+            Err(IrohClientError::Unreachable("offline".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_chat_service_keeps_transfer_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = PushSettings::from_config(&PushConfig::default(), dir.path());
+        let svc =
+            PushService::start_with_dialer(dir.path(), [1; 32], Arc::new(OfflineDialer), settings);
+        let path = dir.path().join("file");
+        std::fs::write(&path, b"file").unwrap();
+        let mut rec = OutJob {
+            id: "test".into(),
+            contact_id: "contact".into(),
+            path: path.to_string_lossy().into_owned(),
+            name: "file".into(),
+            size: 4,
+            mtime_ms: 0,
+            hash: None,
+            offset: 0,
+            attempt: 0,
+            notice_id: None,
+            deposit_notice: None,
+            deposit_intent: None,
+            created_at_ms: 0,
+        };
+        let contact = Contact {
+            id: "contact".into(),
+            label: "contact".into(),
+            endpoint_id: hex::encode([2; 32]),
+            added_at: 0,
+            allow_receive: true,
+            allow_send: true,
+            max_file_size: None,
+        };
+        svc.outbox.put_checked(&rec, true).unwrap();
+        assert_eq!(
+            svc.try_offline_deposit(&contact, &path, &mut rec)
+                .await
+                .unwrap_err(),
+            "no chat service"
+        );
+        assert!(svc.outbox.get(&rec.id).is_some());
+        svc.shutdown();
+    }
+
     #[test]
     fn no_overwrite_adds_suffix_and_keeps_extension() {
         let dir = tempfile::tempdir().unwrap();
