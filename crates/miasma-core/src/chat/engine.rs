@@ -524,7 +524,7 @@ impl ChatCore {
     /// Apply an envelope that arrived from `peer` (already authenticated by the
     /// transport and allowed by the contact list).
     pub fn accept(&self, peer: &[u8; 32], wire: &[u8], now: u64) -> AcceptOutcome {
-        self.accept_inner(peer, wire, now, None)
+        self.accept_inner(peer, wire, now, None, None)
     }
 
     #[cfg(feature = "pqc")]
@@ -535,15 +535,28 @@ impl ChatCore {
         now: u64,
         on_call: &dyn Fn(&[u8]),
     ) -> AcceptOutcome {
-        self.accept_inner(peer, wire, now, Some(on_call))
+        self.accept_inner(peer, wire, now, Some(on_call), None)
     }
 
+    /// Apply an authenticated envelope and deliver file notices to the caller.
+    /// The caller must authorize the peer before using this method.
+    pub(crate) fn accept_with_notice(
+        &self,
+        peer: &[u8; 32],
+        wire: &[u8],
+        now: u64,
+        on_call: Option<&dyn Fn(&[u8])>,
+        on_notice: &dyn Fn(super::proto::FileDepositNotice),
+    ) -> AcceptOutcome {
+        self.accept_inner(peer, wire, now, on_call, Some(on_notice))
+    }
     fn accept_inner(
         &self,
         peer: &[u8; 32],
         wire: &[u8],
         now: u64,
         on_call: Option<&dyn Fn(&[u8])>,
+        on_notice: Option<&dyn Fn(super::proto::FileDepositNotice)>,
     ) -> AcceptOutcome {
         let plain = |status| AcceptOutcome {
             status,
@@ -771,8 +784,13 @@ impl ChatCore {
         // gone either way, so the session moves on.
         let is_new = self.store.peek_peer(peer, |st| st.is_new_seq(message.seq));
         let too_big = message.text.len() > max_text;
+        let notice = if is_new && !too_big && on_notice.is_some() {
+            super::file_notice::text_to_notice(&message.text)
+        } else {
+            None
+        };
         let mut stored: Option<StoredMessage> = None;
-        if is_new && !too_big {
+        if is_new && !too_big && notice.is_none() {
             let nm = NewMessage {
                 outgoing: false,
                 id: message.id,
@@ -819,13 +837,16 @@ impl ChatCore {
         }
         let status = if too_big {
             AckStatus::TooBig
-        } else if stored.is_some() {
+        } else if stored.is_some() || notice.is_some() {
             AckStatus::Stored
         } else {
             AckStatus::Duplicate
         };
         if let Some(m) = stored {
             self.push_event(*peer, EventKind::Received, m);
+        }
+        if let (Some(notice), Some(deliver)) = (notice, on_notice) {
+            deliver(notice);
         }
         AcceptOutcome {
             status,
