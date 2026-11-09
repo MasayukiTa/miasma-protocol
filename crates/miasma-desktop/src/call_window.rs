@@ -66,6 +66,118 @@ pub struct CallWindowOutcome {
     pub close_requested: bool,
 }
 
+use miasma_core::chat::call::screen_capture::{
+    self, ShareTarget, ShareTargetInfo, ShareTargetKind,
+};
+
+#[derive(Clone, Default)]
+struct SharePicker {
+    open: bool,
+    targets: Vec<ShareTargetInfo>,
+    selected: Option<ShareTarget>,
+}
+
+fn sort_share_targets(targets: &mut [ShareTargetInfo]) {
+    targets.sort_by(|a, b| {
+        (a.kind == ShareTargetKind::Window)
+            .cmp(&(b.kind == ShareTargetKind::Window))
+            .then_with(|| a.app.cmp(&b.app))
+            .then_with(|| a.title.cmp(&b.title))
+            .then_with(|| a.target.id().cmp(&b.target.id()))
+    });
+}
+
+fn target_label(c: &CallStrings, target: &ShareTargetInfo) -> String {
+    let kind = if target.kind == ShareTargetKind::Display {
+        c.share_display
+    } else {
+        c.share_window
+    };
+    let primary = if target.primary {
+        format!(" ({})", c.share_primary)
+    } else {
+        String::new()
+    };
+    format!(
+        "{}: {}{} ? {} ? {} ? {}",
+        kind, target.title, primary, target.app, target.width, target.height
+    )
+}
+
+impl SharePicker {
+    fn refresh(&mut self) {
+        self.targets = screen_capture::list_share_targets().unwrap_or_default();
+        sort_share_targets(&mut self.targets);
+        if !self.targets.iter().any(|t| Some(t.target) == self.selected) {
+            self.selected = self
+                .targets
+                .iter()
+                .find(|t| t.primary && t.kind == ShareTargetKind::Display)
+                .or_else(|| self.targets.first())
+                .map(|t| t.target);
+        }
+    }
+}
+
+fn show_share_picker(
+    ctx: &egui::Context,
+    c: &CallStrings,
+    picker: &mut SharePicker,
+) -> Option<CallAction> {
+    let mut action = None;
+    let mut open = picker.open;
+    egui::Window::new(c.share_picker_title)
+        .collapsible(false)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            if picker.targets.is_empty() {
+                ui.label(c.share_empty);
+            }
+            egui::ScrollArea::vertical()
+                .max_height(300.0)
+                .show(ui, |ui| {
+                    let mut last_app: Option<&str> = None;
+                    for target in &picker.targets {
+                        if target.kind == ShareTargetKind::Window
+                            && last_app != Some(target.app.as_str())
+                        {
+                            ui.heading(&target.app);
+                            last_app = Some(&target.app);
+                        }
+                        if ui
+                            .selectable_label(
+                                picker.selected == Some(target.target),
+                                target_label(c, target),
+                            )
+                            .clicked()
+                        {
+                            picker.selected = Some(target.target);
+                        }
+                    }
+                });
+            ui.horizontal(|ui| {
+                if ui.button(c.share_refresh).clicked() {
+                    picker.refresh();
+                }
+                if ui
+                    .add_enabled(
+                        picker.selected.is_some(),
+                        egui::Button::new(c.share_confirm),
+                    )
+                    .clicked()
+                {
+                    action = picker.selected.map(CallAction::StartScreenShare);
+                    picker.open = false;
+                }
+                if ui.button(c.share_cancel).clicked() {
+                    picker.open = false;
+                }
+            });
+        });
+    picker.open &= open;
+    action
+}
+
 /// Draw the call window for the current call, if any, in its own native viewport.
 ///
 /// Returns the pressed action and whether the window's close button was used. When there is no
@@ -98,6 +210,22 @@ pub fn show(
         egui::CentralPanel::default().show(ctx, |ui| {
             draw_contents(ui, c, state, window, now_ms, video, &mut outcome.action);
         });
+        let picker_id = egui::Id::new("call_share_picker");
+        let mut picker = ctx.data_mut(|d| d.get_temp::<SharePicker>(picker_id).unwrap_or_default());
+        if outcome.action == Some(CallAction::ToggleScreenShare)
+            && !state.status().map_or(false, |s| s.screen_sharing)
+        {
+            picker.open = true;
+            picker.selected = None;
+            picker.refresh();
+            outcome.action = None;
+        }
+        if picker.open {
+            if let Some(action) = show_share_picker(ctx, c, &mut picker) {
+                outcome.action = Some(action);
+            }
+        }
+        ctx.data_mut(|d| d.insert_temp(picker_id, picker));
         // The OS close button (or the window menu) asks the viewport to close; closing the call
         // window ends the call, so the request is reported and the app sends HangUp once.
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -275,6 +403,41 @@ fn draw_contents(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn share_targets_are_sorted_and_grouped_by_application() {
+        let item = |target: ShareTarget, app: &str, title: &str, primary| ShareTargetInfo {
+            target,
+            kind: target.kind(),
+            title: title.into(),
+            app: app.into(),
+            width: 1920,
+            height: 1080,
+            primary,
+        };
+        let mut targets = vec![
+            item(ShareTarget::Window(3), "Z", "B", false),
+            item(ShareTarget::Window(2), "A", "B", false),
+            item(ShareTarget::Display(1), "", "Main", true),
+            item(ShareTarget::Window(4), "A", "A", false),
+        ];
+        sort_share_targets(&mut targets);
+        assert_eq!(
+            targets.iter().map(|t| t.target).collect::<Vec<_>>(),
+            vec![
+                ShareTarget::Display(1),
+                ShareTarget::Window(4),
+                ShareTarget::Window(2),
+                ShareTarget::Window(3)
+            ]
+        );
+        let c = crate::locale::call_strings(crate::locale::Locale::En);
+        assert_eq!(
+            target_label(c, &targets[0]),
+            "Display: Main (Primary) ?  ? 1920 ? 1080"
+        );
+        assert_eq!(target_label(c, &targets[1]), "Window: A ? A ? 1920 ? 1080");
+    }
 
     #[test]
     fn the_video_rect_keeps_the_aspect_ratio_and_centers_in_the_area() {

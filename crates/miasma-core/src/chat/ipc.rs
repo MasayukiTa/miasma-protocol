@@ -92,6 +92,11 @@ pub enum CallRequest {
     /// Begin sharing the screen as a second video-like stream. Honoured only
     /// while the call is connected and video was negotiated; never automatic.
     StartScreenShare,
+    /// Select the capture target before starting screen sharing.
+    SetShareTarget {
+        is_window: bool,
+        id: u32,
+    },
     /// Stop sharing the screen. The camera stream, if any, is unaffected.
     StopScreenShare,
     /// Begin sending the local camera as the video stream. Honoured only while
@@ -608,6 +613,7 @@ pub fn handle_with(
                 | CallRequest::ListAudioDevices
                 | CallRequest::SelectAudioDevices { .. }
                 | CallRequest::StartScreenShare
+                | CallRequest::SetShareTarget { .. }
                 | CallRequest::StopScreenShare
                 | CallRequest::StartCamera
                 | CallRequest::StopCamera

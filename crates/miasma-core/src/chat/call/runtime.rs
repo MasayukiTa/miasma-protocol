@@ -517,6 +517,15 @@ impl CallRuntime {
                 dto.muted = state.muted.load(Ordering::SeqCst);
                 CallResponse::Status(dto)
             }
+            CallRequest::SetShareTarget { is_window, id } => {
+                let target = if is_window {
+                    super::screen_capture::ShareTarget::Window(id)
+                } else {
+                    super::screen_capture::ShareTarget::Display(id)
+                };
+                state.screen_factory.set_share_target(target);
+                CallResponse::Ok
+            }
             CallRequest::StartScreenShare => {
                 // On macOS screen capture needs the Screen Recording permission.
                 // Preflight it before opening a source: when it is not granted,

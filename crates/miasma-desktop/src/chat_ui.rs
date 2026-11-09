@@ -1536,6 +1536,16 @@ impl ChatUi {
                 };
                 self.out.push_back(ChatRequest::Call(request));
             }
+            Some(CallAction::StartScreenShare(target)) => {
+                use miasma_core::chat::call::screen_capture::ShareTarget;
+                self.out
+                    .push_back(ChatRequest::Call(CallRequest::SetShareTarget {
+                        is_window: matches!(target, ShareTarget::Window(_)),
+                        id: target.id(),
+                    }));
+                self.out
+                    .push_back(ChatRequest::Call(CallRequest::StartScreenShare));
+            }
             Some(CallAction::ToggleCamera) => {
                 // Toggle against the last status flag: the camera in use now means stop,
                 // otherwise start. The daemon honours a start only while connected with video
