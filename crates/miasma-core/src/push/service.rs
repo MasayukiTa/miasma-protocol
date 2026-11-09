@@ -1003,6 +1003,16 @@ impl PushService {
                     // frees the partial file for the next attempt at once.
                     *conn = None;
                     c.close(CLOSE_RETRY, b"retry");
+                    if kind == error_kind::CONNECTION_LOST
+                        && self
+                            .try_offline_deposit(&contact, &job.path, &id)
+                            .await
+                            .is_ok()
+                    {
+                        job.rec.notice_id = self.outbox.get(&id).and_then(|r| r.notice_id);
+                        self.wait_for_notice(&mut job, &target, &mut stop).await;
+                        return;
+                    }
                     if !self.wait_retry(&mut job, &mut st, kind, m, &mut stop).await {
                         return;
                     }
@@ -1023,7 +1033,8 @@ impl PushService {
         if !chat.core().has_protected_session(&peer) {
             return Err("no protected session".into());
         }
-        let holders = chat.holders_for(&peer);
+        let mut holders = chat.holders_for(&peer);
+        holders.truncate(8);
         if holders.is_empty() {
             return Err("no holder".into());
         }
