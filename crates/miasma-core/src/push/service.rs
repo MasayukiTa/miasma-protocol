@@ -1093,7 +1093,6 @@ impl PushService {
         path: &Path,
         rec: &mut OutJob,
     ) -> Result<(), String> {
-        use rand::RngCore;
         let chat = crate::chat::service::service_for(&self.data_dir).ok_or("no chat service")?;
         let peer = contact.endpoint_bytes().ok_or("no protected session")?;
         if !chat.core().has_protected_session(&peer) {
@@ -1113,8 +1112,7 @@ impl PushService {
                 .ok_or("invalid file name")?
                 .to_owned();
             let threshold = self.settings.offline_deposit_threshold;
-            let mut salt = [0; 16];
-            rand::rngs::OsRng.fill_bytes(&mut salt);
+            let salt: [u8; 16] = rand::random();
             let receipt = tokio::task::spawn_blocking(move || {
                 let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
                 super::deposit::deposit_file(
