@@ -36,7 +36,7 @@ use super::{
     activity::ChatActivity,
     crypto::Identity,
     engine::{now_ms, ChatCore, EnqueueError, MarkOutcome, PrepareError},
-    file_notice::notice_to_text,
+    file_notice::{network_notice_to_text, notice_to_text},
     outbox::{OutKind, Outbox},
     proto::{
         self, fail, Ack, AckStatus, Frame, CLOSE_BAD_REQUEST, CLOSE_NOT_ALLOWED, CLOSE_OK,
@@ -617,6 +617,15 @@ impl ChatService {
         n: &proto::FileDepositNotice,
     ) -> Result<[u8; 16], EnqueueError> {
         self.send(contact, &notice_to_text(n))
+    }
+
+    /// Queue a network file notice as an ordinary chat message.
+    pub fn send_network_file_notice(
+        self: &Arc<Self>,
+        contact: &Contact,
+        n: &proto::NetworkFileNotice,
+    ) -> Result<[u8; 16], EnqueueError> {
+        self.send(contact, &network_notice_to_text(n))
     }
 
     /// The person is looking at the conversation with `contact` and has seen
@@ -1211,9 +1220,16 @@ impl ChatService {
             if !self.contact_may_write(sender) {
                 return false;
             }
-            core.accept_with_notice(sender, wire, now_ms(), None, &|notice| {
-                self.receive_file_notice(*sender, notice);
-            })
+            core.accept_with_notice(
+                sender,
+                wire,
+                now_ms(),
+                None,
+                &|notice| {
+                    self.receive_file_notice(*sender, notice);
+                },
+                &|_| {},
+            )
             .status
             .is_delivered()
         });
@@ -1440,11 +1456,19 @@ impl ChatService {
                                 );
                             }),
                             &|notice| service.receive_file_notice(remote, notice),
+                            &|_| {},
                         );
                     }
-                    core.accept_with_notice(&remote, &w, now_ms(), None, &|notice| {
-                        service.receive_file_notice(remote, notice);
-                    })
+                    core.accept_with_notice(
+                        &remote,
+                        &w,
+                        now_ms(),
+                        None,
+                        &|notice| {
+                            service.receive_file_notice(remote, notice);
+                        },
+                        &|_| {},
+                    )
                 })
                 .await
                 {

@@ -247,9 +247,16 @@ fn sender_deposits_and_leaves_then_recipient_receives_through_chat() {
     assert_eq!(
         recipient_chat
             .core
-            .accept_with_notice(&sender.id(), &wire, 2_000, None, &|notice| {
-                dispatched.borrow_mut().push(notice);
-            })
+            .accept_with_notice(
+                &sender.id(),
+                &wire,
+                2_000,
+                None,
+                &|notice| {
+                    dispatched.borrow_mut().push(notice);
+                },
+                &|_| {}
+            )
             .status,
         AckStatus::Stored
     );
