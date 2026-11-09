@@ -574,11 +574,19 @@ fn notice_dispatch_preserves_plain_text_and_deduplicates() {
         size: 5,
         sha256: [6; 32],
     };
-    let id = a
-        .core
-        .enqueue(&b.id(), &notice_to_text(&notice), 1)
-        .unwrap();
-    let (wire, _) = a.core.prepare_wire(&id).unwrap();
+    // The notice travels as an ordinary sealed chat message whose text is the
+    // encoded notice. `seal_for` is used directly so the test does not depend
+    // on a protected (hybrid) session, which `prepare_wire` requires for a
+    // notice but which is never present in a build without the `pqc` feature.
+    let notice_plain = super::proto::Message {
+        id: rand::random(),
+        seq: 1,
+        sent_ms: 1_700_000_000_000,
+        text: notice_to_text(&notice),
+    }
+    .encode()
+    .unwrap();
+    let (wire, _) = a.core.seal_for(&b.id(), &notice_plain).unwrap();
     let dispatch = |n| received.borrow_mut().push(n);
     assert_eq!(
         b.core
@@ -595,9 +603,15 @@ fn notice_dispatch_preserves_plain_text_and_deduplicates() {
         AckStatus::Duplicate
     );
     assert_eq!(received.borrow().len(), 1);
-    a.core.mark_delivered(&id, 7);
-    let id = a.core.enqueue(&b.id(), "ordinary text", 8).unwrap();
-    let (wire, _) = a.core.prepare_wire(&id).unwrap();
+    let text_plain = super::proto::Message {
+        id: rand::random(),
+        seq: 2,
+        sent_ms: 1_700_000_000_001,
+        text: "ordinary text".into(),
+    }
+    .encode()
+    .unwrap();
+    let (wire, _) = a.core.seal_for(&b.id(), &text_plain).unwrap();
     assert_eq!(
         b.core
             .accept_with_notice(&a.id(), &wire, 9, None, &dispatch)
