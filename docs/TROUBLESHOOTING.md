@@ -135,7 +135,7 @@ enabled = false
 
 **What it does**: When holding is on, your node keeps a sealed copy of a message for a trusted contact who is offline. When a direct send does not get through, it also leaves a copy with your other trusted contacts, who pass it on once the recipient is back online. The message is applied only once, even if the sender resends it directly in the meantime. The contacts who hold a copy only ever see the sealed message, never its contents, and nothing is written to disk.
 
-**Turn it on**: It is off by default. In `config.toml`, set `custody_enabled = true` under `[chat]`, or on the desktop app open Settings > Privacy and storage and turn on "Hold messages for offline contacts".
+**Turn it on**: It is on by default. If disabled, In `config.toml`, set `custody_enabled = true` under `[chat]`, or on the desktop app open Settings > Privacy and storage and turn on "Hold messages for offline contacts".
 
 ```toml
 [chat]

@@ -4,7 +4,7 @@
 //! and a client that deposits copies at trusted holders and collects what is
 //! waiting for it through the [`client::MailboxTransport`] trait. The store is
 //! in memory only and is nothing until it is switched on: a node that holds
-//! nothing (the default, `chat.custody_enabled = false`) refuses every deposit.
+//! nothing (`chat.custody_enabled = false`) refuses every deposit.
 //!
 //! The custody verbs travel on the chat channel (ALPN `miasma/chat/1`): [`wire`]
 //! is their frame format and [`transport`] the concrete transport that dials a
