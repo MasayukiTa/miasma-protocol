@@ -199,6 +199,7 @@ mod tests {
         ids::{ItemId, RecipientTag},
     };
     use crate::push::file_holder::{DiskFileCustody, FileCustodyLimits};
+    use rand::RngCore;
     use std::sync::Arc;
 
     struct DiskTransport {
@@ -253,6 +254,8 @@ mod tests {
 
     #[test]
     fn disk_custody_fetch_and_corrupt_chunk() {
+        let mut salt = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut salt);
         let root = tempfile::tempdir().unwrap();
         let holder_dir = root.path().join("holder");
         let dir = root.path().join("inbox");
@@ -272,10 +275,10 @@ mod tests {
             who: recipient,
         };
         let data = vec![42; deposit::CHUNK_PLAINTEXT * 3 + 17];
-        let salt = [8; 16];
         let receipt =
             deposit::deposit_file(&transport, &[holder], &recipient, salt, &data[..], 1000, 1)
                 .unwrap();
+        assert_eq!(receipt.manifest.salt, salt);
         let notice = FileDepositNotice {
             file_key: receipt.file_key,
             salt,
@@ -329,9 +332,13 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_is_ignored_while_running_and_after_completion() {
+        let mut file_key = [0u8; 32];
+        let mut salt = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut file_key);
+        rand::rngs::OsRng.fill_bytes(&mut salt);
         let notice = FileDepositNotice {
-            file_key: [0; 32],
-            salt: [0; 16],
+            file_key,
+            salt,
             manifest_id: [255; 16],
             holders: vec![],
             file_name: "test".into(),

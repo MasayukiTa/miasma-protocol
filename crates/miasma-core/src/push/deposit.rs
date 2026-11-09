@@ -695,6 +695,8 @@ mod tests {
     #[cfg(feature = "iroh")]
     #[test]
     fn verified_receive_places_only_matching_file() {
+        let mut salt = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut salt);
         use crate::chat::proto::FileDepositNotice;
         use crate::push::receive_offline::fetch_verified;
         use sha2::{Digest, Sha256};
@@ -707,9 +709,9 @@ mod tests {
             who: sender.id(),
         };
         let data = vec![42; CHUNK_PLAINTEXT * 3 + 1];
-        let salt = [9; 16];
         let receipt =
             deposit_file(&tx, &[holder], &recipient.id(), salt, &data[..], 1_000, 1).unwrap();
+        assert_eq!(receipt.manifest.salt, salt);
         let rx = InProcess {
             holders: vec![(holder, store)],
             who: recipient.id(),
