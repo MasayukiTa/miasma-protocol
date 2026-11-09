@@ -96,7 +96,7 @@ static DONE_LOCK: Mutex<()> = Mutex::new(());
 
 fn is_done(dir: &Path, id: &[u8; 16]) -> std::io::Result<bool> {
     let _guard = DONE_LOCK.lock().unwrap();
-    match fs::read_to_string(dir.join(".offline-done")) {
+    match fs::read_to_string(crate::paths::OFFLINE_RECEIVE_DONE.in_dir(dir)) {
         Ok(contents) => Ok(contents.lines().any(|line| line == hex::encode(id))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
@@ -108,7 +108,7 @@ fn mark_done(dir: &Path, id: &[u8; 16]) -> std::io::Result<()> {
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join(".offline-done"))?;
+        .open(crate::paths::OFFLINE_RECEIVE_DONE.in_dir(dir))?;
     writeln!(file, "{}", hex::encode(id))?;
     file.sync_all()
 }

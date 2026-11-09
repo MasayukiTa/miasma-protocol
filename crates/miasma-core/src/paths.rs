@@ -857,6 +857,17 @@ spec!(
     "Received push files (plaintext). Default location; push.inbox_dir can point elsewhere."
 );
 spec!(
+    OFFLINE_RECEIVE_DONE,
+    ".offline-done",
+    File,
+    DataDirOrConfigured,
+    UserVisible,
+    Ledger,
+    LedgerOverwriteRemove,
+    "D15",
+    "Completed offline file manifest IDs inside a contact inbox."
+);
+spec!(
     PUSH_PART,
     ".*.part",
     Pattern,
@@ -1089,6 +1100,7 @@ pub const REGISTRY: &[PathSpec] = &[
     DIAG_LOG_DIR,
     DIAG_LOG_FILE,
     PUSH_INBOX,
+    OFFLINE_RECEIVE_DONE,
     PUSH_PART,
     OUTPUT_PART,
     SAVE_AS_TARGET,
