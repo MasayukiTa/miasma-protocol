@@ -548,6 +548,11 @@ impl DaemonServer {
             }));
         }
 
+        #[cfg(feature = "iroh")]
+        if let Some(push) = crate::push::service::service_for(&data_dir) {
+            push.set_network_coordinator(coord.clone());
+        }
+
         // 8. Create shared rate limiter, health monitor, environment snapshot.
         let rate_limiter = Arc::new(Mutex::new(rate_limit::RateLimiter::default()));
         let health_monitor = Arc::new(Mutex::new(ConnectionHealthMonitor::default()));

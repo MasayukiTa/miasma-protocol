@@ -4,11 +4,7 @@ use super::{
     service::{place_without_overwrite, PushService},
     store::Contact,
 };
-use crate::{
-    chat::proto::NetworkFileNotice,
-    daemon::ipc::{daemon_request, ControlRequest, ControlResponse},
-    transfer::progress::TransferState,
-};
+use crate::{chat::proto::NetworkFileNotice, transfer::progress::TransferState};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
@@ -72,34 +68,31 @@ trait Source: Send + Sync {
     async fn fetch(&self, notice: &NetworkFileNotice, path: &Path) -> Result<(), ReceiveError>;
 }
 
-struct DaemonSource(PathBuf);
+struct DaemonSource(Arc<PushService>);
 #[async_trait::async_trait]
 impl Source for DaemonSource {
     async fn fetch(&self, notice: &NetworkFileNotice, path: &Path) -> Result<(), ReceiveError> {
-        let response = daemon_request(
-            &self.0,
-            ControlRequest::TransferStartReceive {
-                mid: notice.share_id.clone(),
-                output_path: path.to_string_lossy().into_owned(),
-                password: Some(notice.password.clone()),
-                restart: true,
-                via: vec![],
-                via_ca_pem: None,
-            },
-        )
-        .await
-        .map_err(|_| ReceiveError::Unavailable)?;
-        let ControlResponse::TransferStarted { id } = response else {
-            return Err(ReceiveError::Failed);
-        };
+        let coord = self
+            .0
+            .network_coordinator()
+            .ok_or(ReceiveError::Unavailable)?;
+        let target = crate::transfer::parse_transfer_id(&notice.share_id)
+            .map_err(|_| ReceiveError::InvalidNotice)?;
+        if target.share_id().is_none() {
+            return Err(ReceiveError::InvalidNotice);
+        }
+        let registry = crate::transfer::jobs::registry_for(self.0.data_dir());
+        let id = registry.start_receive(
+            coord,
+            target,
+            path.to_path_buf(),
+            Some(zeroize::Zeroizing::new(notice.password.clone())),
+            true,
+            None,
+            None,
+        );
         loop {
-            let response =
-                daemon_request(&self.0, ControlRequest::TransferStatus { id: id.clone() })
-                    .await
-                    .map_err(|_| ReceiveError::Unavailable)?;
-            let ControlResponse::TransferStatus(status) = response else {
-                return Err(ReceiveError::Unavailable);
-            };
+            let status = registry.status(&id).ok_or(ReceiveError::Unavailable)?;
             // A concurrent CLI receive can own this MID. Never consume its output.
             if Path::new(&status.name) != path {
                 return Err(ReceiveError::Unavailable);
@@ -172,7 +165,7 @@ pub fn spawn_receive(service: Arc<PushService>, contact: Contact, notice: Networ
         return;
     }
     tokio::spawn(async move {
-        let source = DaemonSource(service.data_dir().to_path_buf());
+        let source = DaemonSource(service.clone());
         let dir = service.contact_dir(&contact.label);
         let policy = super::retry::RetryPolicy {
             window: Some(Duration::from_secs(7 * 86400)),
