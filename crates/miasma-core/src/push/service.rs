@@ -682,6 +682,7 @@ impl PushService {
             offset: 0,
             attempt: 0,
             notice_id: None,
+            deposit_notice: None,
             created_at_ms: now_ms(),
         };
         self.outbox.put(&rec, true);
@@ -831,6 +832,33 @@ impl PushService {
             self.wait_for_notice(&mut job, &target, &mut stop).await;
             return;
         }
+        let mut st = RetryState {
+            failures: 0,
+            last_progress: Instant::now(),
+            best_offset: 0,
+            last_start: None,
+        };
+        // A completed deposit owns the transfer even if the source is gone.
+        while job.rec.deposit_notice.is_some() && job.rec.notice_id.is_none() {
+            match self
+                .try_offline_deposit(&contact, &job.path, &mut job.rec)
+                .await
+            {
+                Ok(()) => break,
+                Err(e) => {
+                    if !self
+                        .wait_retry(&mut job, &mut st, error_kind::UNREACHABLE, e, &mut stop)
+                        .await
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+        if job.rec.notice_id.is_some() {
+            self.wait_for_notice(&mut job, &target, &mut stop).await;
+            return;
+        }
         // The file must still be the one that was queued.
         if let Err((kind, m)) = self.check_source(&job) {
             return self.finish_kind(&id, PushState::Failed, Some(m), None, Some(kind));
@@ -874,12 +902,6 @@ impl PushService {
         self.board.update(&id, |i| i.size = size);
         let name = job.rec.name.clone();
 
-        let mut st = RetryState {
-            failures: 0,
-            last_progress: Instant::now(),
-            best_offset: 0,
-            last_start: None,
-        };
         let mut restarted = false;
         loop {
             if *job.cancel.borrow() {
@@ -906,12 +928,16 @@ impl PushService {
                     };
                     if kind == error_kind::UNREACHABLE
                         && self
-                            .try_offline_deposit(&contact, &job.path, &id)
+                            .try_offline_deposit(&contact, &job.path, &mut job.rec)
                             .await
                             .is_ok()
                     {
-                        job.rec.notice_id = self.outbox.get(&id).and_then(|r| r.notice_id);
                         self.wait_for_notice(&mut job, &target, &mut stop).await;
+                        return;
+                    }
+                    if job.rec.deposit_notice.is_some() {
+                        self.retry_deposit_notice(&contact, &mut job, &target, &mut st, &mut stop)
+                            .await;
                         return;
                     }
                     if self
@@ -1005,12 +1031,16 @@ impl PushService {
                     c.close(CLOSE_RETRY, b"retry");
                     if kind == error_kind::CONNECTION_LOST
                         && self
-                            .try_offline_deposit(&contact, &job.path, &id)
+                            .try_offline_deposit(&contact, &job.path, &mut job.rec)
                             .await
                             .is_ok()
                     {
-                        job.rec.notice_id = self.outbox.get(&id).and_then(|r| r.notice_id);
                         self.wait_for_notice(&mut job, &target, &mut stop).await;
+                        return;
+                    }
+                    if job.rec.deposit_notice.is_some() {
+                        self.retry_deposit_notice(&contact, &mut job, &target, &mut st, &mut stop)
+                            .await;
                         return;
                     }
                     if !self.wait_retry(&mut job, &mut st, kind, m, &mut stop).await {
@@ -1021,11 +1051,47 @@ impl PushService {
         }
     }
 
+    async fn retry_deposit_notice(
+        self: &Arc<Self>,
+        contact: &Contact,
+        job: &mut Job,
+        target: &[u8; 32],
+        st: &mut RetryState,
+        stop: &mut watch::Receiver<bool>,
+    ) {
+        loop {
+            if !self
+                .wait_retry(
+                    job,
+                    st,
+                    error_kind::UNREACHABLE,
+                    "cannot persist or send the deposit notice".into(),
+                    stop,
+                )
+                .await
+            {
+                return;
+            }
+            match self
+                .try_offline_deposit(contact, &job.path, &mut job.rec)
+                .await
+            {
+                Ok(()) => {
+                    self.wait_for_notice(job, target, stop).await;
+                    return;
+                }
+                Err(e) => {
+                    self.board.update(&job.id, |i| i.error = Some(e));
+                }
+            }
+        }
+    }
+
     async fn try_offline_deposit(
         self: &Arc<Self>,
         contact: &Contact,
         path: &Path,
-        transfer_id: &str,
+        rec: &mut OutJob,
     ) -> Result<(), String> {
         use rand::RngCore;
         let chat = crate::chat::service::service_for(&self.data_dir).ok_or("no chat service")?;
@@ -1033,49 +1099,59 @@ impl PushService {
         if !chat.core().has_protected_session(&peer) {
             return Err("no protected session".into());
         }
-        let mut holders = chat.holders_for(&peer);
-        holders.truncate(8);
-        if holders.is_empty() {
-            return Err("no holder".into());
+        if rec.deposit_notice.is_none() {
+            let mut holders = chat.holders_for(&peer);
+            holders.truncate(8);
+            if holders.is_empty() {
+                return Err("no holder".into());
+            }
+            let transport = chat.file_mailbox_transport();
+            let path = path.to_owned();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or("invalid file name")?
+                .to_owned();
+            let threshold = self.settings.offline_deposit_threshold;
+            let mut salt = [0; 16];
+            rand::rngs::OsRng.fill_bytes(&mut salt);
+            let receipt = tokio::task::spawn_blocking(move || {
+                let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+                super::deposit::deposit_file(
+                    &transport,
+                    &holders,
+                    &peer,
+                    salt,
+                    file,
+                    now_ms(),
+                    threshold,
+                )
+                .map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+            let notice = receipt.into_notice(salt, name);
+            rec.deposit_notice = Some(notice.encode().map_err(|e| e.to_string())?);
         }
-        let transport = chat.file_mailbox_transport();
-        let path = path.to_owned();
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or("invalid file name")?
-            .to_owned();
-        let threshold = self.settings.offline_deposit_threshold;
-        let mut salt = [0; 16];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
-        let receipt = tokio::task::spawn_blocking(move || {
-            let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-            super::deposit::deposit_file(
-                &transport,
-                &holders,
-                &peer,
-                salt,
-                file,
-                now_ms(),
-                threshold,
-            )
-            .map_err(|e| e.to_string())
-        })
-        .await
-        .map_err(|e| e.to_string())??;
-        let notice = receipt.into_notice(salt, name);
-        notice.encode().map_err(|e| e.to_string())?;
+        // Always ensure the deposit is durable before sending or resending.
+        self.outbox.put_checked(rec, true)?;
+        let notice = crate::chat::proto::FileDepositNotice::decode(
+            rec.deposit_notice.as_ref().ok_or("deposit missing")?,
+        )
+        .map_err(|e| e.to_string())?;
         if !chat.core().has_protected_session(&peer) {
             return Err("no protected session".into());
         }
         let message_id = chat
             .send_file_notice(contact, &notice)
             .map_err(|e| format!("{e:?}"))?;
-        let mut rec = self.outbox.get(transfer_id).ok_or("transfer missing")?;
         rec.notice_id = Some(message_id);
-        self.outbox.put(&rec, true);
+        if let Err(e) = self.outbox.put_checked(rec, true) {
+            rec.notice_id = None;
+            return Err(e);
+        }
         self.board
-            .update(transfer_id, |i| i.state = PushState::Deposited);
+            .update(&rec.id, |i| i.state = PushState::Deposited);
         Ok(())
     }
 
@@ -1154,7 +1230,7 @@ impl PushService {
         let id = job.id.clone();
         st.failures += 1;
         let policy = &self.settings.retry;
-        if policy.exhausted(st.last_progress.elapsed()) {
+        if job.rec.deposit_notice.is_none() && policy.exhausted(st.last_progress.elapsed()) {
             let text = match policy.window {
                 Some(w) if !w.is_zero() => format!(
                     "gave up after retrying for {} min: {msg}",
