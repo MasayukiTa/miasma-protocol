@@ -204,7 +204,7 @@ jobs:
         shell: pwsh
         run: |
           dotnet tool install --global wix --version $env:WIX_VERSION
-          foreach ($e in 'UI', 'BootstrapperApplications', 'Util') {
+          foreach ($e in 'UI', 'BootstrapperApplications', 'Util', 'Firewall') {
             wix extension add -g "WixToolset.$e.wixext/$env:WIX_VERSION"
             if ($LASTEXITCODE -ne 0) { exit 1 }
           }

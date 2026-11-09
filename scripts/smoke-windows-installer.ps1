@@ -180,6 +180,56 @@ function Uninstall-Current([string]$Exe, [string]$Tag) {
     Check "uninstall exit code ($Tag)" (($rc -eq 0) -or ($rc -eq 3010)) "exit code $rc"
 }
 
+# The three inbound allow rules the installer adds, by display name.
+$script:FirewallRuleNames = @(
+    "Miasma (miasma.exe)",
+    "Miasma (miasma-desktop.exe)",
+    "Miasma (miasma-bridge.exe)"
+)
+
+# After install: the three inbound allow rules exist, scoped to the installed
+# programs, and there is no inbound Block rule for any of them.
+function Assert-FirewallRulesPresent([string]$Tag) {
+    $rules = @()
+    try { $rules = @(netsh advfirewall firewall show rule name=all dir=in | Out-String) } catch {}
+    foreach ($name in $script:FirewallRuleNames) {
+        $present = $false
+        $action = $null
+        try {
+            $r = Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Direction -eq 'Inbound' }
+            if ($r) { $present = $true; $action = @($r)[0].Action }
+        } catch {}
+        Check "$Tag inbound firewall rule present: $name" $present "not listed by Get-NetFirewallRule"
+        if ($present) {
+            Check "$Tag firewall rule is an Allow rule: $name" ($action -eq 'Allow') "action is $action"
+        }
+    }
+    # No inbound Block rule may remain for the installed executables.
+    foreach ($exe in @("miasma.exe", "miasma-desktop.exe", "miasma-bridge.exe")) {
+        $prog = Join-Path $InstallDir $exe
+        $block = @()
+        try {
+            $block = @(Get-NetFirewallApplicationFilter -Program $prog -ErrorAction SilentlyContinue |
+                       Get-NetFirewallRule -ErrorAction SilentlyContinue |
+                       Where-Object { $_.Action -eq 'Block' -and $_.Direction -eq 'Inbound' })
+        } catch {}
+        Check "$Tag no inbound Block rule for $exe" ($block.Count -eq 0) "$($block.Count) inbound Block rule(s) remain"
+    }
+}
+
+# After uninstall: none of the three inbound allow rules remain.
+function Assert-FirewallRulesGone([string]$Tag) {
+    foreach ($name in $script:FirewallRuleNames) {
+        $gone = $true
+        try {
+            $r = Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue
+            if ($r) { $gone = $false }
+        } catch {}
+        Check "$Tag inbound firewall rule removed: $name" $gone "rule still present after uninstall"
+    }
+}
+
 function Assert-InstallLayout([string]$Tag) {
     foreach ($f in @("miasma-desktop.exe", "miasma.exe", "miasma-bridge.exe", "docs\README.txt", "docs\RELEASE-NOTES.md")) {
         Check "$Tag installed file: $f" (Test-Path (Join-Path $InstallDir $f)) "missing under $InstallDir"
@@ -237,6 +287,7 @@ try {
     Show-State "after install"
     Assert-InstallLayout "clean"
     Assert-SingleEntry "clean" $null
+    Assert-FirewallRulesPresent "clean"
 
     Step "Phase 1: programs run"
     $cli = Join-Path $InstallDir "miasma.exe"
@@ -313,6 +364,7 @@ try {
     Check "Programs and Features entry removed" (@(Get-ArpEntries).Count -eq 0) "entries remain"
     Check "no MSI product left" (@(Get-MsiProducts).Count -eq 0) "product remains"
     Check "install dir removed from the machine PATH" (-not (Test-InMachinePath)) "still in PATH"
+    Assert-FirewallRulesGone "clean"
     Check "data directory untouched (user file)" (Test-Path (Join-Path $script:dataDir "keep-me.txt")) "user file gone"
     Check "data directory untouched (master.key identical)" ((Test-Path (Join-Path $script:dataDir "master.key")) -and ((Get-FileHash (Join-Path $script:dataDir "master.key") -Algorithm SHA256).Hash -eq $keyBefore)) "key changed or gone"
 

@@ -39,7 +39,7 @@ function Build-Msi([string]$ver) {
     $out = Join-Path $WorkDir "proof-$ver.msi"
     Push-Location $REPO
     try {
-        & wix build installer\miasma.wxs -o $out -d "Version=$ver" -d "BinDir=$InputDir" -ext WixToolset.UI.wixext -arch x64
+        & wix build installer\miasma.wxs -o $out -d "Version=$ver" -d "BinDir=$InputDir" -ext WixToolset.UI.wixext -ext WixToolset.Firewall.wixext -arch x64
         if ($LASTEXITCODE -ne 0) { throw "wix build failed for $ver" }
     } finally { Pop-Location }
     return $out

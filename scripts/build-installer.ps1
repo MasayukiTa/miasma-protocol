@@ -8,7 +8,8 @@
 
     Requires:
       - WiX Toolset v6 (install: dotnet tool install --global wix --version 6.0.2)
-      - WiX extensions: WixToolset.UI.wixext, WixToolset.BootstrapperApplications.wixext, WixToolset.Util.wixext
+      - WiX extensions: WixToolset.UI.wixext, WixToolset.BootstrapperApplications.wixext,
+        WixToolset.Util.wixext, WixToolset.Firewall.wixext
         (install: wix extension add -g WixToolset.UI.wixext/6.0.2 ...)
 
     Pipeline:
@@ -101,6 +102,7 @@ if (-not $wix) {
     Write-Host "  wix extension add -g WixToolset.UI.wixext/6.0.2"
     Write-Host "  wix extension add -g WixToolset.BootstrapperApplications.wixext/6.0.2"
     Write-Host "  wix extension add -g WixToolset.Util.wixext/6.0.2"
+    Write-Host "  wix extension add -g WixToolset.Firewall.wixext/6.0.2"
     Write-Host ""
     Write-Host "See: https://wixtoolset.org/docs/intro/"
     exit 1
@@ -191,6 +193,7 @@ Write-Host "Building MSI..."
     -d "Version=$($ver.MsiVersion)" `
     -d "BinDir=$InputDir" `
     -ext WixToolset.UI.wixext `
+    -ext WixToolset.Firewall.wixext `
     -arch x64
 
 if ($LASTEXITCODE -ne 0) { throw "WiX MSI build failed." }
