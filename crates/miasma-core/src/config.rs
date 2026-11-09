@@ -597,6 +597,9 @@ enabled = true
 /// `[push]` in `config.toml`: where pushed files land and the limits on them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PushConfig {
+    /// Requires this many distinct holders to acknowledge every chunk.
+    #[serde(default = "default_file_custody_threshold")]
+    pub offline_deposit_threshold: usize,
     /// Folder for received files (one sub-folder per contact). Empty means
     /// `<data_dir>/inbox`.
     #[serde(default)]
@@ -709,6 +712,7 @@ fn default_file_custody_threshold() -> usize {
 impl Default for PushConfig {
     fn default() -> Self {
         Self {
+            offline_deposit_threshold: 1,
             inbox_dir: None,
             max_file_size: DEFAULT_PUSH_MAX_FILE_SIZE,
             min_free_bytes: DEFAULT_PUSH_MIN_FREE_BYTES,

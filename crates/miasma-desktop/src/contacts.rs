@@ -457,7 +457,7 @@ pub fn state_label(c: &ContactStrings, s: PushState) -> &'static str {
         PushState::Failed => c.st_failed,
         PushState::Rejected => c.st_rejected,
         PushState::Cancelled => c.st_cancelled,
-        PushState::Waiting => c.st_waiting,
+        PushState::Waiting | PushState::Deposited => c.st_waiting,
     }
 }
 
@@ -805,7 +805,8 @@ pub fn file_status_in(
             PushState::Queued
             | PushState::Preparing
             | PushState::Connecting
-            | PushState::Waiting => FileStatus::Waiting,
+            | PushState::Waiting
+            | PushState::Deposited => FileStatus::Waiting,
             PushState::Sending | PushState::Verifying => FileStatus::Sending {
                 percent: (fraction(r.size, r.bytes, false) * 100.0).min(99.0) as u8,
             },
