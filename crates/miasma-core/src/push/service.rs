@@ -404,6 +404,15 @@ where
             .as_ref()
             .and_then(|i| i.publish_error.clone())
         {
+            // A placement alone cannot reconstruct a protected manifest: the
+            // original protection parameters and segment commitments were not
+            // retained when strict publishing stopped. Keep the existing shares
+            // and report this instead of publishing an invalid record.
+            if rec.publish_placement.is_some() {
+                return Err(format!(
+                    "{error}; cannot resume: protected manifest metadata was not retained"
+                ));
+            }
             return Err(error);
         }
         let password = rec
@@ -2833,12 +2842,19 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("insufficient shares"));
         drop(outbox);
-        let reopened = Outbox::open(dir.path());
-        let placement = reopened.get(&rec.id).unwrap().publish_placement.unwrap();
+        let reopened = Arc::new(Outbox::open(dir.path()));
+        let mut rec = reopened.get(&rec.id).unwrap();
+        let placement = rec.publish_placement.as_ref().unwrap();
         assert_eq!(placement.mid, "mid");
         assert_eq!(placement.segments[0].local_slots, vec![0, 1, 2]);
         assert_eq!(placement.segments[0].remote_slots, vec![(1, peer)]);
         assert_eq!(placement.needed_remote_per_segment, 2);
+        let error = ensure_network_share(&reopened, &mut rec, &path, |_, _, _| async {
+            panic!("a partial publish must not be dissolved again")
+        })
+        .await
+        .unwrap_err();
+        assert!(error.contains("protected manifest metadata was not retained"));
     }
 
     struct OfflineDialer;
