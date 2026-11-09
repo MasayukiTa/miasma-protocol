@@ -4319,18 +4319,25 @@ impl MiasmaNode {
                     issuer_binding_signature,
                 } = response;
 
-                let binding_valid = self
-                    .peer_registry
-                    .verified_identity_pubkey(&peer)
-                    .is_some_and(|identity_pubkey| {
-                        verify_credential_issuer_binding(
-                            &identity_pubkey,
-                            &issuer_pubkey,
-                            &issuer_binding_signature,
-                        )
-                    });
+                let identity_pubkey = self.peer_registry.verified_identity_pubkey(&peer);
+                let binding_valid = identity_pubkey.is_some_and(|identity_pubkey| {
+                    verify_credential_issuer_binding(
+                        &identity_pubkey,
+                        &issuer_pubkey,
+                        &issuer_binding_signature,
+                    )
+                });
                 if !binding_valid {
-                    warn!("credential.rejected peer={peer} error=invalid_issuer_identity_binding");
+                    let reason = if identity_pubkey.is_some() {
+                        "signature_mismatch"
+                    } else {
+                        "verified_identity_missing"
+                    };
+                    warn!(
+                        "credential.rejected error=invalid_issuer_identity_binding reason={reason} peer={} issuer_key={}",
+                        peer.to_string().chars().take(12).collect::<String>(),
+                        hex::encode(&issuer_pubkey[..6])
+                    );
                     return;
                 }
 
@@ -4340,7 +4347,12 @@ impl MiasmaNode {
 
                 if let Some(cred) = received_credential {
                     if cred.issuer_pubkey != issuer_pubkey {
-                        warn!("credential.rejected peer={peer} error=issuer_key_mismatch");
+                        warn!(
+                            "credential.rejected error=issuer_key_mismatch peer={} expected_issuer={} credential_issuer={}",
+                            peer.to_string().chars().take(12).collect::<String>(),
+                            hex::encode(&issuer_pubkey[..6]),
+                            hex::encode(&cred.issuer_pubkey[..6])
+                        );
                         return;
                     }
                     // Verify the credential before storing:
