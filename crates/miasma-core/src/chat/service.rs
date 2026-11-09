@@ -91,7 +91,7 @@ pub struct ChatSettings {
     pub group_auto_join: bool,
     /// Hold sealed messages for trusted contacts who are offline, and leave a
     /// copy with trusted holders when a direct send cannot go through
-    /// (`chat.custody_enabled`, default off).
+    /// (`chat.custody_enabled`, default on).
     pub custody_enabled: bool,
     /// Limits and switch for the separate file holder.
     pub file_custody_limits: crate::push::file_holder::FileCustodyLimits,

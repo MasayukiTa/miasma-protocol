@@ -1986,6 +1986,8 @@ fn cmd_config_loaded(
                 "storage.hosted_quota_mb" => println!("{}", config.storage.hosted_quota_mb),
                 "privacy.stealth_mode" => println!("{}", config.privacy.stealth_mode),
                 "chat.enabled" => println!("{}", config.chat.enabled),
+                "chat.custody_enabled" => println!("{}", config.chat.custody_enabled),
+                "push.file_custody_enabled" => println!("{}", config.push.file_custody_enabled),
                 "chat.history_save" => match config.chat.history_save {
                     Some(v) => println!("{v}"),
                     None => println!("auto"),
@@ -2079,6 +2081,12 @@ fn cmd_config_loaded(
                 }
                 "chat.enabled" => {
                     config.chat.enabled = v.parse().context("expected bool")?;
+                }
+                "chat.custody_enabled" => {
+                    config.chat.custody_enabled = v.parse().context("expected bool")?;
+                }
+                "push.file_custody_enabled" => {
+                    config.push.file_custody_enabled = v.parse().context("expected bool")?;
                 }
                 "chat.history_save" => {
                     config.chat.history_save = match v {

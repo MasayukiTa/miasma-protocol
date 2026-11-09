@@ -639,9 +639,9 @@ mod tests {
     }
 
     #[test]
-    fn holding_is_off_by_default() {
+    fn holding_can_be_disabled() {
         assert!(!CustodyLimits::default().enabled);
-        assert!(!CustodyLimits::from_config(&ChatConfig::default()).enabled);
+        assert!(CustodyLimits::from_config(&ChatConfig::default()).enabled);
         let s = store(CustodyLimits::default());
         assert_eq!(
             s.deposit(&A, tag(), id(1), b"x", 0),
@@ -649,8 +649,8 @@ mod tests {
         );
         assert_eq!(s.stats(), CustodyStats::default());
         let mut cfg = ChatConfig::default();
-        cfg.custody_enabled = true;
-        assert!(CustodyLimits::from_config(&cfg).enabled);
+        cfg.custody_enabled = false;
+        assert!(!CustodyLimits::from_config(&cfg).enabled);
     }
 
     #[test]
