@@ -1094,6 +1094,18 @@ impl PushService {
         path: &Path,
         rec: &mut OutJob,
     ) -> Result<(), String> {
+        // Never reuse an interrupted deposit's key for a changed source.
+        // Completed deposits no longer depend on the source file.
+        if rec.deposit_notice.is_none() && rec.deposit_intent.is_some() {
+            let unchanged = std::fs::metadata(path)
+                .map(|m| m.is_file() && stamp(&m) == (rec.size, rec.mtime_ms))
+                .unwrap_or(false);
+            if !unchanged {
+                rec.deposit_intent = None;
+                self.outbox.put_checked(rec, true)?;
+                return Err("deposit source changed; send the file again".into());
+            }
+        }
         let chat = crate::chat::service::service_for(&self.data_dir).ok_or("no chat service")?;
         let peer = contact.endpoint_bytes().ok_or("no protected session")?;
         if !chat.core().has_protected_session(&peer) {
@@ -2350,6 +2362,56 @@ mod tests {
             "no chat service"
         );
         assert!(svc.outbox.get(&rec.id).is_some());
+        svc.shutdown();
+    }
+
+    #[tokio::test]
+    async fn changed_source_discards_interrupted_deposit_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = PushSettings::from_config(&PushConfig::default(), dir.path());
+        let svc =
+            PushService::start_with_dialer(dir.path(), [1; 32], Arc::new(OfflineDialer), settings);
+        let path = dir.path().join("file");
+        std::fs::write(&path, b"old").unwrap();
+        let (size, mtime_ms) = stamp(&std::fs::metadata(&path).unwrap());
+        let mut rec = OutJob {
+            id: "test".into(),
+            contact_id: "contact".into(),
+            path: path.to_string_lossy().into_owned(),
+            name: "file".into(),
+            size,
+            mtime_ms,
+            hash: None,
+            offset: 0,
+            attempt: 0,
+            notice_id: None,
+            deposit_notice: None,
+            deposit_intent: Some(super::super::outbox::DepositIntent {
+                file_key: [3; 32],
+                salt: [4; 16],
+                path: path.to_string_lossy().into_owned(),
+                size,
+            }),
+            created_at_ms: 0,
+        };
+        let contact = Contact {
+            id: "contact".into(),
+            label: "contact".into(),
+            endpoint_id: hex::encode([2; 32]),
+            added_at: 0,
+            allow_receive: true,
+            allow_send: true,
+            max_file_size: None,
+        };
+        svc.outbox.put_checked(&rec, true).unwrap();
+        std::fs::write(&path, b"new content").unwrap();
+        assert_eq!(
+            svc.try_offline_deposit(&contact, &path, &mut rec)
+                .await
+                .unwrap_err(),
+            "deposit source changed; send the file again"
+        );
+        assert!(svc.outbox.get(&rec.id).unwrap().deposit_intent.is_none());
         svc.shutdown();
     }
 
