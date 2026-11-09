@@ -2399,14 +2399,10 @@ mod tests {
 
     #[tokio::test]
     async fn changed_source_resets_interrupted_deposit_intent() {
-        let mut old_file_key = [0u8; 32];
-        let mut old_salt = [0u8; 16];
-        {
-            use rand::rngs::OsRng;
-            use rand::RngCore;
-            OsRng.fill_bytes(&mut old_file_key);
-            OsRng.fill_bytes(&mut old_salt);
-        }
+        let (old_file_key, old_salt) = {
+            use rand::{rngs::OsRng, Rng};
+            (OsRng.gen::<[u8; 32]>(), OsRng.gen::<[u8; 16]>())
+        };
         let dir = tempfile::tempdir().unwrap();
         let settings = PushSettings::from_config(&PushConfig::default(), dir.path());
         let svc =
@@ -2462,14 +2458,10 @@ mod tests {
 
     #[tokio::test]
     async fn mtime_only_change_creates_fresh_deposit_intent() {
-        let mut old_file_key = [0u8; 32];
-        let mut old_salt = [0u8; 16];
-        {
-            use rand::rngs::OsRng;
-            use rand::RngCore;
-            OsRng.fill_bytes(&mut old_file_key);
-            OsRng.fill_bytes(&mut old_salt);
-        }
+        let (old_file_key, old_salt) = {
+            use rand::{rngs::OsRng, Rng};
+            (OsRng.gen::<[u8; 32]>(), OsRng.gen::<[u8; 16]>())
+        };
         let dir = tempfile::tempdir().unwrap();
         let settings = PushSettings::from_config(&PushConfig::default(), dir.path());
         let svc =

@@ -742,14 +742,10 @@ mod tests {
             holders: vec![(holder, store.clone())],
             who: sender.id(),
         };
-        let mut key = [0u8; 32];
-        let mut salt = [0u8; 16];
-        {
-            use rand::rngs::OsRng;
-            use rand::RngCore;
-            OsRng.fill_bytes(&mut key);
-            OsRng.fill_bytes(&mut salt);
-        }
+        let (key, salt) = {
+            use rand::{rngs::OsRng, Rng};
+            (OsRng.gen::<[u8; 32]>(), OsRng.gen::<[u8; 16]>())
+        };
         let first = deposit_file_with_key(
             &tx,
             &[holder],
