@@ -108,6 +108,7 @@ pub struct ChatSettings {
     pub anchor_dir: Option<PathBuf>,
     /// Inbox root for verified offline file deliveries.
     pub offline_inbox_dir: Option<PathBuf>,
+    pub offline_data_dir: Option<PathBuf>,
 }
 
 impl Default for ChatSettings {
@@ -137,6 +138,7 @@ impl Default for ChatSettings {
             pqc_mode: PqcMode::Off,
             anchor_dir: None,
             offline_inbox_dir: None,
+            offline_data_dir: None,
         }
     }
 }
@@ -251,6 +253,7 @@ pub fn start_for_daemon(
         pqc_mode: cfg.privacy.pqc_mode(),
         anchor_dir: crate::paths::anchor_dir(data_dir),
         offline_inbox_dir: Some(cfg.push.resolved_inbox(data_dir)),
+        offline_data_dir: Some(data_dir.to_path_buf()),
         ..ChatSettings::default()
     };
     // Only a value somebody set is worth a warning; the default is not a request.
@@ -1125,13 +1128,27 @@ impl ChatService {
         let transport = Arc::new(super::mailbox::transport::ChatMailboxTransport::for_files(
             self.node.clone(),
         ));
-        let _ = crate::push::receive_offline::spawn_fetch(
+        let name = notice.file_name.clone();
+        let size = notice.size;
+        let push = self
+            .settings
+            .offline_data_dir
+            .as_deref()
+            .and_then(crate::push::service::service_for);
+        let fetch = crate::push::receive_offline::spawn_fetch(
             transport,
             self.core.own_id(),
             notice,
             inbox.join(leaf),
             now_ms(),
         );
+        if let (Some(fetch), Some(push)) = (fetch, push) {
+            tokio::spawn(async move {
+                if let Ok(Ok(path)) = fetch.await {
+                    push.record_offline_receive(&contact, &name, size, &path);
+                }
+            });
+        }
     }
 
     /// Collect from trusted holders whatever waits for us, applying each item

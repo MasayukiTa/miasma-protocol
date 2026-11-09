@@ -628,6 +628,27 @@ impl PushService {
         self.settings.inbox_dir.join(leaf)
     }
 
+    /// Record a verified offline delivery in the same board and history as a direct receive.
+    pub fn record_offline_receive(&self, contact: &Contact, name: &str, size: u64, path: &Path) {
+        let (id, _) = self.board.create(
+            Direction::In,
+            &contact.id,
+            &contact.label,
+            name,
+            size,
+            PushState::Preparing,
+        );
+        let saved = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| name.to_owned());
+        let dir = self.contact_dir(&contact.label);
+        self.board.update(&id, |i| {
+            i.saved_as = Some(format!("{}/{}", contact_leaf(&dir), saved))
+        });
+        self.finish(&id, PushState::Done, None, None);
+    }
+
     // ── Sending ──────────────────────────────────────────────────────────────
 
     /// Queue `path` for `selector`'s contact. Returns the transfer id. The
