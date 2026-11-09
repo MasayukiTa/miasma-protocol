@@ -935,6 +935,7 @@ impl PushService {
             network_share_id: None,
             network_password: None,
             network_intent: None,
+            publish_placement: None,
             created_at_ms: now_ms(),
         };
         self.outbox.put(&rec, true);
@@ -2650,6 +2651,7 @@ mod tests {
             network_share_id: None,
             network_password: None,
             network_intent: None,
+            publish_placement: None,
             created_at_ms: 0,
         }
     }
@@ -2789,6 +2791,7 @@ mod tests {
             network_share_id: None,
             network_password: None,
             network_intent: None,
+            publish_placement: None,
             created_at_ms: 0,
         };
         let contact = Contact {
@@ -2839,6 +2842,7 @@ mod tests {
             network_share_id: None,
             network_password: None,
             network_intent: None,
+            publish_placement: None,
             deposit_intent: Some(super::super::outbox::DepositIntent {
                 file_key: old_file_key,
                 salt: old_salt,
@@ -2901,6 +2905,7 @@ mod tests {
             network_share_id: None,
             network_password: None,
             network_intent: None,
+            publish_placement: None,
             deposit_intent: Some(super::super::outbox::DepositIntent {
                 file_key: old_file_key,
                 salt: old_salt,

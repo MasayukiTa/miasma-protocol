@@ -43,6 +43,87 @@ pub struct NetworkPublishIntent {
     pub publish_error: Option<String>,
 }
 
+/// Placement progress retained with an in-progress publish.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublishPlacement {
+    pub mid: String,
+    pub segments: Vec<SegmentPlacement>,
+    pub needed_remote_per_segment: u16,
+    pub created_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SegmentPlacement {
+    pub index: u32,
+    pub local_slots: Vec<u16>,
+    pub remote_slots: Vec<(u16, [u8; 32])>,
+}
+
+impl PublishPlacement {
+    pub fn missing_slots(&self, segment: u32) -> Vec<u16> {
+        let Some(s) = self.segments.iter().find(|s| s.index == segment) else {
+            return Vec::new();
+        };
+        let remaining = usize::from(self.needed_remote_per_segment)
+            .saturating_sub(distinct_placements(&s.remote_slots));
+        let mut slots = Vec::new();
+        for &slot in &s.local_slots {
+            if !s.remote_slots.iter().any(|(accepted, _)| *accepted == slot)
+                && !slots.contains(&slot)
+                && slots.len() < remaining
+            {
+                slots.push(slot);
+            }
+        }
+        slots
+    }
+
+    pub fn record_accept(&mut self, segment: u32, slot: u16, peer: [u8; 32]) {
+        if let Some(s) = self.segments.iter_mut().find(|s| s.index == segment) {
+            if !s.remote_slots.contains(&(slot, peer)) {
+                s.remote_slots.push((slot, peer));
+            }
+        }
+    }
+
+    /// Availability is not stored, so require the configured number of peers.
+    pub fn is_satisfied(&self) -> bool {
+        !self.segments.is_empty()
+            && self.segments.iter().all(|s| {
+                distinct_placements(&s.remote_slots)
+                    >= usize::from(self.needed_remote_per_segment.max(1))
+            })
+    }
+}
+
+// Maximum matching prevents repeated slots or peers from inflating progress.
+fn distinct_placements(placements: &[(u16, [u8; 32])]) -> usize {
+    fn assign(slot: u16, placements: &[(u16, [u8; 32])], seen: &mut Vec<[u8; 32]>, matched: &mut Vec<([u8; 32], u16)>) -> bool {
+        for &(_, peer) in placements.iter().filter(|(candidate, _)| *candidate == slot) {
+            if seen.contains(&peer) { continue; }
+            seen.push(peer);
+            if let Some(i) = matched.iter().position(|(p, _)| *p == peer) {
+                let previous = matched[i].1;
+                if !assign(previous, placements, seen, matched) { continue; }
+                matched[i].1 = slot;
+            } else {
+                matched.push((peer, slot));
+            }
+            return true;
+        }
+        false
+    }
+    let mut slots = Vec::new();
+    let mut matched = Vec::new();
+    for &(slot, _) in placements {
+        if !slots.contains(&slot) {
+            slots.push(slot);
+            assign(slot, placements, &mut Vec::new(), &mut matched);
+        }
+    }
+    matched.len()
+}
+
 /// One file queued for a contact, as it is stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutJob {
@@ -80,6 +161,8 @@ pub struct OutJob {
     pub network_password: Option<String>,
     #[serde(default)]
     pub network_intent: Option<NetworkPublishIntent>,
+    #[serde(default)]
+    pub publish_placement: Option<PublishPlacement>,
     pub created_at_ms: u64,
 }
 
@@ -336,9 +419,11 @@ mod tests {
         let object = value.as_object_mut().unwrap();
         object.remove("network_share_id");
         object.remove("network_password");
+        object.remove("publish_placement");
         let restored: OutJob = serde_json::from_value(value).unwrap();
         assert!(restored.network_share_id.is_none());
         assert!(restored.network_password.is_none());
+        assert!(restored.publish_placement.is_none());
     }
 
     fn job(i: usize) -> OutJob {
@@ -358,8 +443,56 @@ mod tests {
             network_share_id: None,
             network_password: None,
             network_intent: None,
+            publish_placement: None,
             created_at_ms: i as u64,
         }
+    }
+
+    fn placement() -> PublishPlacement {
+        PublishPlacement {
+            mid: "content-id".into(),
+            segments: vec![SegmentPlacement { index: 0, local_slots: vec![0, 1, 2], remote_slots: vec![] }],
+            needed_remote_per_segment: 2,
+            created_ms: 42,
+        }
+    }
+
+    #[test]
+    fn placement_survives_encrypted_outbox_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut j = job(1);
+        let mut p = placement();
+        p.record_accept(0, 0, rand::random());
+        j.publish_placement = Some(p);
+        {
+            let ob = Outbox::open(dir.path());
+            ob.put_checked(&j, true).unwrap();
+        }
+        let raw = std::fs::read(crate::paths::PUSH_OUTBOX.in_dir(dir.path())).unwrap();
+        assert!(!raw.windows(10).any(|w| w == b"content-id"));
+        assert_eq!(Outbox::open(dir.path()).get(&j.id).unwrap().publish_placement, j.publish_placement);
+    }
+
+    #[test]
+    fn placement_tracks_missing_and_distinct_accepts() {
+        let mut p = placement();
+        let peer = rand::random();
+        let other = rand::random();
+        assert_eq!(p.missing_slots(0), vec![0, 1]);
+        assert!(!p.is_satisfied());
+        p.record_accept(0, 0, peer);
+        assert_eq!(p.missing_slots(0), vec![1]);
+        p.record_accept(0, 1, peer);
+        assert!(!p.is_satisfied());
+        assert_eq!(p.missing_slots(0), vec![2]);
+        p.record_accept(0, 1, other);
+        assert!(p.is_satisfied());
+        assert!(p.missing_slots(0).is_empty());
+        p.segments.push(SegmentPlacement { index: 1, local_slots: vec![0, 1], remote_slots: vec![] });
+        assert!(!p.is_satisfied());
+        p.record_accept(1, 0, peer);
+        p.record_accept(1, 1, other);
+        assert!(p.is_satisfied());
     }
 
     #[test]
