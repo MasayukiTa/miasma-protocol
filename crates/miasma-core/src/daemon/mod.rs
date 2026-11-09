@@ -823,9 +823,19 @@ impl DaemonServer {
                         found.store(peers.len(), std::sync::atomic::Ordering::Relaxed);
                         tracing::info!(peers_found = peers.len(), "network discovery round");
                         let _ = dht.dial_discovery(peers).await;
-                        let count = dht.peer_count().await.unwrap_or(0);
-                        tokio::time::sleep(discovery_delay(config.discovery.refresh_secs, count))
+                        let finished = tokio::time::Instant::now();
+                        loop {
+                            let count = dht.peer_count().await.unwrap_or(0);
+                            let due = discovery_delay(config.discovery.refresh_secs, count);
+                            let elapsed = finished.elapsed();
+                            if elapsed >= due {
+                                break;
+                            }
+                            tokio::time::sleep(
+                                (due - elapsed).min(std::time::Duration::from_secs(60)),
+                            )
                             .await;
+                        }
                     }
                 })
             });
