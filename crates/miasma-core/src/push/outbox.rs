@@ -98,13 +98,25 @@ impl PublishPlacement {
 
 // Maximum matching prevents repeated slots or peers from inflating progress.
 fn distinct_placements(placements: &[(u16, [u8; 32])]) -> usize {
-    fn assign(slot: u16, placements: &[(u16, [u8; 32])], seen: &mut Vec<[u8; 32]>, matched: &mut Vec<([u8; 32], u16)>) -> bool {
-        for &(_, peer) in placements.iter().filter(|(candidate, _)| *candidate == slot) {
-            if seen.contains(&peer) { continue; }
+    fn assign(
+        slot: u16,
+        placements: &[(u16, [u8; 32])],
+        seen: &mut Vec<[u8; 32]>,
+        matched: &mut Vec<([u8; 32], u16)>,
+    ) -> bool {
+        for &(_, peer) in placements
+            .iter()
+            .filter(|(candidate, _)| *candidate == slot)
+        {
+            if seen.contains(&peer) {
+                continue;
+            }
             seen.push(peer);
             if let Some(i) = matched.iter().position(|(p, _)| *p == peer) {
                 let previous = matched[i].1;
-                if !assign(previous, placements, seen, matched) { continue; }
+                if !assign(previous, placements, seen, matched) {
+                    continue;
+                }
                 matched[i].1 = slot;
             } else {
                 matched.push((peer, slot));
@@ -451,7 +463,11 @@ mod tests {
     fn placement() -> PublishPlacement {
         PublishPlacement {
             mid: "content-id".into(),
-            segments: vec![SegmentPlacement { index: 0, local_slots: vec![0, 1, 2], remote_slots: vec![] }],
+            segments: vec![SegmentPlacement {
+                index: 0,
+                local_slots: vec![0, 1, 2],
+                remote_slots: vec![],
+            }],
             needed_remote_per_segment: 2,
             created_ms: 42,
         }
@@ -470,7 +486,13 @@ mod tests {
         }
         let raw = std::fs::read(crate::paths::PUSH_OUTBOX.in_dir(dir.path())).unwrap();
         assert!(!raw.windows(10).any(|w| w == b"content-id"));
-        assert_eq!(Outbox::open(dir.path()).get(&j.id).unwrap().publish_placement, j.publish_placement);
+        assert_eq!(
+            Outbox::open(dir.path())
+                .get(&j.id)
+                .unwrap()
+                .publish_placement,
+            j.publish_placement
+        );
     }
 
     #[test]
@@ -488,7 +510,11 @@ mod tests {
         p.record_accept(0, 1, other);
         assert!(p.is_satisfied());
         assert!(p.missing_slots(0).is_empty());
-        p.segments.push(SegmentPlacement { index: 1, local_slots: vec![0, 1], remote_slots: vec![] });
+        p.segments.push(SegmentPlacement {
+            index: 1,
+            local_slots: vec![0, 1],
+            remote_slots: vec![],
+        });
         assert!(!p.is_satisfied());
         p.record_accept(1, 0, peer);
         p.record_accept(1, 1, other);
