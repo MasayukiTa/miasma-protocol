@@ -99,6 +99,11 @@ pub enum CustodyError {
     Full,
     #[error("this depositor has used its share")]
     DepositorBudget,
+    /// The caller sent custody requests faster than the per-contact rate
+    /// allows. A trusted contact that hammers list/fetch/delete/deposit is
+    /// told to slow down rather than being let through unchecked.
+    #[error("too many custody requests; slow down")]
+    RateLimited,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

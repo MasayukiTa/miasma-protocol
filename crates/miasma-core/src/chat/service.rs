@@ -98,6 +98,11 @@ pub struct ChatSettings {
     /// How many trusted holders get a copy when a direct send fails
     /// (`chat.custody_copies`, 1-8).
     pub custody_copies: usize,
+    /// Per-contact rate on custody requests (deposit/list/fetch/delete):
+    /// burst and per minute. Stops a trusted contact from hammering the
+    /// custody store; over the limit a request is refused, not served.
+    pub custody_burst: f64,
+    pub custody_per_minute: f64,
     /// How often the collection task asks our trusted holders for anything
     /// kept for us. It also runs when woken by a fresh inbound connection.
     pub custody_collect_every: Duration,
@@ -132,6 +137,8 @@ impl Default for ChatSettings {
             custody_enabled: false,
             file_custody_limits: Default::default(),
             custody_copies: crate::config::DEFAULT_CHAT_CUSTODY_COPIES,
+            custody_burst: crate::config::DEFAULT_CHAT_CUSTODY_RATE_BURST as f64,
+            custody_per_minute: crate::config::DEFAULT_CHAT_CUSTODY_RATE_PER_MINUTE as f64,
             custody_collect_every: Duration::from_secs(300),
             // Baseline for tests and embedders; the daemon takes the mode from
             // `privacy.pqc_mode` (default `prefer`) when it starts.
@@ -250,6 +257,8 @@ pub fn start_for_daemon(
         custody_enabled: cfg.chat.custody_enabled,
         file_custody_limits: crate::push::file_holder::FileCustodyLimits::from_config(&cfg.push),
         custody_copies: cfg.chat.custody_copies.clamp(1, 8),
+        custody_burst: cfg.chat.custody_rate_burst.max(1) as f64,
+        custody_per_minute: cfg.chat.custody_rate_per_minute.max(1) as f64,
         pqc_mode: cfg.privacy.pqc_mode(),
         anchor_dir: crate::paths::anchor_dir(data_dir),
         offline_inbox_dir: Some(cfg.push.resolved_inbox(data_dir)),
@@ -311,6 +320,10 @@ pub struct ChatService {
     unknown: Mutex<Buckets>,
     inbound_rate: Mutex<Buckets>,
     sync_rate: Mutex<Buckets>,
+    /// Per-contact rate on custody requests, mirroring `inbound_rate` for the
+    /// custody streams (deposit/list/fetch/delete) which otherwise pass only
+    /// the trust check.
+    custody_rate: Mutex<Buckets>,
     /// Contacts that did not answer a `Sync` (older builds).
     no_sync: Mutex<HashMap<[u8; 32], Instant>>,
     /// Contacts whose build answered a read receipt with "bad request" (it
@@ -449,6 +462,10 @@ impl ChatService {
                 settings.inbound_per_minute / 60.0,
             )),
             sync_rate: Mutex::new(Buckets::new(4.0, 6.0 / 60.0)),
+            custody_rate: Mutex::new(Buckets::new(
+                settings.custody_burst,
+                settings.custody_per_minute / 60.0,
+            )),
             no_sync: Mutex::new(HashMap::new()),
             no_receipts: Mutex::new(HashMap::new()),
             settings,
@@ -1044,6 +1061,20 @@ impl ChatService {
             let _ = tx.finish();
             return;
         };
+        // A trusted contact still passes a per-contact rate limit here, the
+        // same way inbound chat frames do: the trust check alone does not bound
+        // how fast a contact may deposit/list/fetch/delete. Over the limit the
+        // request is refused (a frame, not a dropped connection) so the caller
+        // learns to slow down. This covers both store selectors.
+        if !self.custody_rate.lock().unwrap().allow(*who) {
+            let _ = wire::write_response(
+                tx,
+                &Response::Refused(super::mailbox::holder::CustodyError::RateLimited),
+            )
+            .await;
+            let _ = tx.finish();
+            return;
+        }
         store.trust(*who);
         let now = now_ms();
         let who = *who;
@@ -1729,5 +1760,71 @@ mod custody_status_tests {
         assert!(none.to_lowercase().contains("not deposited"));
         assert!(!some.to_lowercase().contains("not deposited"));
         assert_ne!(none, some);
+    }
+}
+
+#[cfg(test)]
+mod custody_rate_tests {
+    //! Tests for finding (1): serve_custody passes every custody request
+    //! (both store selectors) through a per-contact rate limit built on the
+    //! same Buckets token-bucket type that inbound_rate uses. Over the limit
+    //! the request is refused with CustodyError::RateLimited instead of being
+    //! served. These tests exercise that bucket directly with the custody
+    //! defaults so the policy -- burst allowed, flood refused, refill over
+    //! time, per-contact isolation -- is pinned without a network stream. The
+    //! serve_custody call site consumes one token per request via
+    //! custody_rate.allow(who); a false there is what becomes the refusal.
+    use super::Buckets;
+    use crate::config::{DEFAULT_CHAT_CUSTODY_RATE_BURST, DEFAULT_CHAT_CUSTODY_RATE_PER_MINUTE};
+
+    fn custody_bucket() -> Buckets {
+        Buckets::new(
+            DEFAULT_CHAT_CUSTODY_RATE_BURST as f64,
+            DEFAULT_CHAT_CUSTODY_RATE_PER_MINUTE as f64 / 60.0,
+        )
+    }
+
+    #[test]
+    fn a_contact_is_refused_once_its_burst_is_spent() {
+        let mut b = custody_bucket();
+        let who = [7u8; 32];
+        for i in 0..DEFAULT_CHAT_CUSTODY_RATE_BURST {
+            assert!(b.allow(who), "request {i} within the burst must be allowed");
+        }
+        assert!(!b.allow(who), "the request past the burst must be refused");
+    }
+
+    #[test]
+    fn the_limit_is_per_contact() {
+        let mut b = custody_bucket();
+        let greedy = [1u8; 32];
+        let other = [2u8; 32];
+        for _ in 0..DEFAULT_CHAT_CUSTODY_RATE_BURST {
+            assert!(b.allow(greedy));
+        }
+        assert!(!b.allow(greedy), "greedy contact is over its own limit");
+        assert!(
+            b.allow(other),
+            "a different contact keeps its own full burst"
+        );
+    }
+
+    #[test]
+    fn tokens_refill_after_waiting() {
+        let mut b = Buckets::new(1.0, 100.0);
+        let who = [9u8; 32];
+        assert!(b.allow(who), "first request spends the single token");
+        assert!(!b.allow(who), "immediately after, no token is left");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(b.allow(who), "after the refill interval a token is back");
+    }
+
+    #[test]
+    fn the_custody_defaults_grant_a_real_burst() {
+        assert!(DEFAULT_CHAT_CUSTODY_RATE_BURST >= 2);
+        assert!(DEFAULT_CHAT_CUSTODY_RATE_PER_MINUTE >= 1);
+        let mut b = custody_bucket();
+        let who = [3u8; 32];
+        assert!(b.allow(who), "the first custody request is always allowed");
     }
 }
