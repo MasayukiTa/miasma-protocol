@@ -129,6 +129,7 @@ fn show_share_picker(
 ) -> Option<CallAction> {
     let mut action = None;
     let mut open = picker.open;
+    crate::a11y::dialog_title(ctx, c.share_picker_title);
     egui::Window::new(c.share_picker_title)
         .collapsible(false)
         .open(&mut open)
@@ -162,12 +163,12 @@ fn show_share_picker(
                 if ui.button(c.share_refresh).clicked() {
                     picker.refresh();
                 }
-                if ui
-                    .add_enabled(
-                        picker.selected.is_some(),
-                        egui::Button::new(c.share_confirm),
-                    )
-                    .clicked()
+                if crate::form_check::add_enabled(
+                    ui,
+                    picker.selected.is_some(),
+                    kit::secondary_button(c.share_confirm),
+                )
+                .clicked()
                 {
                     action = picker.selected.map(CallAction::StartScreenShare);
                     picker.open = false;
