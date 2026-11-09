@@ -75,6 +75,9 @@ struct SharePicker {
     open: bool,
     targets: Vec<ShareTargetInfo>,
     selected: Option<ShareTarget>,
+    was_sharing: bool,
+    stopped_by_user: bool,
+    ended: bool,
 }
 
 fn sort_share_targets(targets: &mut [ShareTargetInfo]) {
@@ -99,7 +102,7 @@ fn target_label(c: &CallStrings, target: &ShareTargetInfo) -> String {
         String::new()
     };
     format!(
-        "{}: {}{} ? {} ? {} ? {}",
+        "{}: {}{} | {} | {} x {}",
         kind, target.title, primary, target.app, target.width, target.height
     )
 }
@@ -207,15 +210,28 @@ pub fn show(
         .with_min_inner_size([MIN_SIZE.0, MIN_SIZE.1]);
 
     ctx.show_viewport_immediate(viewport_id, builder, |ctx, _class| {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            draw_contents(ui, c, state, window, now_ms, video, &mut outcome.action);
-        });
         let picker_id = egui::Id::new("call_share_picker");
         let mut picker = ctx.data_mut(|d| d.get_temp::<SharePicker>(picker_id).unwrap_or_default());
+        let sharing = state.status().map_or(false, |s| s.screen_sharing);
+        if picker.was_sharing && !sharing {
+            picker.ended = !picker.stopped_by_user;
+            picker.stopped_by_user = false;
+        }
+        picker.was_sharing = sharing;
+        egui::CentralPanel::default().show(ctx, |ui| {
+            draw_contents(ui, c, state, window, now_ms, video, &mut outcome.action);
+            if picker.ended {
+                kit::notice(ui, kit::Level::Warn, c.share_ended);
+            }
+        });
+        if outcome.action == Some(CallAction::ToggleScreenShare) && sharing {
+            picker.stopped_by_user = true;
+        }
         if outcome.action == Some(CallAction::ToggleScreenShare)
             && !state.status().map_or(false, |s| s.screen_sharing)
         {
             picker.open = true;
+            picker.ended = false;
             picker.selected = None;
             picker.refresh();
             outcome.action = None;
@@ -434,9 +450,9 @@ mod tests {
         let c = crate::locale::call_strings(crate::locale::Locale::En);
         assert_eq!(
             target_label(c, &targets[0]),
-            "Display: Main (Primary) ?  ? 1920 ? 1080"
+            "Display: Main (Primary) |  | 1920 x 1080"
         );
-        assert_eq!(target_label(c, &targets[1]), "Window: A ? A ? 1920 ? 1080");
+        assert_eq!(target_label(c, &targets[1]), "Window: A | A | 1920 x 1080");
     }
 
     #[test]

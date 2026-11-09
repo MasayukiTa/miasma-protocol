@@ -3426,7 +3426,7 @@ call_strings! {
     // screen-reader name.
     screen_on, screen_off, a11y_screen_share,
     share_picker_title, share_display, share_window, share_confirm, share_cancel,
-    share_primary, share_empty, share_minimized, share_refresh,
+    share_primary, share_empty, share_minimized, share_refresh, share_ended,
     // Notices shown when a macOS capture permission is not granted: `screen_permission` when
     // screen recording is not allowed, `mic_permission` when the microphone is not allowed. Each
     // says where to allow it (System Settings > Privacy & Security). Empty on Windows and Linux
@@ -3498,6 +3498,7 @@ static CALL_EN: CallStrings = CallStrings {
     share_empty: "No targets found",
     share_minimized: "Minimized",
     share_refresh: "Refresh",
+    share_ended: "Screen sharing ended.",
     a11y_screen_share: "Share your screen",
     screen_permission: "Screen sharing needs permission. Allow Miasma in System Settings > Privacy & Security > Screen Recording, then try again.",
     mic_permission: "The microphone needs permission. Allow Miasma in System Settings > Privacy & Security > Microphone.",
@@ -3563,6 +3564,7 @@ static CALL_JA: CallStrings = CallStrings {
     share_empty: "共有できる画面が見つかりません",
     share_minimized: "最小化中",
     share_refresh: "更新",
+    share_ended: "画面の共有が終了しました。",
     a11y_screen_share: "画面を共有する",
     screen_permission: "画面共有には許可が必要です。「システム設定」＞「プライバシーとセキュリティ」＞「画面収録」で Miasma を許可してから、もう一度お試しください。",
     mic_permission: "マイクには許可が必要です。「システム設定」＞「プライバシーとセキュリティ」＞「マイク」で Miasma を許可してください。",
@@ -3628,6 +3630,7 @@ static CALL_ZH_CN: CallStrings = CallStrings {
     share_empty: "未找到可共享的内容",
     share_minimized: "已最小化",
     share_refresh: "刷新",
+    share_ended: "屏幕共享已结束。",
     a11y_screen_share: "共享你的屏幕",
     screen_permission:
         "共享屏幕需要权限。请在“系统设置”＞“隐私与安全性”＞“屏幕录制”中允许 Miasma，然后重试。",
