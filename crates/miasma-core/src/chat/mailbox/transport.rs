@@ -21,7 +21,7 @@ use super::{
     client::{MailboxError, MailboxTransport},
     holder::{CustodyError, DepositOutcome},
     ids::{ItemId, RecipientTag},
-    wire::{self, Request, Response},
+    wire::{self, Request, Response, StoreSelector},
 };
 use crate::transport::iroh_direct::{IrohNode, CHAT_ALPN};
 
@@ -32,6 +32,7 @@ const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
 pub struct ChatMailboxTransport {
     node: Arc<IrohNode>,
     handle: Handle,
+    store: StoreSelector,
 }
 
 impl ChatMailboxTransport {
@@ -41,6 +42,16 @@ impl ChatMailboxTransport {
         Self {
             node,
             handle: Handle::current(),
+            store: StoreSelector::Chat,
+        }
+    }
+
+    /// Address the separate file custody store on each holder.
+    pub fn for_files(node: Arc<IrohNode>) -> Self {
+        Self {
+            node,
+            handle: Handle::current(),
+            store: StoreSelector::File,
         }
     }
 
@@ -48,6 +59,7 @@ impl ChatMailboxTransport {
         let node = self.node.clone();
         let holder = *holder;
         let req = req.clone();
+        let store = self.store;
         self.handle.block_on(async move {
             let conn = node
                 .connect_alpn(&holder, CHAT_ALPN)
@@ -62,13 +74,17 @@ impl ChatMailboxTransport {
                 tx.write_all(&[wire::CUSTODY_STREAM_TAG])
                     .await
                     .map_err(|_| MailboxError::Unreachable)?;
-                wire::write_request(&mut tx, &req)
+                wire::write_selected_request(&mut tx, store, &req)
                     .await
                     .map_err(|_| MailboxError::Unreachable)?;
                 let _ = tx.finish();
-                wire::read_response(&mut rx)
-                    .await
-                    .map_err(|_| MailboxError::Unreachable)
+                wire::read_response(&mut rx).await.map_err(|_| {
+                    if store == StoreSelector::File {
+                        MailboxError::Refused(CustodyError::Disabled)
+                    } else {
+                        MailboxError::Unreachable
+                    }
+                })
             })
             .await
             .map_err(|_| MailboxError::Unreachable)?;

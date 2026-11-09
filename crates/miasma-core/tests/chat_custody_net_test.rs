@@ -104,6 +104,69 @@ async fn until(secs: u64, what: &str, mut f: impl FnMut() -> bool) {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn file_and_legacy_chat_requests_reach_separate_stores() {
+    use miasma_core::chat::mailbox::{
+        client::MailboxTransport,
+        holder::DepositOutcome,
+        ids::{ItemId, RecipientTag},
+        transport::ChatMailboxTransport,
+    };
+    let r = relay().await;
+    let holder_seed = rand::random();
+    let sender_seed = rand::random();
+    let holder_node = start_node(&r, &holder_seed).await;
+    let sender_node = start_node(&r, &sender_seed).await;
+    let dir = tempfile::tempdir().unwrap();
+    let contacts = Arc::new(ContactStore::open(dir.path()));
+    contacts
+        .add(
+            &ContactCode::new(sender_node.endpoint_id()),
+            Some("sender"),
+            None,
+        )
+        .unwrap();
+    let mut cfg = settings();
+    cfg.file_custody_limits.enabled = true;
+    let keys = Arc::new(StateKeys::open_or_init(dir.path()).unwrap());
+    let holder = ChatService::start(
+        &dir.path().join("chat"),
+        holder_node.clone(),
+        &holder_seed,
+        keys,
+        contacts,
+        StoreSettings::default(),
+        cfg,
+    )
+    .unwrap();
+    let holder_id = holder_node.endpoint_id();
+    let result = tokio::task::spawn_blocking(move || {
+        let chat = ChatMailboxTransport::new(sender_node.clone());
+        let file = ChatMailboxTransport::for_files(sender_node);
+        let tag = RecipientTag([7; 16]);
+        let item = ItemId([8; 16]);
+        assert_eq!(
+            chat.deposit(&holder_id, tag, item, b"chat", 0).unwrap(),
+            DepositOutcome::Stored
+        );
+        assert_eq!(
+            file.deposit(&holder_id, tag, item, b"file", 0).unwrap(),
+            DepositOutcome::Stored
+        );
+        assert_eq!(
+            chat.fetch(&holder_id, tag, item, 0).unwrap(),
+            Some(b"chat".to_vec())
+        );
+        assert_eq!(
+            file.fetch(&holder_id, tag, item, 0).unwrap(),
+            Some(b"file".to_vec())
+        );
+    })
+    .await;
+    result.unwrap();
+    assert_eq!(holder.custody_stats().unwrap().items, 1);
+}
+
 /// A sends to B while B is offline. The copy lands with the holder C. When B
 /// starts, its worker collects from C and the message appears in B's history.
 #[tokio::test(flavor = "multi_thread")]

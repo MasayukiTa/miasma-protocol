@@ -310,6 +310,11 @@ impl ChatCore {
         // file found older than the one written last?
         self.settle_rollback(&e.peer);
         let e = self.outbox.get(id).ok_or(PrepareError::Gone)?;
+        if super::file_notice::text_to_notice(&e.text).is_some()
+            && !self.has_protected_session(&e.peer)
+        {
+            return Err(PrepareError::Storage("no protected session".into()));
+        }
         if let Some(s) = &e.sealed {
             if let Ok(env) = Envelope::decode(s) {
                 return Ok((s.clone(), env.id));
@@ -846,6 +851,15 @@ impl ChatCore {
 // ─── Hybrid upgrade (opt-in, `pqc` feature) ──────────────────────────────────
 
 impl ChatCore {
+    pub(crate) fn has_protected_session(&self, peer: &[u8; 32]) -> bool {
+        self.store.peek_peer(peer, |st| {
+            st.session
+                .as_ref()
+                .and_then(|session| self.seal_layer(peer, session.origin_ek()))
+                .is_some()
+        })
+    }
+
     /// The hybrid key to seal with in the session `sid`: only after both sides
     /// finished the exchange.
     #[cfg(feature = "pqc")]

@@ -83,6 +83,7 @@ pub struct PushSettings {
     pub max_send_kib_per_sec: u32,
     /// Replaces the real disk query (tests).
     pub free_space: Option<FreeSpaceFn>,
+    pub offline_deposit_threshold: usize,
 }
 
 impl PushSettings {
@@ -99,6 +100,7 @@ impl PushSettings {
             part_retention: Duration::from_secs(cfg.part_retention_days.saturating_mul(86_400)),
             max_send_kib_per_sec: cfg.max_send_kib_per_sec,
             free_space: None,
+            offline_deposit_threshold: cfg.offline_deposit_threshold,
         }
     }
 }
@@ -679,6 +681,9 @@ impl PushService {
             hash: None,
             offset: 0,
             attempt: 0,
+            notice_id: None,
+            deposit_notice: None,
+            deposit_intent: None,
             created_at_ms: now_ms(),
         };
         self.outbox.put(&rec, true);
@@ -786,7 +791,12 @@ impl PushService {
         }
     }
 
-    async fn run_job(&self, contact_id: &str, conn: &mut Option<Arc<dyn Link>>, mut job: Job) {
+    async fn run_job(
+        self: &Arc<Self>,
+        contact_id: &str,
+        conn: &mut Option<Arc<dyn Link>>,
+        mut job: Job,
+    ) {
         let id = job.id.clone();
         let mut stop = self.shutdown.subscribe();
         if *job.cancel.borrow() {
@@ -819,6 +829,39 @@ impl PushService {
             );
         };
 
+        if job.rec.notice_id.is_some() {
+            self.wait_for_notice(&mut job, &target, &mut stop).await;
+            return;
+        }
+        let mut st = RetryState {
+            failures: 0,
+            last_progress: Instant::now(),
+            best_offset: 0,
+            last_start: None,
+        };
+        // A completed deposit owns the transfer even if the source is gone.
+        while (job.rec.deposit_notice.is_some() || job.rec.deposit_intent.is_some())
+            && job.rec.notice_id.is_none()
+        {
+            match self
+                .try_offline_deposit(&contact, &job.path, &mut job.rec)
+                .await
+            {
+                Ok(()) => break,
+                Err(e) => {
+                    if !self
+                        .wait_retry(&mut job, &mut st, error_kind::UNREACHABLE, e, &mut stop)
+                        .await
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+        if job.rec.notice_id.is_some() {
+            self.wait_for_notice(&mut job, &target, &mut stop).await;
+            return;
+        }
         // The file must still be the one that was queued.
         if let Err((kind, m)) = self.check_source(&job) {
             return self.finish_kind(&id, PushState::Failed, Some(m), None, Some(kind));
@@ -862,12 +905,6 @@ impl PushService {
         self.board.update(&id, |i| i.size = size);
         let name = job.rec.name.clone();
 
-        let mut st = RetryState {
-            failures: 0,
-            last_progress: Instant::now(),
-            best_offset: 0,
-            last_start: None,
-        };
         let mut restarted = false;
         loop {
             if *job.cancel.borrow() {
@@ -892,6 +929,20 @@ impl PushService {
                         IrohClientError::Unreachable(_) => error_kind::UNREACHABLE,
                         _ => error_kind::CONNECTION_LOST,
                     };
+                    if kind == error_kind::UNREACHABLE
+                        && self
+                            .try_offline_deposit(&contact, &job.path, &mut job.rec)
+                            .await
+                            .is_ok()
+                    {
+                        self.wait_for_notice(&mut job, &target, &mut stop).await;
+                        return;
+                    }
+                    if job.rec.deposit_notice.is_some() || job.rec.deposit_intent.is_some() {
+                        self.retry_deposit_notice(&contact, &mut job, &target, &mut st, &mut stop)
+                            .await;
+                        return;
+                    }
                     if self
                         .wait_retry(&mut job, &mut st, kind, describe_dial_error(&e), &mut stop)
                         .await
@@ -981,11 +1032,212 @@ impl PushService {
                     // frees the partial file for the next attempt at once.
                     *conn = None;
                     c.close(CLOSE_RETRY, b"retry");
+                    if kind == error_kind::CONNECTION_LOST
+                        && self
+                            .try_offline_deposit(&contact, &job.path, &mut job.rec)
+                            .await
+                            .is_ok()
+                    {
+                        self.wait_for_notice(&mut job, &target, &mut stop).await;
+                        return;
+                    }
+                    if job.rec.deposit_notice.is_some() || job.rec.deposit_intent.is_some() {
+                        self.retry_deposit_notice(&contact, &mut job, &target, &mut st, &mut stop)
+                            .await;
+                        return;
+                    }
                     if !self.wait_retry(&mut job, &mut st, kind, m, &mut stop).await {
                         return;
                     }
                 }
             }
+        }
+    }
+
+    async fn retry_deposit_notice(
+        self: &Arc<Self>,
+        contact: &Contact,
+        job: &mut Job,
+        target: &[u8; 32],
+        st: &mut RetryState,
+        stop: &mut watch::Receiver<bool>,
+    ) {
+        loop {
+            if !self
+                .wait_retry(
+                    job,
+                    st,
+                    error_kind::UNREACHABLE,
+                    "cannot persist or send the deposit notice".into(),
+                    stop,
+                )
+                .await
+            {
+                return;
+            }
+            match self
+                .try_offline_deposit(contact, &job.path, &mut job.rec)
+                .await
+            {
+                Ok(()) => {
+                    self.wait_for_notice(job, target, stop).await;
+                    return;
+                }
+                Err(e) => {
+                    self.board.update(&job.id, |i| i.error = Some(e));
+                }
+            }
+        }
+    }
+
+    async fn try_offline_deposit(
+        self: &Arc<Self>,
+        contact: &Contact,
+        path: &Path,
+        rec: &mut OutJob,
+    ) -> Result<(), String> {
+        // A changed source needs a new key and salt before another deposit.
+        if rec.deposit_notice.is_none() && rec.deposit_intent.is_some() {
+            let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
+            if !metadata.is_file() {
+                return Err("deposit source is not a file".into());
+            }
+            let (size, mtime_ms) = stamp(&metadata);
+            if (size, mtime_ms) != (rec.size, rec.mtime_ms) {
+                rec.size = size;
+                rec.mtime_ms = mtime_ms;
+                rec.hash = None;
+                rec.offset = 0;
+                rec.deposit_intent = Some(super::outbox::DepositIntent {
+                    file_key: rand::random(),
+                    salt: rand::random(),
+                    path: rec.path.clone(),
+                    size,
+                });
+                self.outbox.put_checked(rec, true)?;
+            }
+        }
+        let chat = crate::chat::service::service_for(&self.data_dir).ok_or("no chat service")?;
+        let peer = contact.endpoint_bytes().ok_or("no protected session")?;
+        if !chat.core().has_protected_session(&peer) {
+            return Err("no protected session".into());
+        }
+        if rec.deposit_notice.is_none() {
+            let mut holders = chat.holders_for(&peer);
+            holders.truncate(8);
+            if holders.is_empty() {
+                return Err("no holder".into());
+            }
+            let transport = chat.file_mailbox_transport();
+            let path = path.to_owned();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or("invalid file name")?
+                .to_owned();
+            let threshold = self.settings.offline_deposit_threshold;
+            if rec.deposit_intent.is_none() {
+                rec.deposit_intent = Some(super::outbox::DepositIntent {
+                    file_key: rand::random(),
+                    salt: rand::random(),
+                    path: rec.path.clone(),
+                    size: rec.size,
+                });
+            }
+            let intent = rec
+                .deposit_intent
+                .as_ref()
+                .ok_or("deposit intent missing")?;
+            if intent.path != rec.path || intent.size != rec.size || path != Path::new(&intent.path)
+            {
+                return Err("deposit source changed".into());
+            }
+            let file_key = intent.file_key;
+            let salt = intent.salt;
+            self.outbox.put_checked(rec, true)?;
+            let receipt = tokio::task::spawn_blocking(move || {
+                let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+                super::deposit::deposit_file_with_key(
+                    &transport,
+                    &holders,
+                    &peer,
+                    file_key,
+                    salt,
+                    file,
+                    now_ms(),
+                    threshold,
+                )
+                .map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| e.to_string())??;
+            let notice = receipt.into_notice(salt, name);
+            rec.deposit_notice = Some(notice.encode().map_err(|e| e.to_string())?);
+        }
+        // Always ensure the deposit is durable before sending or resending.
+        self.outbox.put_checked(rec, true)?;
+        let notice = crate::chat::proto::FileDepositNotice::decode(
+            rec.deposit_notice.as_ref().ok_or("deposit missing")?,
+        )
+        .map_err(|e| e.to_string())?;
+        if !chat.core().has_protected_session(&peer) {
+            return Err("no protected session".into());
+        }
+        let message_id = chat
+            .send_file_notice(contact, &notice)
+            .map_err(|e| format!("{e:?}"))?;
+        rec.notice_id = Some(message_id);
+        if let Err(e) = self.outbox.put_checked(rec, true) {
+            rec.notice_id = None;
+            return Err(e);
+        }
+        self.board
+            .update(&rec.id, |i| i.state = PushState::Deposited);
+        Ok(())
+    }
+
+    async fn wait_for_notice(
+        &self,
+        job: &mut Job,
+        peer: &[u8; 32],
+        stop: &mut watch::Receiver<bool>,
+    ) {
+        self.board
+            .update(&job.id, |i| i.state = PushState::Deposited);
+        loop {
+            if *job.cancel.borrow() {
+                self.finish(&job.id, PushState::Cancelled, None, None);
+                return;
+            }
+            if *stop.borrow() {
+                return;
+            }
+            if let (Some(chat), Some(id)) = (
+                crate::chat::service::service_for(&self.data_dir),
+                job.rec.notice_id,
+            ) {
+                let mut before = None;
+                loop {
+                    let page = chat.core().history(peer, before, 100);
+                    if page.iter().any(|m| {
+                        m.id == id
+                            && matches!(
+                                m.state,
+                                crate::chat::store::MsgState::Delivered
+                                    | crate::chat::store::MsgState::Read
+                            )
+                    }) {
+                        self.finish(&job.id, PushState::Done, None, None);
+                        return;
+                    }
+                    let next = page.iter().filter(|m| m.ord > 0).map(|m| m.ord).min();
+                    if page.len() < 100 || next.is_none() || next == before {
+                        break;
+                    }
+                    before = next;
+                }
+            }
+            tokio::select! { _ = tokio::time::sleep(Duration::from_secs(5)) => {}, _ = job.cancel.changed() => {}, _ = stop.changed() => {} }
         }
     }
 
@@ -1019,7 +1271,7 @@ impl PushService {
         let id = job.id.clone();
         st.failures += 1;
         let policy = &self.settings.retry;
-        if policy.exhausted(st.last_progress.elapsed()) {
+        if job.rec.deposit_notice.is_none() && policy.exhausted(st.last_progress.elapsed()) {
             let text = match policy.window {
                 Some(w) if !w.is_zero() => format!(
                     "gave up after retrying for {} min: {msg}",
@@ -2071,6 +2323,180 @@ pub fn place_without_overwrite(part: &Path, dir: &Path, name: &str) -> std::io::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct OfflineDialer;
+
+    #[async_trait::async_trait]
+    impl Dialer for OfflineDialer {
+        async fn dial(&self, _target: &[u8; 32]) -> Result<Arc<dyn Link>, IrohClientError> {
+            Err(IrohClientError::Unreachable("offline".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_chat_service_keeps_transfer_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = PushSettings::from_config(&PushConfig::default(), dir.path());
+        let svc =
+            PushService::start_with_dialer(dir.path(), [1; 32], Arc::new(OfflineDialer), settings);
+        let path = dir.path().join("file");
+        std::fs::write(&path, b"file").unwrap();
+        let mut rec = OutJob {
+            id: "test".into(),
+            contact_id: "contact".into(),
+            path: path.to_string_lossy().into_owned(),
+            name: "file".into(),
+            size: 4,
+            mtime_ms: 0,
+            hash: None,
+            offset: 0,
+            attempt: 0,
+            notice_id: None,
+            deposit_notice: None,
+            deposit_intent: None,
+            created_at_ms: 0,
+        };
+        let contact = Contact {
+            id: "contact".into(),
+            label: "contact".into(),
+            endpoint_id: hex::encode([2; 32]),
+            added_at: 0,
+            allow_receive: true,
+            allow_send: true,
+            max_file_size: None,
+        };
+        svc.outbox.put_checked(&rec, true).unwrap();
+        assert_eq!(
+            svc.try_offline_deposit(&contact, &path, &mut rec)
+                .await
+                .unwrap_err(),
+            "no chat service"
+        );
+        assert!(svc.outbox.get(&rec.id).is_some());
+        svc.shutdown();
+    }
+
+    #[tokio::test]
+    async fn changed_source_resets_interrupted_deposit_intent() {
+        let (old_file_key, old_salt) = {
+            use rand::{rngs::OsRng, Rng};
+            (OsRng.gen::<[u8; 32]>(), OsRng.gen::<[u8; 16]>())
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let settings = PushSettings::from_config(&PushConfig::default(), dir.path());
+        let svc =
+            PushService::start_with_dialer(dir.path(), [1; 32], Arc::new(OfflineDialer), settings);
+        let path = dir.path().join("file");
+        std::fs::write(&path, b"old").unwrap();
+        let (size, mtime_ms) = stamp(&std::fs::metadata(&path).unwrap());
+        let mut rec = OutJob {
+            id: "test".into(),
+            contact_id: "contact".into(),
+            path: path.to_string_lossy().into_owned(),
+            name: "file".into(),
+            size,
+            mtime_ms,
+            hash: None,
+            offset: 0,
+            attempt: 0,
+            notice_id: None,
+            deposit_notice: None,
+            deposit_intent: Some(super::super::outbox::DepositIntent {
+                file_key: old_file_key,
+                salt: old_salt,
+                path: path.to_string_lossy().into_owned(),
+                size,
+            }),
+            created_at_ms: 0,
+        };
+        let contact = Contact {
+            id: "contact".into(),
+            label: "contact".into(),
+            endpoint_id: hex::encode([2; 32]),
+            added_at: 0,
+            allow_receive: true,
+            allow_send: true,
+            max_file_size: None,
+        };
+        svc.outbox.put_checked(&rec, true).unwrap();
+        std::fs::write(&path, b"new content").unwrap();
+        assert_eq!(
+            svc.try_offline_deposit(&contact, &path, &mut rec)
+                .await
+                .unwrap_err(),
+            "no chat service"
+        );
+        let stored = svc.outbox.get(&rec.id).unwrap();
+        let intent = stored.deposit_intent.unwrap();
+        assert_ne!(intent.file_key, old_file_key);
+        assert_ne!(intent.salt, old_salt);
+        assert_eq!(intent.size, 11);
+        assert_eq!(stored.size, 11);
+        svc.shutdown();
+    }
+
+    #[tokio::test]
+    async fn mtime_only_change_creates_fresh_deposit_intent() {
+        let (old_file_key, old_salt) = {
+            use rand::{rngs::OsRng, Rng};
+            (OsRng.gen::<[u8; 32]>(), OsRng.gen::<[u8; 16]>())
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let settings = PushSettings::from_config(&PushConfig::default(), dir.path());
+        let svc =
+            PushService::start_with_dialer(dir.path(), [1; 32], Arc::new(OfflineDialer), settings);
+        let path = dir.path().join("file");
+        std::fs::write(&path, b"old").unwrap();
+        let (size, mtime_ms) = stamp(&std::fs::metadata(&path).unwrap());
+        let mut rec = OutJob {
+            id: "test".into(),
+            contact_id: "contact".into(),
+            path: path.to_string_lossy().into_owned(),
+            name: "file".into(),
+            size,
+            mtime_ms,
+            hash: None,
+            offset: 0,
+            attempt: 0,
+            notice_id: None,
+            deposit_notice: None,
+            deposit_intent: Some(super::super::outbox::DepositIntent {
+                file_key: old_file_key,
+                salt: old_salt,
+                path: path.to_string_lossy().into_owned(),
+                size,
+            }),
+            created_at_ms: 0,
+        };
+        let contact = Contact {
+            id: "contact".into(),
+            label: "contact".into(),
+            endpoint_id: hex::encode([2; 32]),
+            added_at: 0,
+            allow_receive: true,
+            allow_send: true,
+            max_file_size: None,
+        };
+        svc.outbox.put_checked(&rec, true).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(modified + Duration::from_secs(5)))
+            .unwrap();
+        assert_eq!(
+            svc.try_offline_deposit(&contact, &path, &mut rec)
+                .await
+                .unwrap_err(),
+            "no chat service"
+        );
+        let stored = svc.outbox.get(&rec.id).unwrap();
+        let intent = stored.deposit_intent.unwrap();
+        assert_ne!(intent.file_key, old_file_key);
+        assert_ne!(intent.salt, old_salt);
+        assert_eq!(intent.size, size);
+        assert_eq!(stored.size, size);
+        assert_ne!(stored.mtime_ms, mtime_ms);
+        svc.shutdown();
+    }
 
     #[test]
     fn no_overwrite_adds_suffix_and_keeps_extension() {
