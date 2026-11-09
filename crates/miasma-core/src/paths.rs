@@ -857,6 +857,17 @@ spec!(
     "Received push files (plaintext). Default location; push.inbox_dir can point elsewhere."
 );
 spec!(
+    OFFLINE_RECEIVE_DONE,
+    ".offline-done",
+    File,
+    DataDirOrConfigured,
+    UserVisible,
+    Ledger,
+    LedgerOverwriteRemove,
+    "D15",
+    "Completed offline file manifest IDs inside a contact inbox."
+);
+spec!(
     PUSH_PART,
     ".*.part",
     Pattern,
@@ -1089,6 +1100,7 @@ pub const REGISTRY: &[PathSpec] = &[
     DIAG_LOG_DIR,
     DIAG_LOG_FILE,
     PUSH_INBOX,
+    OFFLINE_RECEIVE_DONE,
     PUSH_PART,
     OUTPUT_PART,
     SAVE_AS_TARGET,
@@ -1396,6 +1408,11 @@ pub fn chat_outbox_file(chat_dir: &Path) -> PathBuf {
 /// trusted contacts who are offline (only written when `chat.custody_enabled`).
 pub fn chat_custody_file(chat_dir: &Path) -> PathBuf {
     chat_dir.join("custody.doc")
+}
+
+/// Directory for file custody items, separate from chat custody.
+pub fn chat_file_custody_dir(chat_dir: &Path) -> PathBuf {
+    chat_dir.join("file-custody")
 }
 
 /// `<chat dir>/<stem>.grp`: the state document of one group.

@@ -874,6 +874,7 @@ fn cmd_init(
             bootstrap_peers: vec![],
         },
         transport: Default::default(),
+        discovery: Default::default(),
         push: Default::default(),
         chat: Default::default(),
         privacy: Default::default(),
@@ -1027,6 +1028,15 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
                 println!("  Listen addr:         {addr}/p2p/{}", s.peer_id);
             }
             println!("  Connected peers:     {}", s.peer_count);
+            println!(
+                "  Network discovery: {}, peers found last round {}",
+                if s.discovery_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
+                s.discovery_peers_found
+            );
             println!("  Shares stored:       {}", s.share_count);
             println!(
                 "  Storage used:        {:.1} MiB",
@@ -1140,6 +1150,14 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
     let store = LocalShareStore::open_with_quotas(data_dir, quota_mb, hosted_quota_mb)
         .context("cannot open share store")?;
     println!("Miasma Node Status (daemon not running)");
+    println!(
+        "  Network discovery: {}, peers found last round 0",
+        if config.discovery.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     println!("  Data dir:      {}", data_dir.display());
     println!("  Shares stored: {}", store.list().len());
     println!(
@@ -1986,6 +2004,8 @@ fn cmd_config_loaded(
                 "storage.hosted_quota_mb" => println!("{}", config.storage.hosted_quota_mb),
                 "privacy.stealth_mode" => println!("{}", config.privacy.stealth_mode),
                 "chat.enabled" => println!("{}", config.chat.enabled),
+                "chat.custody_enabled" => println!("{}", config.chat.custody_enabled),
+                "push.file_custody_enabled" => println!("{}", config.push.file_custody_enabled),
                 "chat.history_save" => match config.chat.history_save {
                     Some(v) => println!("{v}"),
                     None => println!("auto"),
@@ -2007,6 +2027,8 @@ fn cmd_config_loaded(
                     println!("{}", config.update.local_build_dir.as_deref().unwrap_or(""))
                 }
                 "network.listen_addr" => println!("{}", config.network.listen_addr),
+                "discovery.enabled" => println!("{}", config.discovery.enabled),
+                "discovery.announce" => println!("{}", config.discovery.announce),
                 "network.bootstrap_peers" => {
                     for peer in &config.network.bootstrap_peers {
                         println!("{peer}");
@@ -2079,6 +2101,12 @@ fn cmd_config_loaded(
                 }
                 "chat.enabled" => {
                     config.chat.enabled = v.parse().context("expected bool")?;
+                }
+                "chat.custody_enabled" => {
+                    config.chat.custody_enabled = v.parse().context("expected bool")?;
+                }
+                "push.file_custody_enabled" => {
+                    config.push.file_custody_enabled = v.parse().context("expected bool")?;
                 }
                 "chat.history_save" => {
                     config.chat.history_save = match v {
@@ -2167,6 +2195,12 @@ fn cmd_config_loaded(
                 }
                 "network.listen_addr" => {
                     config.network.listen_addr = v.into();
+                }
+                "discovery.enabled" => {
+                    config.discovery.enabled = v.parse().context("expected bool")?
+                }
+                "discovery.announce" => {
+                    config.discovery.announce = v.parse().context("expected bool")?
                 }
                 "network.bootstrap_peers" => {
                     if v.is_empty() {

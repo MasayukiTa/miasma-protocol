@@ -14,6 +14,7 @@ pub mod anchor;
 pub mod call;
 pub mod crypto;
 pub mod engine;
+pub mod file_notice;
 pub mod group;
 pub mod ipc;
 pub mod mailbox;
@@ -37,6 +38,8 @@ mod engine_tests;
 pub(crate) mod offline_tests;
 #[cfg(all(test, feature = "pqc"))]
 mod pq_tests;
+#[cfg(test)]
+mod push_offline_e2e_test;
 #[cfg(test)]
 mod receipt_tests;
 #[cfg(test)]

@@ -15,6 +15,9 @@ pub struct NodeConfig {
     pub storage: StorageConfig,
     #[serde(default)]
     pub network: NetworkConfig,
+    /// Public DHT rendezvous discovery.
+    #[serde(default)]
+    pub discovery: DiscoveryConfig,
     #[serde(default)]
     pub transport: TransportConfig,
     /// Trusted-contact push.
@@ -35,6 +38,34 @@ pub struct NodeConfig {
     /// Calls (on by default; no audio device yet).
     #[serde(default)]
     pub call: CallConfig,
+}
+
+/// Settings for finding peers through the public Mainline DHT.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DiscoveryConfig {
+    /// Disable to prevent all Mainline discovery traffic.
+    pub enabled: bool,
+    /// Disable to look up peers without announcing this node's address.
+    pub announce: bool,
+    /// Override DHT bootstrap nodes; empty uses the Mainline defaults.
+    pub bootstrap: Vec<String>,
+    /// Interval in seconds for refreshing announcements and lookups.
+    pub refresh_secs: u64,
+    /// Permit non-public addresses, intended only for isolated test networks.
+    pub allow_private: bool,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            announce: true,
+            bootstrap: Vec::new(),
+            refresh_secs: 900,
+            allow_private: false,
+        }
+    }
 }
 
 /// `[call]` in `config.toml`: the call runtime.
@@ -248,11 +279,11 @@ pub fn set_custody_enabled_persistent(data_dir: &Path, on: bool) -> std::io::Res
 }
 
 /// Read the saved "hold messages for offline contacts" value, or the default
-/// (off) when the file cannot be read.
+/// (on) when the file cannot be read.
 pub fn load_custody_enabled(data_dir: &Path) -> bool {
     NodeConfig::load(data_dir)
         .map(|c| c.chat.custody_enabled)
-        .unwrap_or(false)
+        .unwrap_or_else(|_| ChatConfig::default().custody_enabled)
 }
 
 pub const DEFAULT_LOG_BUFFER_MIB: u32 = 2;
@@ -378,10 +409,10 @@ pub struct ChatConfig {
     #[serde(default = "default_true")]
     pub read_receipts: bool,
     /// Hold sealed messages in memory for trusted contacts who are offline
-    /// (default off). When on, this node answers the custody verbs for the
+    /// (default on). When on, this node answers the custody verbs for the
     /// contacts it trusts, and a message that cannot be delivered directly is
     /// left with trusted holders and collected on reconnect.
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub custody_enabled: bool,
     /// How many trusted holders get a copy of a message that could not be
     /// delivered directly (1-8, default 2). Only used when a direct send
@@ -400,6 +431,22 @@ pub struct ChatConfig {
     /// hard ceiling of 30 days when the daemon starts.
     #[serde(default = "default_chat_custody_ttl_days")]
     pub custody_ttl_days: u64,
+    /// Custody requests (deposit/list/fetch/delete) accepted from one trusted
+    /// contact in a short burst before the per-contact rate limit refuses
+    /// further ones (default 20). This limit is what stops a trusted contact
+    /// from hammering the custody store with a flood of list/fetch/delete or
+    /// repeated deposit attempts: without it, a single contact could keep the
+    /// holder busy and churn its disk at will, since per-item quotas alone do
+    /// not bound the *rate* of requests.
+    #[serde(default = "default_chat_custody_rate_burst")]
+    pub custody_rate_burst: usize,
+    /// Sustained custody requests accepted from one trusted contact per minute
+    /// once the burst above is spent (default 30). Over this rate a request is
+    /// answered with a refusal, not served, so a trusted contact that keeps
+    /// hammering list/fetch/delete/deposit is throttled instead of being able
+    /// to abuse the holder without bound.
+    #[serde(default = "default_chat_custody_rate_per_minute")]
+    pub custody_rate_per_minute: usize,
     /// Join a group at once when a trusted contact who administers it adds
     /// you (default on). Off: the invitation waits for an answer (Accept or
     /// Decline). Either way you can leave with one action, and an invitation
@@ -414,6 +461,13 @@ pub const DEFAULT_CHAT_CUSTODY_COPIES: usize = 2;
 pub const DEFAULT_CHAT_CUSTODY_MAX_TOTAL_BYTES: usize = 2 * 1024 * 1024;
 pub const DEFAULT_CHAT_CUSTODY_MAX_ITEMS: usize = 256;
 pub const DEFAULT_CHAT_CUSTODY_TTL_DAYS: u64 = 14;
+/// Burst of custody requests allowed from one contact. Matches the inbound
+/// message burst so an active contact fetching several waiting items at once
+/// is never falsely throttled, while a flood is still bounded.
+pub const DEFAULT_CHAT_CUSTODY_RATE_BURST: usize = 20;
+/// Sustained custody requests per minute from one contact. Matches the inbound
+/// message rate; enough for normal collect/deposit traffic, not for abuse.
+pub const DEFAULT_CHAT_CUSTODY_RATE_PER_MINUTE: usize = 30;
 
 fn default_chat_max_message_bytes() -> usize {
     DEFAULT_CHAT_MAX_MESSAGE_BYTES
@@ -433,6 +487,12 @@ fn default_chat_custody_max_items() -> usize {
 fn default_chat_custody_ttl_days() -> u64 {
     DEFAULT_CHAT_CUSTODY_TTL_DAYS
 }
+fn default_chat_custody_rate_burst() -> usize {
+    DEFAULT_CHAT_CUSTODY_RATE_BURST
+}
+fn default_chat_custody_rate_per_minute() -> usize {
+    DEFAULT_CHAT_CUSTODY_RATE_PER_MINUTE
+}
 
 impl Default for ChatConfig {
     fn default() -> Self {
@@ -443,11 +503,13 @@ impl Default for ChatConfig {
             outbox_max: DEFAULT_CHAT_OUTBOX_MAX,
             retention_days: 0,
             read_receipts: true,
-            custody_enabled: false,
+            custody_enabled: true,
             custody_copies: DEFAULT_CHAT_CUSTODY_COPIES,
             custody_max_total_bytes: DEFAULT_CHAT_CUSTODY_MAX_TOTAL_BYTES,
             custody_max_items: DEFAULT_CHAT_CUSTODY_MAX_ITEMS,
             custody_ttl_days: DEFAULT_CHAT_CUSTODY_TTL_DAYS,
+            custody_rate_burst: DEFAULT_CHAT_CUSTODY_RATE_BURST,
+            custody_rate_per_minute: DEFAULT_CHAT_CUSTODY_RATE_PER_MINUTE,
             group_auto_join: true,
         }
     }
@@ -597,6 +659,9 @@ enabled = true
 /// `[push]` in `config.toml`: where pushed files land and the limits on them.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PushConfig {
+    /// Requires this many distinct holders to acknowledge every chunk.
+    #[serde(default = "default_file_custody_threshold")]
+    pub offline_deposit_threshold: usize,
     /// Folder for received files (one sub-folder per contact). Empty means
     /// `<data_dir>/inbox`.
     #[serde(default)]
@@ -632,6 +697,36 @@ pub struct PushConfig {
     /// at once each pace to this value independently.
     #[serde(default)]
     pub max_send_kib_per_sec: u32,
+    /// Hold end-to-end encrypted *files* on disk for trusted contacts who are
+    /// offline, so a sender can deposit a file and go offline and the recipient
+    /// fetches it later (default on, like chat custody). When on, this node
+    /// answers the custody verbs for the contacts it trusts against a
+    /// disk-backed, quota-bounded store. What is held is ciphertext only.
+    #[serde(default = "default_true")]
+    pub file_custody_enabled: bool,
+    /// Total bytes a file holder keeps across every depositor (default 256
+    /// MiB). Chosen to hold one 64 MiB file comfortably with room for more
+    /// without letting the store grow without bound; a hard ceiling of 2 GiB
+    /// applies on top so settings cannot fill the disk.
+    #[serde(default = "default_file_custody_total_bytes")]
+    pub file_custody_total_bytes: u64,
+    /// Bytes one depositor may use of that total (default 128 MiB). Half the
+    /// default total, so a single contact cannot take it all and still has room
+    /// for a 64 MiB file.
+    #[serde(default = "default_file_custody_per_depositor_bytes")]
+    pub file_custody_per_depositor_bytes: u64,
+    /// How long a held file item is kept before it expires, in milliseconds
+    /// (default 14 days). Long enough for a recipient who is away for a
+    /// fortnight to still collect, short enough that abandoned deposits do not
+    /// linger; a hard ceiling of 30 days applies.
+    #[serde(default = "default_file_custody_ttl_ms")]
+    pub file_custody_ttl_ms: u64,
+    /// Holder acknowledgements required before a file deposit counts as
+    /// "deposited" and the sender may go offline (1-8, default 1). With one
+    /// holder a single acknowledgement is enough; raise it to require a file be
+    /// held by several holders before the sender leaves.
+    #[serde(default = "default_file_custody_threshold")]
+    pub file_custody_threshold: usize,
 }
 
 pub const DEFAULT_PUSH_PART_RETENTION_DAYS: u64 = 7;
@@ -659,9 +754,27 @@ fn default_push_part_retention_days() -> u64 {
     DEFAULT_PUSH_PART_RETENTION_DAYS
 }
 
+pub const DEFAULT_FILE_CUSTODY_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+pub const DEFAULT_FILE_CUSTODY_PER_DEPOSITOR_BYTES: u64 = 128 * 1024 * 1024;
+pub const DEFAULT_FILE_CUSTODY_TTL_MS: u64 = 14 * 86_400_000;
+pub const DEFAULT_FILE_CUSTODY_THRESHOLD: usize = 1;
+fn default_file_custody_total_bytes() -> u64 {
+    DEFAULT_FILE_CUSTODY_TOTAL_BYTES
+}
+fn default_file_custody_per_depositor_bytes() -> u64 {
+    DEFAULT_FILE_CUSTODY_PER_DEPOSITOR_BYTES
+}
+fn default_file_custody_ttl_ms() -> u64 {
+    DEFAULT_FILE_CUSTODY_TTL_MS
+}
+fn default_file_custody_threshold() -> usize {
+    DEFAULT_FILE_CUSTODY_THRESHOLD
+}
+
 impl Default for PushConfig {
     fn default() -> Self {
         Self {
+            offline_deposit_threshold: 1,
             inbox_dir: None,
             max_file_size: DEFAULT_PUSH_MAX_FILE_SIZE,
             min_free_bytes: DEFAULT_PUSH_MIN_FREE_BYTES,
@@ -670,6 +783,11 @@ impl Default for PushConfig {
             retry_window_hours: DEFAULT_PUSH_RETRY_WINDOW_HOURS,
             stall_timeout_secs: DEFAULT_PUSH_STALL_SECS,
             max_send_kib_per_sec: 0,
+            file_custody_enabled: true,
+            file_custody_total_bytes: DEFAULT_FILE_CUSTODY_TOTAL_BYTES,
+            file_custody_per_depositor_bytes: DEFAULT_FILE_CUSTODY_PER_DEPOSITOR_BYTES,
+            file_custody_ttl_ms: DEFAULT_FILE_CUSTODY_TTL_MS,
+            file_custody_threshold: DEFAULT_FILE_CUSTODY_THRESHOLD,
         }
     }
 }
@@ -2143,5 +2261,21 @@ mod default_bootstrap_reachability_tests {
         ] {
             assert!(!multiaddr_has_nonroutable_ipv4(a), "should allow {a}");
         }
+    }
+}
+
+#[cfg(test)]
+mod custody_default_tests {
+    use super::*;
+
+    #[test]
+    fn custody_defaults_are_enabled_even_when_fields_are_missing() {
+        let config = NodeConfig::default();
+        assert!(config.chat.custody_enabled);
+        assert!(config.push.file_custody_enabled);
+        let chat: ChatConfig = toml::from_str("").unwrap();
+        let push: PushConfig = toml::from_str("").unwrap();
+        assert!(chat.custody_enabled);
+        assert!(push.file_custody_enabled);
     }
 }

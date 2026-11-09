@@ -42,6 +42,13 @@ pub enum WireError {
     Malformed(&'static str),
 }
 
+/// The holder store addressed by a request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreSelector {
+    Chat,
+    File,
+}
+
 /// A request from a depositor/collector to a holder.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Request {
@@ -108,6 +115,7 @@ fn error_code(e: CustodyError) -> u8 {
         CustodyError::TooBig => 3,
         CustodyError::Full => 4,
         CustodyError::DepositorBudget => 5,
+        CustodyError::RateLimited => 6,
     }
 }
 
@@ -118,6 +126,7 @@ fn error_from_code(c: u8) -> Option<CustodyError> {
         3 => CustodyError::TooBig,
         4 => CustodyError::Full,
         5 => CustodyError::DepositorBudget,
+        6 => CustodyError::RateLimited,
         _ => return None,
     })
 }
@@ -160,6 +169,15 @@ pub fn encode_request(r: &Request) -> Vec<u8> {
             frame(REQ_DELETE, p)
         }
     }
+}
+
+/// File requests use distinct type bytes that older holders reject.
+pub fn encode_selected_request(store: StoreSelector, r: &Request) -> Vec<u8> {
+    let mut bytes = encode_request(r);
+    if store == StoreSelector::File {
+        bytes[4] += 4;
+    }
+    bytes
 }
 
 pub fn encode_response(r: &Response) -> Vec<u8> {
@@ -276,6 +294,22 @@ pub fn decode_request(b: &[u8]) -> Result<(Request, usize), WireError> {
     Ok((decode_body_request(body)?, used))
 }
 
+fn decode_selected_body(body: &[u8]) -> Result<(StoreSelector, Request), WireError> {
+    let (&ty, _) = body.split_first().ok_or(WireError::BadLength(0))?;
+    if (REQ_DEPOSIT + 4..=REQ_DELETE + 4).contains(&ty) {
+        let mut original = body.to_vec();
+        original[0] -= 4;
+        Ok((StoreSelector::File, decode_body_request(&original)?))
+    } else {
+        Ok((StoreSelector::Chat, decode_body_request(body)?))
+    }
+}
+
+pub fn decode_selected_request(b: &[u8]) -> Result<((StoreSelector, Request), usize), WireError> {
+    let (body, used) = split_frame(b)?;
+    Ok((decode_selected_body(body)?, used))
+}
+
 /// Decode one response from the front of `b`; returns it and the bytes used.
 pub fn decode_response(b: &[u8]) -> Result<(Response, usize), WireError> {
     let (body, used) = split_frame(b)?;
@@ -316,6 +350,22 @@ pub async fn write_request<W: AsyncWrite + Unpin>(w: &mut W, r: &Request) -> Res
     w.write_all(&encode_request(r))
         .await
         .map_err(|e| WireError::Io(e.to_string()))
+}
+
+pub async fn write_selected_request<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    store: StoreSelector,
+    r: &Request,
+) -> Result<(), WireError> {
+    w.write_all(&encode_selected_request(store, r))
+        .await
+        .map_err(|e| WireError::Io(e.to_string()))
+}
+
+pub async fn read_selected_request<R: AsyncRead + Unpin>(
+    r: &mut R,
+) -> Result<(StoreSelector, Request), WireError> {
+    decode_selected_body(&read_frame(r).await?)
 }
 
 pub async fn write_response<W: AsyncWrite + Unpin>(
@@ -368,7 +418,18 @@ mod tests {
                 item: item(),
             },
         ] {
+            for store in [StoreSelector::Chat, StoreSelector::File] {
+                let wire = encode_selected_request(store, &r);
+                assert_eq!(
+                    decode_selected_request(&wire).unwrap(),
+                    ((store, r.clone()), wire.len())
+                );
+            }
             let wire = encode_request(&r);
+            assert_eq!(
+                decode_selected_request(&wire).unwrap(),
+                ((StoreSelector::Chat, r.clone()), wire.len())
+            );
             assert_eq!(decode_request(&wire).unwrap(), (r.clone(), wire.len()));
             for n in 0..wire.len() {
                 assert!(decode_request(&wire[..n]).is_err(), "prefix {n}");
@@ -389,6 +450,9 @@ mod tests {
             Response::Refused(CustodyError::NotTrusted),
             Response::Refused(CustodyError::Disabled),
             Response::Refused(CustodyError::Full),
+            Response::Refused(CustodyError::TooBig),
+            Response::Refused(CustodyError::DepositorBudget),
+            Response::Refused(CustodyError::RateLimited),
         ] {
             let wire = encode_response(&r);
             assert_eq!(decode_response(&wire).unwrap(), (r.clone(), wire.len()));
@@ -396,6 +460,33 @@ mod tests {
                 assert!(decode_response(&wire[..n]).is_err(), "prefix {n}");
             }
         }
+    }
+
+    /// Every custody refusal reason has a distinct wire code and survives a
+    /// round trip, including the new `RateLimited` used when a trusted contact
+    /// hammers the custody store. A gap here would silently turn one refusal
+    /// into another (or into an undecodable frame) on the wire.
+    #[test]
+    fn every_refusal_reason_has_a_distinct_code_and_round_trips() {
+        let all = [
+            CustodyError::Disabled,
+            CustodyError::NotTrusted,
+            CustodyError::TooBig,
+            CustodyError::Full,
+            CustodyError::DepositorBudget,
+            CustodyError::RateLimited,
+        ];
+        let mut codes = std::collections::HashSet::new();
+        for e in all {
+            let c = error_code(e);
+            assert!(codes.insert(c), "duplicate code {c} for {e:?}");
+            assert_eq!(error_from_code(c), Some(e), "code {c} did not round trip");
+        }
+        // The rate-limited reason is the newest code; an older holder never
+        // emits it, and an unknown code still decodes to None (not a panic).
+        assert_eq!(error_code(CustodyError::RateLimited), 6);
+        assert_eq!(error_from_code(0), None);
+        assert_eq!(error_from_code(7), None);
     }
 
     #[test]

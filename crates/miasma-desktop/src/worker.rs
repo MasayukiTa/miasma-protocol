@@ -994,6 +994,7 @@ fn do_init(data_dir: &Path) -> anyhow::Result<()> {
             bootstrap_peers: vec![],
         },
         transport: Default::default(),
+        discovery: Default::default(),
         push: Default::default(),
         chat: Default::default(),
         privacy: Default::default(),

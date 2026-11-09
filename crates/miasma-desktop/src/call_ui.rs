@@ -33,6 +33,7 @@ pub enum CallAction {
     /// Start or stop sharing the screen; the app sends the matching start/stop
     /// request based on the current screen-sharing state.
     ToggleScreenShare,
+    StartScreenShare(miasma_core::chat::call::screen_capture::ShareTarget),
     /// Start or stop sending the local camera; the app sends the matching
     /// start/stop request based on the current `camera_in_use` state.
     ToggleCamera,
@@ -56,6 +57,7 @@ impl std::fmt::Debug for CallAction {
             CallAction::HangUp => "HangUp",
             CallAction::ToggleMute => "ToggleMute",
             CallAction::ToggleScreenShare => "ToggleScreenShare",
+            CallAction::StartScreenShare(_) => "StartScreenShare",
             CallAction::ToggleCamera => "ToggleCamera",
             CallAction::ListDevices => "ListDevices",
             // The device names are not shown here, so they are never formatted into diagnostics.

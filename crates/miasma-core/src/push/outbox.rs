@@ -21,6 +21,15 @@ use tracing::warn;
 
 use crate::state_crypto::{self, Label, LogReader, LogRewrite, LogWriter, StateKeys};
 
+/// Durable identity and source of an in-progress remote deposit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DepositIntent {
+    pub file_key: [u8; 32],
+    pub salt: [u8; 16],
+    pub path: String,
+    pub size: u64,
+}
+
 /// One file queued for a contact, as it is stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutJob {
@@ -45,6 +54,13 @@ pub struct OutJob {
     /// Failed attempts in a row at that moment.
     #[serde(default)]
     pub attempt: u32,
+    #[serde(default)]
+    pub notice_id: Option<[u8; 16]>,
+    /// Encoded notice, stored only inside the encrypted queue.
+    #[serde(default)]
+    pub deposit_notice: Option<Vec<u8>>,
+    #[serde(default)]
+    pub deposit_intent: Option<DepositIntent>,
     pub created_at_ms: u64,
 }
 
@@ -169,12 +185,15 @@ impl Outbox {
     /// Store `job` (new, or replacing its earlier state). Durable before it
     /// returns when `durable`.
     pub fn put(&self, job: &OutJob, durable: bool) {
-        let Some(keys) = &self.keys else { return };
-        let Ok(rec) = serde_json::to_vec(&Rec::Put { job: job.clone() }) else {
-            return;
-        };
+        let _ = self.put_checked(job, durable);
+    }
+
+    pub fn put_checked(&self, job: &OutJob, durable: bool) -> Result<(), String> {
+        let keys = self.keys.as_ref().ok_or("the send queue is unavailable")?;
+        let rec = serde_json::to_vec(&Rec::Put { job: job.clone() }).map_err(|e| e.to_string())?;
         let mut g = self.inner.lock().unwrap();
-        if self.append(keys, &mut g, &rec, durable) {
+        let written = self.append(keys, &mut g, &rec, durable);
+        if written {
             if g.jobs.insert(job.id.clone(), job.clone()).is_some() {
                 g.garbage += 1;
             }
@@ -184,6 +203,11 @@ impl Outbox {
         }
         drop(g);
         self.compact_if_needed(false);
+        if written {
+            Ok(())
+        } else {
+            Err("cannot persist the send queue".into())
+        }
     }
 
     /// Change a stored job in place (progress, hash) and store the result.
@@ -298,8 +322,44 @@ mod tests {
             hash: None,
             offset: 0,
             attempt: 0,
+            notice_id: None,
+            deposit_notice: None,
+            deposit_intent: None,
             created_at_ms: i as u64,
         }
+    }
+
+    #[test]
+    fn deposit_notice_survives_reopen_before_message_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let (file_key, salt) = {
+            use rand::{rngs::OsRng, Rng};
+            (OsRng.gen::<[u8; 32]>(), OsRng.gen::<[u8; 16]>())
+        };
+        let mut j = job(1);
+        j.deposit_notice = Some(vec![9; 96]);
+        j.deposit_intent = Some(DepositIntent {
+            file_key,
+            salt,
+            path: j.path.clone(),
+            size: j.size,
+        });
+        {
+            let ob = Outbox::open(dir.path());
+            ob.put_checked(&j, true).unwrap();
+        }
+        let ob = Outbox::open(dir.path());
+        let restored = ob.get(&j.id).unwrap();
+        assert_eq!(restored.deposit_notice, j.deposit_notice);
+        assert_eq!(restored.deposit_intent, j.deposit_intent);
+        assert_eq!(restored.notice_id, None);
+        let raw = std::fs::read(crate::paths::PUSH_OUTBOX.in_dir(dir.path())).unwrap();
+        assert!(!raw.windows(32).any(|w| w == [9; 32]));
+    }
+
+    #[test]
+    fn checked_write_reports_unavailable_queue() {
+        assert!(Outbox::disabled().put_checked(&job(1), true).is_err());
     }
 
     #[test]

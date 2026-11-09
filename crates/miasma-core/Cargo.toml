@@ -16,6 +16,8 @@ rand.workspace = true
 zeroize.workspace = true
 hkdf.workspace = true
 sha2.workspace = true
+sha1.workspace = true
+mainline = { version = "8.0.1", optional = true }
 serde.workspace = true
 bincode.workspace = true
 bs58.workspace = true
@@ -122,7 +124,8 @@ block2 = "0.6"
 nokhwa = { version = "0.10", default-features = false, features = ["input-avfoundation", "decoding"], optional = true }
 
 [features]
-default = ["iroh", "call-audio", "call-video", "call-camera", "call-screen"]
+default = ["iroh", "call-audio", "call-video", "call-camera", "call-screen", "mainline-discovery"]
+mainline-discovery = ["dep:mainline"]
 # `miasma daemon --no-iroh` / `transport.iroh_mode = "off"` switch it off at run
 # time; building without the feature removes the code and the dependency tree.
 iroh = ["dep:iroh", "dep:iroh-mdns-address-lookup"]

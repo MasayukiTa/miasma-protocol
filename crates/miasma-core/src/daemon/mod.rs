@@ -582,6 +582,8 @@ impl DaemonServer {
                 daemon_shutdown_tx: shutdown_tx.clone(),
                 control_auth: control_auth.clone(),
                 web_sessions: web_sessions.clone(),
+                discovery_enabled: false,
+                discovery_peers_found: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             },
         )
         .await
@@ -783,6 +785,60 @@ impl DaemonServer {
         let ipc_sharing_secret = self.sharing_secret.clone();
         let ipc_sharing_pubkey = self.sharing_pubkey;
         let ipc_data_dir = self.data_dir.clone();
+        let discovery_config = crate::config::NodeConfig::load(&self.data_dir).ok();
+        let discovery_enabled = cfg!(feature = "mainline-discovery")
+            && discovery_config
+                .as_ref()
+                .is_some_and(|c| c.discovery.enabled);
+        let discovery_peers_found = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        #[cfg(feature = "mainline-discovery")]
+        let discovery_handle = discovery_config
+            .filter(|c| c.discovery.enabled)
+            .map(|config| {
+                let dht = coord.dht_handle().clone();
+                let found = discovery_peers_found.clone();
+                let port = listen_addrs
+                    .iter()
+                    .filter_map(|a| a.parse::<libp2p::Multiaddr>().ok())
+                    .find_map(|a| {
+                        let parts: Vec<_> = a.iter().collect();
+                        parts.windows(2).find_map(|w| match (&w[0], &w[1]) {
+                            (
+                                libp2p::multiaddr::Protocol::Udp(port),
+                                libp2p::multiaddr::Protocol::QuicV1,
+                            ) => Some(*port),
+                            _ => None,
+                        })
+                    });
+                tokio::spawn(async move {
+                    let discovery =
+                        crate::discovery::MainlineDiscovery::new(config.discovery.clone());
+                    loop {
+                        if should_announce(config.discovery.announce, config.privacy.stealth_mode) {
+                            if let Some(port) = port {
+                                let _ = discovery.announce(port).await;
+                            }
+                        }
+                        let peers = discovery.lookup().await.unwrap_or_default();
+                        found.store(peers.len(), std::sync::atomic::Ordering::Relaxed);
+                        tracing::info!(peers_found = peers.len(), "network discovery round");
+                        let _ = dht.dial_discovery(peers).await;
+                        let finished = tokio::time::Instant::now();
+                        loop {
+                            let count = dht.peer_count().await.unwrap_or(0);
+                            let due = discovery_delay(config.discovery.refresh_secs, count);
+                            let elapsed = finished.elapsed();
+                            if elapsed >= due {
+                                break;
+                            }
+                            tokio::time::sleep(
+                                (due - elapsed).min(std::time::Duration::from_secs(60)),
+                            )
+                            .await;
+                        }
+                    }
+                })
+            });
         let ipc_bridge_state = BridgeLiveState {
             rate_limiter: self.rate_limiter.clone(),
             health_monitor: self.health_monitor.clone(),
@@ -794,6 +850,8 @@ impl DaemonServer {
             daemon_shutdown_tx: self.shutdown_tx.clone(),
             control_auth: self.control_auth.clone(),
             web_sessions: self.web_sessions.clone(),
+            discovery_enabled,
+            discovery_peers_found,
         };
         let ipc_handle: JoinHandle<()> = tokio::spawn(async move {
             ipc_server_loop(
@@ -851,6 +909,11 @@ impl DaemonServer {
         ipc_handle.abort();
         rep_handle.abort();
         env_handle.abort();
+        #[cfg(feature = "mainline-discovery")]
+        if let Some(handle) = discovery_handle {
+            handle.abort();
+            let _ = handle.await;
+        }
         for handle in [
             self.wss_server_handle.take(),
             self.obfs_server_handle.take(),
@@ -1148,6 +1211,8 @@ pub struct BridgeLiveState {
     pub control_auth: Arc<control_auth::ControlAuth>,
     /// Browser sessions of the HTTP bridge; ended by a confirmed wipe.
     pub web_sessions: Arc<web_session::WebSessions>,
+    pub discovery_enabled: bool,
+    pub discovery_peers_found: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Mark the shares that are pending replication or part of an active send as
@@ -1831,6 +1896,10 @@ async fn process_request_inner(
             ControlResponse::Status(DaemonStatus {
                 keeping_awake: crate::power::is_held(),
                 iroh: iroh_status_for(&data_dir),
+                discovery_enabled: bridge_state.discovery_enabled,
+                discovery_peers_found: bridge_state
+                    .discovery_peers_found
+                    .load(std::sync::atomic::Ordering::Relaxed),
                 peer_id: coord.peer_id().to_string(),
                 listen_addrs,
                 peer_count,
@@ -3267,5 +3336,35 @@ mod publish_content_remote_ack_tests {
             result.is_ok(),
             "legacy min=0 publish must still succeed offline, got: {result:?}"
         );
+    }
+}
+
+#[cfg(feature = "mainline-discovery")]
+fn should_announce(announce: bool, stealth: bool) -> bool {
+    announce && !stealth
+}
+#[cfg(feature = "mainline-discovery")]
+fn discovery_delay(refresh_secs: u64, connected: usize) -> std::time::Duration {
+    std::time::Duration::from_secs(
+        if connected < 3 {
+            refresh_secs.min(60)
+        } else {
+            refresh_secs
+        }
+        .max(1),
+    )
+}
+
+#[cfg(all(test, feature = "mainline-discovery"))]
+mod discovery_schedule_tests {
+    use super::*;
+    #[test]
+    fn schedule_and_stealth() {
+        assert!(!should_announce(true, true));
+        assert!(!should_announce(false, false));
+        assert!(should_announce(true, false));
+        assert_eq!(discovery_delay(900, 2).as_secs(), 60);
+        assert_eq!(discovery_delay(900, 3).as_secs(), 900);
+        assert_eq!(discovery_delay(0, 0).as_secs(), 1);
     }
 }

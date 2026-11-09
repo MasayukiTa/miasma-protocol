@@ -68,6 +68,7 @@ pub trait VideoSource {
 /// screen stream.
 pub trait ScreenSourceFactory: Send + Sync {
     fn create(&self) -> Option<Box<dyn VideoSource + Send>>;
+    fn set_share_target(&self, _target: super::screen_capture::ShareTarget) {}
 }
 
 /// Receives decoded raw pictures for display. A real implementation draws to a

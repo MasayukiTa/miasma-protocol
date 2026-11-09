@@ -232,13 +232,13 @@ fn real_camera_factory() -> Arc<dyn ScreenSourceFactory> {
 }
 /// The real screen factory for the shipped daemon: on a desktop build with the
 /// `call-screen` feature it opens the primary display on demand
-/// ([`super::screen_capture::PrimaryScreenFactory`]); on every other build it
+/// ([`super::screen_capture::SelectableScreenFactory`]); on every other build it
 /// is the dormant [`NoScreenFactory`], so the screen stream stays off until a
 /// build supplies a working factory.
 fn real_screen_factory() -> Arc<dyn ScreenSourceFactory> {
     #[cfg(all(feature = "call-screen", any(windows, target_os = "macos")))]
     {
-        Arc::new(super::screen_capture::PrimaryScreenFactory)
+        Arc::new(super::screen_capture::SelectableScreenFactory::default())
     }
     #[cfg(not(all(feature = "call-screen", any(windows, target_os = "macos"))))]
     {
@@ -253,6 +253,19 @@ pub struct CallRuntime {
     task: Mutex<Option<JoinHandle<()>>>,
 }
 impl CallRuntime {
+    pub fn set_share_target(&self, target: super::screen_capture::ShareTarget) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .screen_factory
+            .set_share_target(target);
+    }
+    pub fn list_share_targets(
+        &self,
+    ) -> Result<Vec<super::screen_capture::ShareTargetInfo>, super::screen_capture::ScreenError>
+    {
+        super::screen_capture::list_share_targets()
+    }
     pub fn start(svc: Arc<ChatService>) -> Arc<Self> {
         let provider = Arc::new(IrohLinkProvider::new(svc.node().clone()));
         // The shipped daemon gives the runtime the real camera and screen
@@ -450,6 +463,13 @@ impl CallRuntime {
     }
     pub(crate) fn handle(&self, request: CallRequest, peer: Option<[u8; 32]>) -> CallResponse {
         let mut state = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if state
+            .media_stats
+            .as_ref()
+            .is_some_and(|s| s.screen_source_lost.swap(false, Ordering::SeqCst))
+        {
+            state.screen_sharing = false;
+        }
         let response = match request {
             CallRequest::Dial { .. } => match peer {
                 Some(peer) => dial_result(state.controller.dial(peer)),
@@ -496,6 +516,15 @@ impl CallRuntime {
                 );
                 dto.muted = state.muted.load(Ordering::SeqCst);
                 CallResponse::Status(dto)
+            }
+            CallRequest::SetShareTarget { is_window, id } => {
+                let target = if is_window {
+                    super::screen_capture::ShareTarget::Window(id)
+                } else {
+                    super::screen_capture::ShareTarget::Display(id)
+                };
+                state.screen_factory.set_share_target(target);
+                CallResponse::Ok
             }
             CallRequest::StartScreenShare => {
                 // On macOS screen capture needs the Screen Recording permission.

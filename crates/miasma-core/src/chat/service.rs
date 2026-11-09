@@ -36,6 +36,7 @@ use super::{
     activity::ChatActivity,
     crypto::Identity,
     engine::{now_ms, ChatCore, EnqueueError, MarkOutcome, PrepareError},
+    file_notice::notice_to_text,
     outbox::{OutKind, Outbox},
     proto::{
         self, fail, Ack, AckStatus, Frame, CLOSE_BAD_REQUEST, CLOSE_NOT_ALLOWED, CLOSE_OK,
@@ -90,11 +91,18 @@ pub struct ChatSettings {
     pub group_auto_join: bool,
     /// Hold sealed messages for trusted contacts who are offline, and leave a
     /// copy with trusted holders when a direct send cannot go through
-    /// (`chat.custody_enabled`, default off).
+    /// (`chat.custody_enabled`, default on).
     pub custody_enabled: bool,
+    /// Limits and switch for the separate file holder.
+    pub file_custody_limits: crate::push::file_holder::FileCustodyLimits,
     /// How many trusted holders get a copy when a direct send fails
     /// (`chat.custody_copies`, 1-8).
     pub custody_copies: usize,
+    /// Per-contact rate on custody requests (deposit/list/fetch/delete):
+    /// burst and per minute. Stops a trusted contact from hammering the
+    /// custody store; over the limit a request is refused, not served.
+    pub custody_burst: f64,
+    pub custody_per_minute: f64,
     /// How often the collection task asks our trusted holders for anything
     /// kept for us. It also runs when woken by a fresh inbound connection.
     pub custody_collect_every: Duration,
@@ -103,6 +111,9 @@ pub struct ChatSettings {
     /// Where the record of the last session files written is kept, outside
     /// the data folder. `None` keeps only marks in memory.
     pub anchor_dir: Option<PathBuf>,
+    /// Inbox root for verified offline file deliveries.
+    pub offline_inbox_dir: Option<PathBuf>,
+    pub offline_data_dir: Option<PathBuf>,
 }
 
 impl Default for ChatSettings {
@@ -124,12 +135,17 @@ impl Default for ChatSettings {
             inbound_per_minute: 30.0,
             group_auto_join: true,
             custody_enabled: false,
+            file_custody_limits: Default::default(),
             custody_copies: crate::config::DEFAULT_CHAT_CUSTODY_COPIES,
+            custody_burst: crate::config::DEFAULT_CHAT_CUSTODY_RATE_BURST as f64,
+            custody_per_minute: crate::config::DEFAULT_CHAT_CUSTODY_RATE_PER_MINUTE as f64,
             custody_collect_every: Duration::from_secs(300),
             // Baseline for tests and embedders; the daemon takes the mode from
             // `privacy.pqc_mode` (default `prefer`) when it starts.
             pqc_mode: PqcMode::Off,
             anchor_dir: None,
+            offline_inbox_dir: None,
+            offline_data_dir: None,
         }
     }
 }
@@ -239,9 +255,14 @@ pub fn start_for_daemon(
         max_message_bytes: cfg.chat.max_message_bytes.clamp(1, proto::MAX_TEXT_BYTES),
         group_auto_join: cfg.chat.group_auto_join,
         custody_enabled: cfg.chat.custody_enabled,
+        file_custody_limits: crate::push::file_holder::FileCustodyLimits::from_config(&cfg.push),
         custody_copies: cfg.chat.custody_copies.clamp(1, 8),
+        custody_burst: cfg.chat.custody_rate_burst.max(1) as f64,
+        custody_per_minute: cfg.chat.custody_rate_per_minute.max(1) as f64,
         pqc_mode: cfg.privacy.pqc_mode(),
         anchor_dir: crate::paths::anchor_dir(data_dir),
+        offline_inbox_dir: Some(cfg.push.resolved_inbox(data_dir)),
+        offline_data_dir: Some(data_dir.to_path_buf()),
         ..ChatSettings::default()
     };
     // Only a value somebody set is worth a warning; the default is not a request.
@@ -299,6 +320,10 @@ pub struct ChatService {
     unknown: Mutex<Buckets>,
     inbound_rate: Mutex<Buckets>,
     sync_rate: Mutex<Buckets>,
+    /// Per-contact rate on custody requests, mirroring `inbound_rate` for the
+    /// custody streams (deposit/list/fetch/delete) which otherwise pass only
+    /// the trust check.
+    custody_rate: Mutex<Buckets>,
     /// Contacts that did not answer a `Sync` (older builds).
     no_sync: Mutex<HashMap<[u8; 32], Instant>>,
     /// Contacts whose build answered a read receipt with "bad request" (it
@@ -313,6 +338,7 @@ pub struct ChatService {
     /// The holder store, when `custody_enabled` is on; `None` keeps the node
     /// holding nothing and answering no custody verb (exactly as before).
     custody: Option<Arc<dyn super::mailbox::holder::CustodyStore>>,
+    file_custody: Option<Arc<dyn super::mailbox::holder::CustodyStore>>,
     /// Wakes the collection task so it asks holders at once (on a fresh inbound
     /// connection, say). The task also runs on its own timer. Unused when
     /// custody is off.
@@ -404,6 +430,28 @@ impl ChatService {
             } else {
                 None
             };
+        let file_custody: Option<Arc<dyn super::mailbox::holder::CustodyStore>> =
+            if settings.file_custody_limits.enabled {
+                match crate::push::file_holder::DiskFileCustody::new(
+                    settings.file_custody_limits.clone(),
+                    crate::paths::chat_file_custody_dir(chat_dir),
+                ) {
+                    Ok(store) => {
+                        for c in contacts.list() {
+                            if let Some(id) = c.endpoint_bytes() {
+                                store.trust(id);
+                            }
+                        }
+                        Some(Arc::new(store))
+                    }
+                    Err(e) => {
+                        warn!("file custody stays off: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
         let svc = Arc::new(Self {
             core,
             contacts,
@@ -414,6 +462,10 @@ impl ChatService {
                 settings.inbound_per_minute / 60.0,
             )),
             sync_rate: Mutex::new(Buckets::new(4.0, 6.0 / 60.0)),
+            custody_rate: Mutex::new(Buckets::new(
+                settings.custody_burst,
+                settings.custody_per_minute / 60.0,
+            )),
             no_sync: Mutex::new(HashMap::new()),
             no_receipts: Mutex::new(HashMap::new()),
             settings,
@@ -422,6 +474,7 @@ impl ChatService {
             shutdown,
             activity: ChatActivity::new(),
             custody,
+            file_custody,
             custody_collect: Arc::new(Notify::new()),
             groups: OnceLock::new(),
             #[cfg(feature = "pqc")]
@@ -555,6 +608,15 @@ impl ChatService {
         let id = self.core.enqueue(&peer, text, now_ms())?;
         self.kick(&peer);
         Ok(id)
+    }
+
+    /// Queue a file deposit notice as an ordinary chat message.
+    pub fn send_file_notice(
+        self: &Arc<Self>,
+        contact: &Contact,
+        n: &proto::FileDepositNotice,
+    ) -> Result<[u8; 16], EnqueueError> {
+        self.send(contact, &notice_to_text(n))
     }
 
     /// The person is looking at the conversation with `contact` and has seen
@@ -977,16 +1039,43 @@ impl ChatService {
         rx: &mut iroh::endpoint::RecvStream,
     ) {
         use super::mailbox::holder::CustodyStore;
-        use super::mailbox::wire::{self, Request, Response};
-        let Some(store) = self.custody.clone() else {
-            return;
-        };
-        store.trust(*who);
+        use super::mailbox::wire::{self, Request, Response, StoreSelector};
         let req =
-            match tokio::time::timeout(self.settings.read_timeout, wire::read_request(rx)).await {
+            match tokio::time::timeout(self.settings.read_timeout, wire::read_selected_request(rx))
+                .await
+            {
                 Ok(Ok(r)) => r,
                 _ => return,
             };
+        let (selector, req) = req;
+        let store = match selector {
+            StoreSelector::Chat => self.custody.clone(),
+            StoreSelector::File => self.file_custody.clone(),
+        };
+        let Some(store) = store else {
+            let _ = wire::write_response(
+                tx,
+                &Response::Refused(super::mailbox::holder::CustodyError::Disabled),
+            )
+            .await;
+            let _ = tx.finish();
+            return;
+        };
+        // A trusted contact still passes a per-contact rate limit here, the
+        // same way inbound chat frames do: the trust check alone does not bound
+        // how fast a contact may deposit/list/fetch/delete. Over the limit the
+        // request is refused (a frame, not a dropped connection) so the caller
+        // learns to slow down. This covers both store selectors.
+        if !self.custody_rate.lock().unwrap().allow(*who) {
+            let _ = wire::write_response(
+                tx,
+                &Response::Refused(super::mailbox::holder::CustodyError::RateLimited),
+            )
+            .await;
+            let _ = tx.finish();
+            return;
+        }
+        store.trust(*who);
         let now = now_ms();
         let who = *who;
         let resp = tokio::task::spawn_blocking(move || match req {
@@ -1019,13 +1108,17 @@ impl ChatService {
     }
 
     /// The trusted contacts, other than `peer`, that could hold a copy for it.
-    fn holders_for(&self, peer: &[u8; 32]) -> Vec<[u8; 32]> {
+    pub(crate) fn holders_for(&self, peer: &[u8; 32]) -> Vec<[u8; 32]> {
         self.contacts
             .list()
             .into_iter()
             .filter_map(|c| c.endpoint_bytes())
             .filter(|id| id != peer)
             .collect()
+    }
+
+    pub(crate) fn file_mailbox_transport(&self) -> super::mailbox::transport::ChatMailboxTransport {
+        super::mailbox::transport::ChatMailboxTransport::for_files(self.node.clone())
     }
 
     /// Leave a copy of the sealed envelope for `peer` with trusted holders,
@@ -1058,6 +1151,41 @@ impl ChatService {
         rep.held_by.len()
     }
 
+    fn receive_file_notice(&self, peer: [u8; 32], notice: proto::FileDepositNotice) {
+        let Some(contact) = self.contacts.by_endpoint(&peer).filter(|c| c.allow_receive) else {
+            return;
+        };
+        let Some(inbox) = &self.settings.offline_inbox_dir else {
+            return;
+        };
+        let leaf = crate::transfer::manifest::sanitize_file_name(&contact.label)
+            .unwrap_or_else(|| "contact".to_owned());
+        let transport = Arc::new(super::mailbox::transport::ChatMailboxTransport::for_files(
+            self.node.clone(),
+        ));
+        let name = notice.file_name.clone();
+        let size = notice.size;
+        let push = self
+            .settings
+            .offline_data_dir
+            .as_deref()
+            .and_then(crate::push::service::service_for);
+        let fetch = crate::push::receive_offline::spawn_fetch(
+            transport,
+            self.core.own_id(),
+            notice,
+            inbox.join(leaf),
+            now_ms(),
+        );
+        if let (Some(fetch), Some(push)) = (fetch, push) {
+            tokio::spawn(async move {
+                if let Ok(Ok(path)) = fetch.await {
+                    push.record_offline_receive(&contact, &name, size, &path);
+                }
+            });
+        }
+    }
+
     /// Collect from trusted holders whatever waits for us, applying each item
     /// once as a direct delivery. Does nothing when custody is off.
     fn collect_from_holders(&self) {
@@ -1080,7 +1208,14 @@ impl ChatService {
         let me = self.core.own_id();
         let core = self.core.clone();
         let rep = client.collect(&holders, &me, now_ms(), |sender, wire| {
-            core.accept(sender, wire, now_ms()).status.is_delivered()
+            if !self.contact_may_write(sender) {
+                return false;
+            }
+            core.accept_with_notice(sender, wire, now_ms(), None, &|notice| {
+                self.receive_file_notice(*sender, notice);
+            })
+            .status
+            .is_delivered()
         });
         if rep.taken > 0 {
             debug!("collected {} message(s) from holders", rep.taken);
@@ -1246,7 +1381,7 @@ impl ChatService {
                 _ => break,
             };
             if first == super::mailbox::wire::CUSTODY_STREAM_TAG {
-                if self.custody.is_some() && self.contact_may_write(&remote) {
+                if self.contact_may_write(&remote) {
                     self.serve_custody(&remote, &mut tx, &mut rx).await;
                 } else {
                     // Not offering custody, or not a contact that may use it.
@@ -1285,19 +1420,31 @@ impl ChatService {
                 // Cipher and disk work off the async threads.
                 #[cfg(feature = "pqc")]
                 let sink = self.call_sink.lock().ok().and_then(|s| s.clone());
-                #[cfg(feature = "pqc")]
-                let contacts = self.contacts.clone();
+                let service = self.clone();
                 match tokio::task::spawn_blocking(move || {
                     #[cfg(feature = "pqc")]
                     if let Some(sink) = sink {
                         let now = now_ms();
-                        return core.accept_with_call(&remote, &w, now, &|body| {
-                            let allowed =
-                                matches!(contacts.by_endpoint(&remote), Some(c) if c.allow_receive);
-                            super::call::inbound::dispatch(&sink, remote, allowed, body, now_ms());
-                        });
+                        return core.accept_with_notice(
+                            &remote,
+                            &w,
+                            now,
+                            Some(&|body| {
+                                let allowed = service.contact_may_write(&remote);
+                                super::call::inbound::dispatch(
+                                    &sink,
+                                    remote,
+                                    allowed,
+                                    body,
+                                    now_ms(),
+                                );
+                            }),
+                            &|notice| service.receive_file_notice(remote, notice),
+                        );
                     }
-                    core.accept(&remote, &w, now_ms())
+                    core.accept_with_notice(&remote, &w, now_ms(), None, &|notice| {
+                        service.receive_file_notice(remote, notice);
+                    })
                 })
                 .await
                 {
@@ -1613,5 +1760,71 @@ mod custody_status_tests {
         assert!(none.to_lowercase().contains("not deposited"));
         assert!(!some.to_lowercase().contains("not deposited"));
         assert_ne!(none, some);
+    }
+}
+
+#[cfg(test)]
+mod custody_rate_tests {
+    //! Tests for finding (1): serve_custody passes every custody request
+    //! (both store selectors) through a per-contact rate limit built on the
+    //! same Buckets token-bucket type that inbound_rate uses. Over the limit
+    //! the request is refused with CustodyError::RateLimited instead of being
+    //! served. These tests exercise that bucket directly with the custody
+    //! defaults so the policy -- burst allowed, flood refused, refill over
+    //! time, per-contact isolation -- is pinned without a network stream. The
+    //! serve_custody call site consumes one token per request via
+    //! custody_rate.allow(who); a false there is what becomes the refusal.
+    use super::Buckets;
+    use crate::config::{DEFAULT_CHAT_CUSTODY_RATE_BURST, DEFAULT_CHAT_CUSTODY_RATE_PER_MINUTE};
+
+    fn custody_bucket() -> Buckets {
+        Buckets::new(
+            DEFAULT_CHAT_CUSTODY_RATE_BURST as f64,
+            DEFAULT_CHAT_CUSTODY_RATE_PER_MINUTE as f64 / 60.0,
+        )
+    }
+
+    #[test]
+    fn a_contact_is_refused_once_its_burst_is_spent() {
+        let mut b = custody_bucket();
+        let who = [7u8; 32];
+        for i in 0..DEFAULT_CHAT_CUSTODY_RATE_BURST {
+            assert!(b.allow(who), "request {i} within the burst must be allowed");
+        }
+        assert!(!b.allow(who), "the request past the burst must be refused");
+    }
+
+    #[test]
+    fn the_limit_is_per_contact() {
+        let mut b = custody_bucket();
+        let greedy = [1u8; 32];
+        let other = [2u8; 32];
+        for _ in 0..DEFAULT_CHAT_CUSTODY_RATE_BURST {
+            assert!(b.allow(greedy));
+        }
+        assert!(!b.allow(greedy), "greedy contact is over its own limit");
+        assert!(
+            b.allow(other),
+            "a different contact keeps its own full burst"
+        );
+    }
+
+    #[test]
+    fn tokens_refill_after_waiting() {
+        let mut b = Buckets::new(1.0, 100.0);
+        let who = [9u8; 32];
+        assert!(b.allow(who), "first request spends the single token");
+        assert!(!b.allow(who), "immediately after, no token is left");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(b.allow(who), "after the refill interval a token is back");
+    }
+
+    #[test]
+    fn the_custody_defaults_grant_a_real_burst() {
+        assert!(DEFAULT_CHAT_CUSTODY_RATE_BURST >= 2);
+        assert!(DEFAULT_CHAT_CUSTODY_RATE_PER_MINUTE >= 1);
+        let mut b = custody_bucket();
+        let who = [3u8; 32];
+        assert!(b.allow(who), "the first custody request is always allowed");
     }
 }

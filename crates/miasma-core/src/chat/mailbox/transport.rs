@@ -21,7 +21,7 @@ use super::{
     client::{MailboxError, MailboxTransport},
     holder::{CustodyError, DepositOutcome},
     ids::{ItemId, RecipientTag},
-    wire::{self, Request, Response},
+    wire::{self, Request, Response, StoreSelector},
 };
 use crate::transport::iroh_direct::{IrohNode, CHAT_ALPN};
 
@@ -32,6 +32,7 @@ const EXCHANGE_TIMEOUT: Duration = Duration::from_secs(20);
 pub struct ChatMailboxTransport {
     node: Arc<IrohNode>,
     handle: Handle,
+    store: StoreSelector,
 }
 
 impl ChatMailboxTransport {
@@ -41,6 +42,16 @@ impl ChatMailboxTransport {
         Self {
             node,
             handle: Handle::current(),
+            store: StoreSelector::Chat,
+        }
+    }
+
+    /// Address the separate file custody store on each holder.
+    pub fn for_files(node: Arc<IrohNode>) -> Self {
+        Self {
+            node,
+            handle: Handle::current(),
+            store: StoreSelector::File,
         }
     }
 
@@ -48,6 +59,7 @@ impl ChatMailboxTransport {
         let node = self.node.clone();
         let holder = *holder;
         let req = req.clone();
+        let store = self.store;
         self.handle.block_on(async move {
             let conn = node
                 .connect_alpn(&holder, CHAT_ALPN)
@@ -62,10 +74,19 @@ impl ChatMailboxTransport {
                 tx.write_all(&[wire::CUSTODY_STREAM_TAG])
                     .await
                     .map_err(|_| MailboxError::Unreachable)?;
-                wire::write_request(&mut tx, &req)
+                wire::write_selected_request(&mut tx, store, &req)
                     .await
                     .map_err(|_| MailboxError::Unreachable)?;
                 let _ = tx.finish();
+                // A failure to read the response frame means the exchange did
+                // not complete: the holder could not be reached or the stream
+                // broke. That is `Unreachable` for every store selector. A real
+                // refusal from the holder arrives as a well-formed
+                // `Response::Refused(_)` frame and is turned into
+                // `MailboxError::Refused` by the callers below; it is not a
+                // read failure. Mapping a read failure of the File selector to
+                // `Refused(Disabled)` used to disguise an unreachable holder as
+                // a disabled one, which misleads diagnostics.
                 wire::read_response(&mut rx)
                     .await
                     .map_err(|_| MailboxError::Unreachable)
@@ -82,6 +103,54 @@ impl ChatMailboxTransport {
 /// Turn a holder's refusal frame into the client's error.
 fn refused(e: CustodyError) -> MailboxError {
     MailboxError::Refused(e)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::mailbox::holder::DepositOutcome;
+
+    // Classify a response the way every verb does: a well-formed refusal frame
+    // becomes `Refused`, and anything that is not the verb's own answer is
+    // `Unreachable`. This mirrors the match arms in the verb impls below and
+    // documents the contract the fixed `exchange` relies on: a *refusal* is a
+    // decoded `Response::Refused`, never a read failure. A read failure (the
+    // holder could not be reached, the stream broke) is `Unreachable` for
+    // every store selector -- it must not be disguised as `Refused(Disabled)`,
+    // which previously happened only for the File selector and misreported an
+    // unreachable holder as a disabled one.
+    fn classify_fetch(resp: Response) -> Result<Option<Vec<u8>>, MailboxError> {
+        match resp {
+            Response::Item(o) => Ok(o),
+            Response::Refused(e) => Err(refused(e)),
+            _ => Err(MailboxError::Unreachable),
+        }
+    }
+
+    #[test]
+    fn a_refusal_frame_maps_to_refused_for_both_selectors() {
+        // A genuine holder refusal arrives as a decodable frame and keeps its
+        // reason, regardless of which store it addressed.
+        for e in [
+            CustodyError::Disabled,
+            CustodyError::NotTrusted,
+            CustodyError::RateLimited,
+        ] {
+            let wire = wire::encode_response(&Response::Refused(e));
+            let (decoded, _) = wire::decode_response(&wire).unwrap();
+            assert_eq!(classify_fetch(decoded), Err(MailboxError::Refused(e)));
+        }
+    }
+
+    #[test]
+    fn a_wrong_shaped_answer_is_unreachable_not_a_disguised_refusal() {
+        // Any answer that is not the verb's own (here, a Deposited answer to a
+        // fetch) is Unreachable -- not silently turned into a refusal. This is
+        // the contract that lets `exchange` map a *read failure* to
+        // Unreachable for every selector instead of Refused(Disabled).
+        let resp = Response::Deposited(DepositOutcome::Stored);
+        assert_eq!(classify_fetch(resp), Err(MailboxError::Unreachable));
+    }
 }
 
 impl MailboxTransport for ChatMailboxTransport {

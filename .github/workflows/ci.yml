@@ -98,6 +98,21 @@ jobs:
       - name: Test hand-over custody carriage (ADR-012 step 5)
         run: cargo test -p miasma-core --locked --test group_handover_custody_carry_test
 
+      # Offline file delivery (Miasma beta.13 must): a sender deposits an
+      # end-to-end encrypted file into a holder, goes offline, and the
+      # recipient fetches it later. Named here so a regression fails this job
+      # by name. Platform-neutral (no network, no feature flags).
+      - name: Test offline file deposit via holders
+        run: cargo test -p miasma-core --locked --test push_offline_deposit_test
+
+      # Offline file delivery end-to-end: a sender deposits a multi-chunk file
+      # into a holder and goes offline, and a recipient that starts later
+      # receives the notice through the chat receive path and fetches the
+      # verified file. Named here so a regression fails this job by name.
+      # Platform-neutral (no network, no feature flags).
+      - name: Test offline file delivery end-to-end
+        run: cargo test -p miasma-core --locked --lib chat::push_offline_e2e_test
+
   test-core-pqc:
     name: Core Tests, opt-in hybrid feature (Ubuntu)
     runs-on: ubuntu-24.04
@@ -372,6 +387,62 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: dist/miasma-macos.tar.gz
+
+  linux-cli-artifact:
+    name: CLI + desktop build (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux desktop libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxi-dev libxrandr-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+
+      - name: Set pre-release label
+        env:
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          label="$INPUT_PRERELEASE"
+          if [ -z "$label" ] && [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            case "$tag" in *-*) label="${tag#*-}" ;; esac
+          fi
+          if [ -n "$label" ]; then echo "MIASMA_PRERELEASE=$label" >> "$GITHUB_ENV"; fi
+
+      - name: Build CLI (release)
+        run: cargo build --release --locked -p miasma-cli
+
+      - name: Build desktop (release)
+        id: desktop
+        continue-on-error: true
+        run: cargo build --release --locked -p miasma-desktop
+
+      - name: Package Linux binaries
+        run: |
+          mkdir -p dist/miasma-linux
+          cp target/release/miasma dist/miasma-linux/
+          if [ "${{ steps.desktop.outcome }}" = success ] && [ -f target/release/miasma-desktop ]; then
+            cp target/release/miasma-desktop dist/miasma-linux/
+          fi
+          cp scripts/transfer-e2e.sh dist/miasma-linux/
+          tar -czf dist/miasma-linux.tar.gz -C dist miasma-linux
+          sha256sum dist/miasma-linux.tar.gz
+
+      - name: Upload Linux binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: miasma-linux-x86_64
+          path: dist/miasma-linux.tar.gz
+          retention-days: 14
+          if-no-files-found: error
 
   # The released command-line program must stop, and leave the data directory
   # alone, when master.key is not a plain 32-byte key (see

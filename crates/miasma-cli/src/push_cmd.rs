@@ -545,6 +545,7 @@ fn state_label(s: PushState) -> &'static str {
             PushState::Rejected => "断られました",
             PushState::Cancelled => "中止",
             PushState::Waiting => "再試行待ち",
+            PushState::Deposited => "保管済み、受取人を待っています",
         };
     }
     match s {
@@ -558,6 +559,7 @@ fn state_label(s: PushState) -> &'static str {
         PushState::Rejected => "rejected",
         PushState::Cancelled => "cancelled",
         PushState::Waiting => "waiting to retry",
+        PushState::Deposited => "deposited, waiting for the recipient",
     }
 }
 

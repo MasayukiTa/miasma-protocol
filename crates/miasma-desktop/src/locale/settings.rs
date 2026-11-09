@@ -49,7 +49,7 @@ static SE_EN: SettingsStrings = SettingsStrings {
     cat_danger: "Danger zone",
     danger_intro: "These actions delete data and cannot be undone. Each one asks you to confirm and says what will be deleted.",
     custody_label: "Hold messages for offline contacts",
-    custody_desc: "When this is on, your node keeps a sealed copy of a message for a trusted contact who is offline, and leaves a copy with your other trusted contacts when a direct send does not get through, so it can be delivered once they come back. Holders only ever see the sealed message, never its contents. Off by default.",
+    custody_desc: "When this is on, your node keeps a sealed copy of a message for a trusted contact who is offline, and leaves a copy with your other trusted contacts when a direct send does not get through, so it can be delivered once they come back. Holders only ever see the sealed message, never its contents. On by default.",
     utc: "UTC",
 };
 

@@ -45,6 +45,7 @@ pub struct OfflineCheckInput {
     pub iroh_relay_connected: bool,
     /// Whether chat custody (holding deposits for contacts) is enabled.
     pub custody_enabled: bool,
+    pub file_custody_enabled: bool,
     /// Configured number of custody copies to aim for.
     pub custody_copies: usize,
     /// Contacts that can act as a holder for a deposit: they have a usable iroh
@@ -74,6 +75,7 @@ pub struct OfflineCheckReport {
     pub iroh_relay_connected: bool,
     pub holders_reachable: usize,
     pub custody_enabled: bool,
+    pub file_custody_enabled: bool,
     pub custody_copies: usize,
     pub deposit: DepositVerdict,
     /// Short machine-stable reason for the deposit verdict.
@@ -145,6 +147,8 @@ pub fn evaluate(input: &OfflineCheckInput) -> OfflineCheckReport {
 
     let (deposit, deposit_reason) = if !input.custody_enabled {
         (DepositVerdict::No, "custody disabled")
+    } else if !input.file_custody_enabled {
+        (DepositVerdict::No, "file custody disabled")
     } else if !input.iroh_present || !input.iroh_relay_connected {
         (DepositVerdict::No, "iroh relay not connected")
     } else if holders_reachable == 0 {
@@ -162,6 +166,7 @@ pub fn evaluate(input: &OfflineCheckInput) -> OfflineCheckReport {
         iroh_relay_connected: input.iroh_relay_connected,
         holders_reachable,
         custody_enabled: input.custody_enabled,
+        file_custody_enabled: input.file_custody_enabled,
         custody_copies: input.custody_copies,
         deposit,
         deposit_reason,
@@ -196,6 +201,10 @@ pub async fn collect(data_dir: &Path) -> OfflineCheckInput {
         .map(|c| c.chat.custody_copies)
         .unwrap_or(miasma_core::config::DEFAULT_CHAT_CUSTODY_COPIES);
     let custody_enabled = miasma_core::config::load_custody_enabled(data_dir);
+    let file_custody_enabled = config
+        .as_ref()
+        .map(|c| c.push.file_custody_enabled)
+        .unwrap_or_else(|| miasma_core::config::PushConfig::default().file_custody_enabled);
 
     let status = match daemon_request(data_dir, ControlRequest::Status).await {
         Ok(ControlResponse::Status(s)) => Some(s),
@@ -215,6 +224,7 @@ pub async fn collect(data_dir: &Path) -> OfflineCheckInput {
         iroh_present,
         iroh_relay_connected,
         custody_enabled,
+        file_custody_enabled,
         custody_copies,
         holder_candidates: count_holder_candidates(data_dir),
     }
@@ -245,9 +255,28 @@ fn deposit_line(v: DepositVerdict) -> &'static str {
 pub async fn run(data_dir: &Path, json: bool) -> Result<()> {
     let input = collect(data_dir).await;
     let report = evaluate(&input);
+    let status =
+        match miasma_core::daemon_request(data_dir, miasma_core::ControlRequest::Status).await {
+            Ok(miasma_core::ControlResponse::Status(s)) => Some(s),
+            _ => None,
+        };
+    let discovery_enabled = status
+        .as_ref()
+        .map(|s| s.discovery_enabled)
+        .unwrap_or_else(|| {
+            NodeConfig::load(data_dir)
+                .map(|c| c.discovery.enabled)
+                .unwrap_or(false)
+        });
+    let discovery_peers_found = status
+        .as_ref()
+        .map(|s| s.discovery_peers_found)
+        .unwrap_or(0);
 
     if json {
         let obj = serde_json::json!({
+            "discovery_enabled": discovery_enabled,
+            "discovery_peers_found": discovery_peers_found,
             "bootstrap_reachability": match report.bootstrap {
                 BootstrapReach::NoneConfigured => "none_configured",
                 BootstrapReach::OnlyPrivate => "only_private",
@@ -258,6 +287,7 @@ pub async fn run(data_dir: &Path, json: bool) -> Result<()> {
             "iroh_relay_connected": report.iroh_relay_connected,
             "holders_reachable_via_iroh": report.holders_reachable,
             "custody_enabled": report.custody_enabled,
+            "file_custody_enabled": report.file_custody_enabled,
             "custody_copies": report.custody_copies,
             "deposit_would_succeed": match report.deposit {
                 DepositVerdict::Ok => "yes",
@@ -271,6 +301,15 @@ pub async fn run(data_dir: &Path, json: bool) -> Result<()> {
     }
 
     println!("Miasma Offline-Delivery Self-Check");
+    println!(
+        "  Network discovery: {}, peers found last round {}",
+        if discovery_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        discovery_peers_found
+    );
     println!(
         "  Bootstrap reachability:     {}",
         bootstrap_line(report.bootstrap)
@@ -294,6 +333,14 @@ pub async fn run(data_dir: &Path, json: bool) -> Result<()> {
         report.custody_copies
     );
     println!(
+        "  File custody enabled:       {}",
+        if report.file_custody_enabled {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+    println!(
         "  Deposit would succeed now:  {} ({})",
         deposit_line(report.deposit),
         report.deposit_reason
@@ -313,6 +360,7 @@ mod tests {
             iroh_present: true,
             iroh_relay_connected: true,
             custody_enabled: true,
+            file_custody_enabled: true,
             custody_copies: 2,
             holder_candidates: 2,
         }
@@ -408,6 +456,15 @@ mod tests {
         let r = evaluate(&i);
         assert_eq!(r.deposit, DepositVerdict::No);
         assert_eq!(r.deposit_reason, "custody disabled");
+    }
+
+    #[test]
+    fn deposit_no_when_file_custody_disabled() {
+        let mut i = base();
+        i.file_custody_enabled = false;
+        let r = evaluate(&i);
+        assert_eq!(r.deposit, DepositVerdict::No);
+        assert_eq!(r.deposit_reason, "file custody disabled");
     }
 
     #[test]

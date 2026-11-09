@@ -49,6 +49,8 @@ pub enum PushState {
     Rejected,
     Cancelled,
     Waiting,
+    /// The file is held in custody and its notice awaits delivery.
+    Deposited,
 }
 
 /// The states a client from before `Waiting` existed knows. The wire carries
@@ -71,7 +73,7 @@ enum LegacyState {
 impl From<PushState> for LegacyState {
     fn from(s: PushState) -> Self {
         match s {
-            PushState::Queued | PushState::Waiting => Self::Queued,
+            PushState::Queued | PushState::Waiting | PushState::Deposited => Self::Queued,
             PushState::Preparing => Self::Preparing,
             PushState::Connecting => Self::Connecting,
             PushState::Sending => Self::Sending,
@@ -192,7 +194,7 @@ struct InfoWire {
 impl From<&PushTransferInfo> for InfoWire {
     fn from(i: &PushTransferInfo) -> Self {
         Self {
-            phase: (i.state == PushState::Waiting).then_some(PushState::Waiting),
+            phase: matches!(i.state, PushState::Waiting | PushState::Deposited).then_some(i.state),
             state: i.state.into(),
             id: i.id.clone(),
             direction: i.direction,
@@ -737,6 +739,34 @@ impl History {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deposited_phase_preserves_legacy_state() {
+        let board = Board::new();
+        let (id, _) = board.create(Direction::Out, "c", "C", "f", 1, PushState::Deposited);
+        let info = board.get(&id).unwrap();
+        let wire = serde_json::to_value(&info).unwrap();
+        assert_eq!(wire["state"], "queued");
+        assert_eq!(wire["phase"], "deposited");
+        assert_eq!(
+            serde_json::from_value::<PushTransferInfo>(wire.clone())
+                .unwrap()
+                .state,
+            PushState::Deposited
+        );
+        let mut legacy = wire;
+        legacy.as_object_mut().unwrap().remove("phase");
+        assert_eq!(
+            serde_json::from_value::<PushTransferInfo>(legacy)
+                .unwrap()
+                .state,
+            PushState::Queued
+        );
+        assert_eq!(
+            serde_json::to_string(&PushState::Waiting).unwrap(),
+            "\"waiting\""
+        );
+    }
 
     fn entry(i: usize) -> HistoryEntry {
         HistoryEntry {
