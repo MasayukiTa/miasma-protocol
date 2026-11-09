@@ -30,6 +30,15 @@ pub struct DepositIntent {
     pub size: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkPublishIntent {
+    pub password: String,
+    pub path: String,
+    pub size: u64,
+    pub mtime_ms: u64,
+    pub sha256: [u8; 32],
+}
+
 /// One file queued for a contact, as it is stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutJob {
@@ -65,6 +74,8 @@ pub struct OutJob {
     pub network_share_id: Option<String>,
     #[serde(default)]
     pub network_password: Option<String>,
+    #[serde(default)]
+    pub network_intent: Option<NetworkPublishIntent>,
     pub created_at_ms: u64,
 }
 
@@ -342,6 +353,7 @@ mod tests {
             deposit_intent: None,
             network_share_id: None,
             network_password: None,
+            network_intent: None,
             created_at_ms: i as u64,
         }
     }

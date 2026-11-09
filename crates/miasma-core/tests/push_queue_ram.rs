@@ -91,6 +91,7 @@ fn job(i: usize) -> OutJob {
         deposit_intent: None,
         network_share_id: None,
         network_password: None,
+        network_intent: None,
         created_at_ms: i as u64,
     }
 }
