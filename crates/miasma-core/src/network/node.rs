@@ -3275,7 +3275,12 @@ impl MiasmaNode {
                     .into_iter()
                     .filter(|p| !exclude.contains(p))
                     .collect();
-                info!(connected = connected.len(), verified = verified.len(), candidates = candidates.len(), "storage candidate selection");
+                info!(
+                    connected = connected.len(),
+                    verified = verified.len(),
+                    candidates = candidates.len(),
+                    "storage candidate selection"
+                );
                 let peer_registry = &self.peer_registry;
                 let ranked = self.routing_table.rank_peers(&candidates, |id| {
                     peer_registry
@@ -5888,8 +5893,12 @@ impl MiasmaNode {
             } => {
                 let response = self.handle_inbound_store(peer, request.share);
                 match &response {
-                    StoreResponse::Accepted { .. } => info!(%peer, outcome = "accepted", "inbound share store"),
-                    StoreResponse::Rejected(reason) => warn!(%peer, %reason, outcome = "refused", "inbound share store"),
+                    StoreResponse::Accepted { .. } => {
+                        info!(%peer, outcome = "accepted", "inbound share store")
+                    }
+                    StoreResponse::Rejected(reason) => {
+                        warn!(%peer, %reason, outcome = "refused", "inbound share store")
+                    }
                 }
                 let _ = self
                     .swarm
