@@ -73,7 +73,8 @@ impl MailboxTransport for Node {
         now_ms: u64,
     ) -> Result<Vec<ItemId>, MailboxError> {
         let s = self.store(holder).ok_or(MailboxError::Unreachable)?;
-        s.list(&self.who, tag, now_ms).map_err(MailboxError::Refused)
+        s.list(&self.who, tag, now_ms)
+            .map_err(MailboxError::Refused)
     }
     fn fetch(
         &self,
@@ -93,7 +94,8 @@ impl MailboxTransport for Node {
         item: ItemId,
     ) -> Result<bool, MailboxError> {
         let s = self.store(holder).ok_or(MailboxError::Unreachable)?;
-        s.delete(&self.who, tag, item).map_err(MailboxError::Refused)
+        s.delete(&self.who, tag, item)
+            .map_err(MailboxError::Refused)
     }
 }
 
@@ -154,7 +156,11 @@ fn clear_holder(
 /// Build the chat-delivered notice from a deposit receipt, the way the sender
 /// does before sealing it into a chat message. The receipt's public fields
 /// carry everything the recipient needs to fetch and verify the file.
-fn notice_from_receipt(receipt: &DepositReceipt, salt: [u8; 16], file_name: &str) -> FileDepositNotice {
+fn notice_from_receipt(
+    receipt: &DepositReceipt,
+    salt: [u8; 16],
+    file_name: &str,
+) -> FileDepositNotice {
     FileDepositNotice {
         file_key: receipt.file_key,
         salt,
@@ -171,7 +177,9 @@ fn notice_from_receipt(receipt: &DepositReceipt, salt: [u8; 16], file_name: &str
 fn multi_chunk_file() -> Vec<u8> {
     let len = deposit::CHUNK_PLAINTEXT * 3 + 777;
     let start: u8 = rand::random();
-    (0..len).map(|i| start.wrapping_add((i % 251) as u8)).collect()
+    (0..len)
+        .map(|i| start.wrapping_add((i % 251) as u8))
+        .collect()
 }
 
 #[test]
@@ -200,9 +208,16 @@ fn sender_deposits_and_leaves_then_recipient_receives_through_chat() {
             holders: vec![(holder_id, store.clone())],
             who: sender.id(),
         };
-        let receipt: DepositReceipt =
-            deposit_file(&tx, &[holder_id], &recipient.id(), salt, &file[..], 1_000, 1)
-                .expect("deposit succeeds with one holder");
+        let receipt: DepositReceipt = deposit_file(
+            &tx,
+            &[holder_id],
+            &recipient.id(),
+            salt,
+            &file[..],
+            1_000,
+            1,
+        )
+        .expect("deposit succeeds with one holder");
         assert_eq!(receipt.held_by, vec![holder_id]);
         assert!(receipt.manifest.chunks >= 3);
         let notice = notice_from_receipt(&receipt, salt, "report.bin");
@@ -284,8 +299,16 @@ fn a_flipped_byte_in_a_stored_chunk_gives_no_placed_file() {
         holders: vec![(holder_id, store.clone())],
         who: sender.id(),
     };
-    let receipt = deposit_file(&tx, &[holder_id], &recipient.id(), salt, &file[..], 1_000, 1)
-        .expect("deposit succeeds");
+    let receipt = deposit_file(
+        &tx,
+        &[holder_id],
+        &recipient.id(),
+        salt,
+        &file[..],
+        1_000,
+        1,
+    )
+    .expect("deposit succeeds");
     let notice = notice_from_receipt(&receipt, salt, "report.bin");
 
     // Flip one byte in the first stored chunk item on the holder's disk. The
@@ -344,11 +367,23 @@ fn no_hybrid_session_at_the_sender_deposits_nothing() {
     };
     let salt: [u8; 16] = rand::random();
     let deposited = if has_protected_session(&sender_chat.core, &recipient.id()) {
-        deposit_file(&tx, &[holder_id], &recipient.id(), salt, &file[..], 1_000, 1).is_ok()
+        deposit_file(
+            &tx,
+            &[holder_id],
+            &recipient.id(),
+            salt,
+            &file[..],
+            1_000,
+            1,
+        )
+        .is_ok()
     } else {
         false
     };
-    assert!(!deposited, "nothing is deposited without a protected session");
+    assert!(
+        !deposited,
+        "nothing is deposited without a protected session"
+    );
     assert_eq!(store.stats().items, 0, "the holder holds nothing");
 }
 
