@@ -151,6 +151,18 @@ pub fn spawn_fetch(
                 let path =
                     fetch_verified(transport.as_ref(), &recipient, &notice, &dir, current_ms)?;
                 mark_done(&dir, &notice.manifest_id)?;
+                let tag = crate::chat::mailbox::ids::RecipientTag::for_recipient(&recipient);
+                let chunks = notice.size / deposit::CHUNK_PLAINTEXT as u64
+                    + u64::from(notice.size % deposit::CHUNK_PLAINTEXT as u64 != 0);
+                for holder in &notice.holders {
+                    for item in std::iter::once(deposit::manifest_id(&notice.salt))
+                        .chain((0..chunks).map(|index| deposit::chunk_id(index, &notice.salt)))
+                    {
+                        if let Err(e) = transport.delete(holder, tag, item) {
+                            tracing::warn!("offline custody delete failed: {e}");
+                        }
+                    }
+                }
                 Ok(path)
             })
             .await

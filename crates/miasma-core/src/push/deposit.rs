@@ -179,6 +179,10 @@ pub(crate) fn manifest_id(salt: &[u8; 16]) -> ItemId {
     item_id(0, KIND_MANIFEST, salt)
 }
 
+pub(crate) fn chunk_id(index: u64, salt: &[u8; 16]) -> ItemId {
+    item_id(index, KIND_CHUNK, salt)
+}
+
 /// The manifest of a deposited file: enough to fetch, verify and reassemble it
 /// without the source. Serialised, sealed and deposited as one item.
 #[derive(Debug, Clone, PartialEq, Eq)]
