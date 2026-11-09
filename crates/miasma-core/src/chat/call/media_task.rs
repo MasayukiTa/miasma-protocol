@@ -47,6 +47,7 @@ pub struct MediaStats {
     pub video_frames_played: Arc<AtomicU64>,
     pub camera_in_use: Arc<AtomicBool>,
     pub screen_sharing: Arc<AtomicBool>,
+    pub(super) screen_source_lost: Arc<AtomicBool>,
     /// Set true when the macOS microphone preflight found the permission not
     /// granted, so the call status can report a neutral `mic_permission`
     /// reason to the UI. Never set on Windows or Linux, where the preflight
@@ -510,6 +511,14 @@ where
                 Vec::new()
             }
         };
+        if screen
+            .as_ref()
+            .is_some_and(|driver| !driver.source_is_open())
+        {
+            screen = None;
+            stats.screen_sharing.store(false, Ordering::SeqCst);
+            stats.screen_source_lost.store(true, Ordering::SeqCst);
+        }
         // Screen fragments for this tick (empty when not sharing).
         let screen_packets = match screen.as_mut() {
             Some(driver) => driver.tick_with_budget(

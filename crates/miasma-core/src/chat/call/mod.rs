@@ -67,5 +67,4 @@ pub use video_frame::{
 #[cfg(all(feature = "call-camera", any(windows, target_os = "macos")))]
 pub mod video_camera;
 
-#[cfg(all(feature = "call-screen", any(windows, target_os = "macos")))]
 pub mod screen_capture;
