@@ -41,9 +41,11 @@ use hkdf::Hkdf;
 use rand::RngCore;
 use sha2::Sha256;
 
+use tracing::warn;
+
 use crate::chat::mailbox::{
     client::{MailboxError, MailboxTransport},
-    holder::DepositOutcome,
+    holder::{CustodyError, DepositOutcome},
     ids::{ItemId, RecipientTag},
 };
 
@@ -173,6 +175,15 @@ fn item_id(index: u64, kind: u8, salt: &[u8; 16]) -> ItemId {
 
 const KIND_MANIFEST: u8 = 0;
 const KIND_CHUNK: u8 = 1;
+
+/// Return the manifest item ID derived from the deposit salt.
+pub(crate) fn manifest_id(salt: &[u8; 16]) -> ItemId {
+    item_id(0, KIND_MANIFEST, salt)
+}
+
+pub(crate) fn chunk_id(index: u64, salt: &[u8; 16]) -> ItemId {
+    item_id(index, KIND_CHUNK, salt)
+}
 
 /// The manifest of a deposited file: enough to fetch, verify and reassemble it
 /// without the source. Serialised, sealed and deposited as one item.
@@ -384,13 +395,28 @@ fn deposit_one(
     needed: usize,
 ) -> Result<(), DepositError> {
     let mut kept: Vec<[u8; 32]> = Vec::with_capacity(surviving.len());
+    // Keep why the last holder that refused did so. A deposit under the
+    // threshold rolls up to `NotDeposited`, which cannot carry a per-holder
+    // reason without changing its shape; recording the last refusal here means
+    // the failure can still say *why* (capacity, trust, budget, ...) instead of
+    // leaving the operator to guess.
+    let mut last_refusal: Option<CustodyError> = None;
     for h in surviving.iter() {
         match transport.deposit(h, tag, id, blob, now_ms) {
             Ok(DepositOutcome::Stored) | Ok(DepositOutcome::Duplicate) => kept.push(*h),
-            Err(MailboxError::Unreachable) | Err(MailboxError::Refused(_)) => {}
+            Err(MailboxError::Unreachable) => {}
+            Err(MailboxError::Refused(e)) => last_refusal = Some(e),
         }
     }
     if kept.len() < needed {
+        if let Some(e) = last_refusal {
+            warn!(
+                held = kept.len(),
+                needed,
+                reason = %e,
+                "a file chunk could not be deposited with enough holders"
+            );
+        }
         return Err(DepositError::NotDeposited {
             held: kept.len(),
             needed,
@@ -456,13 +482,23 @@ fn fetch_any(
     id: ItemId,
     now_ms: u64,
 ) -> Option<Vec<u8>> {
+    // Keep the last refusal so that when no holder yields the item, the log
+    // says why the reachable holders turned it down (not trusted, expired and
+    // swept, ...) rather than silently returning `None`.
+    let mut last_refusal: Option<CustodyError> = None;
     for h in holders {
         if h == recipient {
             continue;
         }
-        if let Ok(Some(blob)) = transport.fetch(h, tag, id, now_ms) {
-            return Some(blob);
+        match transport.fetch(h, tag, id, now_ms) {
+            Ok(Some(blob)) => return Some(blob),
+            Ok(None) => {}
+            Err(MailboxError::Unreachable) => {}
+            Err(MailboxError::Refused(e)) => last_refusal = Some(e),
         }
+    }
+    if let Some(e) = last_refusal {
+        warn!(reason = %e, "an item could not be fetched from any reachable holder");
     }
     None
 }
@@ -654,6 +690,47 @@ mod tests {
         .expect("recipient fetches after the sender left");
         assert_eq!(out, file);
         assert_eq!(m.file_hash, receipt.manifest.file_hash);
+    }
+
+    #[cfg(feature = "iroh")]
+    #[test]
+    fn verified_receive_places_only_matching_file() {
+        use crate::chat::proto::FileDepositNotice;
+        use crate::push::receive_offline::fetch_verified;
+        use sha2::{Digest, Sha256};
+
+        let (sender, recipient) = ids();
+        let holder = [7u8; 32];
+        let store = file_holder(sender.id(), recipient.id());
+        let tx = InProcess {
+            holders: vec![(holder, store.clone())],
+            who: sender.id(),
+        };
+        let data = vec![42; CHUNK_PLAINTEXT * 3 + 1];
+        let salt = [9; 16];
+        let receipt =
+            deposit_file(&tx, &[holder], &recipient.id(), salt, &data[..], 1_000, 1).unwrap();
+        let rx = InProcess {
+            holders: vec![(holder, store)],
+            who: recipient.id(),
+        };
+        let mut notice = FileDepositNotice {
+            file_key: receipt.file_key,
+            salt,
+            manifest_id: receipt.manifest_id.0,
+            holders: receipt.held_by,
+            file_name: "test.bin".into(),
+            size: data.len() as u64,
+            sha256: Sha256::digest(&data).into(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        notice.sha256[0] ^= 1;
+        assert!(fetch_verified(&rx, &recipient.id(), &notice, dir.path(), 2_000).is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        notice.sha256[0] ^= 1;
+        let path = fetch_verified(&rx, &recipient.id(), &notice, dir.path(), 2_000).unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), data);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

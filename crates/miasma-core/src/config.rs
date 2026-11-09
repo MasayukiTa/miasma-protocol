@@ -400,6 +400,22 @@ pub struct ChatConfig {
     /// hard ceiling of 30 days when the daemon starts.
     #[serde(default = "default_chat_custody_ttl_days")]
     pub custody_ttl_days: u64,
+    /// Custody requests (deposit/list/fetch/delete) accepted from one trusted
+    /// contact in a short burst before the per-contact rate limit refuses
+    /// further ones (default 20). This limit is what stops a trusted contact
+    /// from hammering the custody store with a flood of list/fetch/delete or
+    /// repeated deposit attempts: without it, a single contact could keep the
+    /// holder busy and churn its disk at will, since per-item quotas alone do
+    /// not bound the *rate* of requests.
+    #[serde(default = "default_chat_custody_rate_burst")]
+    pub custody_rate_burst: usize,
+    /// Sustained custody requests accepted from one trusted contact per minute
+    /// once the burst above is spent (default 30). Over this rate a request is
+    /// answered with a refusal, not served, so a trusted contact that keeps
+    /// hammering list/fetch/delete/deposit is throttled instead of being able
+    /// to abuse the holder without bound.
+    #[serde(default = "default_chat_custody_rate_per_minute")]
+    pub custody_rate_per_minute: usize,
     /// Join a group at once when a trusted contact who administers it adds
     /// you (default on). Off: the invitation waits for an answer (Accept or
     /// Decline). Either way you can leave with one action, and an invitation
@@ -414,6 +430,13 @@ pub const DEFAULT_CHAT_CUSTODY_COPIES: usize = 2;
 pub const DEFAULT_CHAT_CUSTODY_MAX_TOTAL_BYTES: usize = 2 * 1024 * 1024;
 pub const DEFAULT_CHAT_CUSTODY_MAX_ITEMS: usize = 256;
 pub const DEFAULT_CHAT_CUSTODY_TTL_DAYS: u64 = 14;
+/// Burst of custody requests allowed from one contact. Matches the inbound
+/// message burst so an active contact fetching several waiting items at once
+/// is never falsely throttled, while a flood is still bounded.
+pub const DEFAULT_CHAT_CUSTODY_RATE_BURST: usize = 20;
+/// Sustained custody requests per minute from one contact. Matches the inbound
+/// message rate; enough for normal collect/deposit traffic, not for abuse.
+pub const DEFAULT_CHAT_CUSTODY_RATE_PER_MINUTE: usize = 30;
 
 fn default_chat_max_message_bytes() -> usize {
     DEFAULT_CHAT_MAX_MESSAGE_BYTES
@@ -433,6 +456,12 @@ fn default_chat_custody_max_items() -> usize {
 fn default_chat_custody_ttl_days() -> u64 {
     DEFAULT_CHAT_CUSTODY_TTL_DAYS
 }
+fn default_chat_custody_rate_burst() -> usize {
+    DEFAULT_CHAT_CUSTODY_RATE_BURST
+}
+fn default_chat_custody_rate_per_minute() -> usize {
+    DEFAULT_CHAT_CUSTODY_RATE_PER_MINUTE
+}
 
 impl Default for ChatConfig {
     fn default() -> Self {
@@ -448,6 +477,8 @@ impl Default for ChatConfig {
             custody_max_total_bytes: DEFAULT_CHAT_CUSTODY_MAX_TOTAL_BYTES,
             custody_max_items: DEFAULT_CHAT_CUSTODY_MAX_ITEMS,
             custody_ttl_days: DEFAULT_CHAT_CUSTODY_TTL_DAYS,
+            custody_rate_burst: DEFAULT_CHAT_CUSTODY_RATE_BURST,
+            custody_rate_per_minute: DEFAULT_CHAT_CUSTODY_RATE_PER_MINUTE,
             group_auto_join: true,
         }
     }

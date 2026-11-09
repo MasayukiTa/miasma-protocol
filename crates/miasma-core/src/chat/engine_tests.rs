@@ -556,3 +556,67 @@ fn a_text_record_with_fields_appended_by_a_newer_build_is_read() {
     assert_eq!(b.core.accept(&a.id(), &wire, 2).status, AckStatus::Stored);
     assert_eq!(b.texts(&a.id()), ["hello"]);
 }
+
+#[test]
+fn notice_dispatch_preserves_plain_text_and_deduplicates() {
+    use super::{file_notice::notice_to_text, proto::FileDepositNotice};
+    use std::cell::RefCell;
+
+    let a = side();
+    let b = side();
+    let received = RefCell::new(Vec::new());
+    let notice = FileDepositNotice {
+        file_key: [1; 32],
+        salt: [2; 16],
+        manifest_id: [3; 16],
+        holders: vec![[4; 32]],
+        file_name: "example.bin".into(),
+        size: 5,
+        sha256: [6; 32],
+    };
+    // The notice travels as an ordinary sealed chat message whose text is the
+    // encoded notice. `seal_for` is used directly so the test does not depend
+    // on a protected (hybrid) session, which `prepare_wire` requires for a
+    // notice but which is never present in a build without the `pqc` feature.
+    let notice_plain = super::proto::Message {
+        id: rand::random(),
+        seq: 1,
+        sent_ms: 1_700_000_000_000,
+        text: notice_to_text(&notice),
+    }
+    .encode()
+    .unwrap();
+    let (wire, _) = a.core.seal_for(&b.id(), &notice_plain).unwrap();
+    let dispatch = |n| received.borrow_mut().push(n);
+    assert_eq!(
+        b.core
+            .accept_with_notice(&a.id(), &wire, 5, None, &dispatch)
+            .status,
+        AckStatus::Stored
+    );
+    assert!(b.texts(&a.id()).is_empty());
+    assert!(received.borrow().as_slice() == [notice]);
+    assert_eq!(
+        b.core
+            .accept_with_notice(&a.id(), &wire, 6, None, &dispatch)
+            .status,
+        AckStatus::Duplicate
+    );
+    assert_eq!(received.borrow().len(), 1);
+    let text_plain = super::proto::Message {
+        id: rand::random(),
+        seq: 2,
+        sent_ms: 1_700_000_000_001,
+        text: "ordinary text".into(),
+    }
+    .encode()
+    .unwrap();
+    let (wire, _) = a.core.seal_for(&b.id(), &text_plain).unwrap();
+    assert_eq!(
+        b.core
+            .accept_with_notice(&a.id(), &wire, 9, None, &dispatch)
+            .status,
+        AckStatus::Stored
+    );
+    assert_eq!(b.texts(&a.id()), vec!["ordinary text"]);
+}

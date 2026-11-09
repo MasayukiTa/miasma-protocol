@@ -20,6 +20,7 @@ miasma-core/src/daemon/mod.rs | 2 | streaming decrypted retrieval to a caller-ch
 miasma-core/src/logging/diag.rs | 4 | opt-in diagnostic log files: lg folder, rotation, zero-overwrite of removed files
 miasma-core/src/directed/inbox.rs | 4 | directed/ folders including the v2 incoming and outgoing dirs (the envelope and sidecar files themselves are written through state_crypto)
 miasma-core/src/push/file_holder.rs | 2 | disk-backed custody directory and ciphertext item files
+miasma-core/src/push/receive_offline.rs | 3 | offline inbox directory, verified temporary file, and completed manifest list
 miasma-core/src/push/service.rs | 4 | push inbox: .part files and final placement
 miasma-core/src/push/store.rs | 2 | setting an unreadable contacts file aside (contents are written through state_crypto)
 miasma-core/src/secure_file.rs | 11 | restricted-permission write primitives used by the stores, the plain atomic_write temp+rename primitive config.rs routes non-secret and version-stamp writes through, and the atomic_write_new temp+link no-clobber primitive the recovery backup export routes through
