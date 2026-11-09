@@ -105,6 +105,14 @@ jobs:
       - name: Test offline file deposit via holders
         run: cargo test -p miasma-core --locked --test push_offline_deposit_test
 
+      # Offline file delivery end-to-end: a sender deposits a multi-chunk file
+      # into a holder and goes offline, and a recipient that starts later
+      # receives the notice through the chat receive path and fetches the
+      # verified file. Named here so a regression fails this job by name.
+      # Platform-neutral (no network, no feature flags).
+      - name: Test offline file delivery end-to-end
+        run: cargo test -p miasma-core --locked --test push_offline_e2e_test
+
   test-core-pqc:
     name: Core Tests, opt-in hybrid feature (Ubuntu)
     runs-on: ubuntu-24.04
