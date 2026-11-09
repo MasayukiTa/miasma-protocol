@@ -114,7 +114,7 @@ fn mark_done(dir: &Path, id: &[u8; 16]) -> std::io::Result<()> {
 }
 
 /// Run a verified fetch away from the async receive loop. Duplicate manifest IDs
-/// are ignored for the lifetime of this process, including failed attempts.
+/// are ignored while an attempt is running.
 pub fn spawn_fetch(
     transport: std::sync::Arc<dyn MailboxTransport + Send + Sync>,
     recipient: [u8; 32],
@@ -131,16 +131,49 @@ pub fn spawn_fetch(
         return None;
     }
     Some(tokio::spawn(async move {
-        tokio::task::spawn_blocking(move || {
-            if is_done(&dir, &notice.manifest_id)? {
-                return Err(ReceiveError::AlreadyReceived);
+        let id = notice.manifest_id;
+        let started = tokio::time::Instant::now();
+        let policy = super::retry::RetryPolicy {
+            window: Some(std::time::Duration::from_secs(7 * 86400)),
+            ..Default::default()
+        };
+        let mut failures = 0u32;
+        let result = loop {
+            let transport = transport.clone();
+            let notice = notice.clone();
+            let dir = dir.clone();
+            let current_ms =
+                now_ms.saturating_add(started.elapsed().as_millis().min(u64::MAX as u128) as u64);
+            let result = tokio::task::spawn_blocking(move || {
+                if is_done(&dir, &notice.manifest_id)? {
+                    return Err(ReceiveError::AlreadyReceived);
+                }
+                let path =
+                    fetch_verified(transport.as_ref(), &recipient, &notice, &dir, current_ms)?;
+                mark_done(&dir, &notice.manifest_id)?;
+                Ok(path)
+            })
+            .await
+            .unwrap_or_else(|e| Err(ReceiveError::Io(std::io::Error::other(e))));
+            if !matches!(
+                result,
+                Err(ReceiveError::Fetch(
+                    DepositError::NoManifest | DepositError::MissingChunk
+                ))
+            ) || policy.exhausted(started.elapsed())
+            {
+                break result;
             }
-            let path = fetch_verified(transport.as_ref(), &recipient, &notice, &dir, now_ms)?;
-            mark_done(&dir, &notice.manifest_id)?;
-            Ok(path)
-        })
-        .await
-        .unwrap_or_else(|e| Err(ReceiveError::Io(std::io::Error::other(e))))
+            failures = failures.saturating_add(1);
+            let remaining =
+                std::time::Duration::from_secs(7 * 86400).saturating_sub(started.elapsed());
+            tokio::time::sleep(policy.delay(failures, rand::random()).min(remaining)).await;
+            if policy.exhausted(started.elapsed()) {
+                break result;
+            }
+        };
+        FETCHED.get().unwrap().lock().unwrap().remove(&id);
+        result
     }))
 }
 
@@ -209,6 +242,6 @@ mod tests {
             first.await.unwrap(),
             Err(ReceiveError::InvalidNotice)
         ));
-        assert!(call().is_none());
+        assert!(call().is_some());
     }
 }
