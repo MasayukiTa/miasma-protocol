@@ -14,6 +14,7 @@ miasma-bridge/src/index.rs | 1 | append-only BitTorrent info-hash to MID table
 miasma-bridge/src/main.rs | 1 | bridge data dir creation (log setup lives in miasma-core logging)
 miasma-bridge/src/torrent.rs | 1 | torrent download directory creation
 miasma-cli/src/main.rs | 5 | data dir creation, -o output, directed retrieve save, netcheck --out report (path given by the user)
+miasma-core/src/chat/push_offline_e2e_test.rs | 1 | test only: corrupts one stored chunk in a temp dir to prove tampering is rejected
 miasma-core/src/config.rs | 4 | config.toml and version stamp writers
 miasma-core/src/daemon/ipc.rs | 2 | daemon.port and daemon.http discovery files
 miasma-core/src/daemon/mod.rs | 2 | streaming decrypted retrieval to a caller-chosen output path
