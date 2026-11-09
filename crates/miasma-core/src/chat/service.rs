@@ -36,6 +36,7 @@ use super::{
     activity::ChatActivity,
     crypto::Identity,
     engine::{now_ms, ChatCore, EnqueueError, MarkOutcome, PrepareError},
+    file_notice::notice_to_text,
     outbox::{OutKind, Outbox},
     proto::{
         self, fail, Ack, AckStatus, Frame, CLOSE_BAD_REQUEST, CLOSE_NOT_ALLOWED, CLOSE_OK,
@@ -555,6 +556,15 @@ impl ChatService {
         let id = self.core.enqueue(&peer, text, now_ms())?;
         self.kick(&peer);
         Ok(id)
+    }
+
+    /// Queue a file deposit notice as an ordinary chat message.
+    pub fn send_file_notice(
+        self: &Arc<Self>,
+        contact: &Contact,
+        n: &proto::FileDepositNotice,
+    ) -> Result<[u8; 16], EnqueueError> {
+        self.send(contact, &notice_to_text(n))
     }
 
     /// The person is looking at the conversation with `contact` and has seen
