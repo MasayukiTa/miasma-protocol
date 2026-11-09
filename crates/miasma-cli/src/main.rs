@@ -874,6 +874,7 @@ fn cmd_init(
             bootstrap_peers: vec![],
         },
         transport: Default::default(),
+        discovery: Default::default(),
         push: Default::default(),
         chat: Default::default(),
         privacy: Default::default(),
@@ -2007,6 +2008,8 @@ fn cmd_config_loaded(
                     println!("{}", config.update.local_build_dir.as_deref().unwrap_or(""))
                 }
                 "network.listen_addr" => println!("{}", config.network.listen_addr),
+                "discovery.enabled" => println!("{}", config.discovery.enabled),
+                "discovery.announce" => println!("{}", config.discovery.announce),
                 "network.bootstrap_peers" => {
                     for peer in &config.network.bootstrap_peers {
                         println!("{peer}");
@@ -2167,6 +2170,12 @@ fn cmd_config_loaded(
                 }
                 "network.listen_addr" => {
                     config.network.listen_addr = v.into();
+                }
+                "discovery.enabled" => {
+                    config.discovery.enabled = v.parse().context("expected bool")?
+                }
+                "discovery.announce" => {
+                    config.discovery.announce = v.parse().context("expected bool")?
                 }
                 "network.bootstrap_peers" => {
                     if v.is_empty() {
