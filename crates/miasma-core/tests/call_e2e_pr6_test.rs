@@ -227,6 +227,41 @@ async fn ringing_token(b: &Peer) -> u64 {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn dial_prepares_session_for_contacts_added_after_start() {
+    timeout(Duration::from_secs(120), async {
+        let relay = relay().await;
+        let (a, b) = (peer(&relay).await, peer(&relay).await);
+        register(&a, b.id(), "bob");
+        register(&b, a.id(), "alice");
+
+        assert!(matches!(
+            call(&a, CallRequest::Dial { contact: "bob".into() }),
+            CallResponse::Error(reason) if reason == "not_ready"
+        ));
+        until(60, "hybrid session after the first dial", || {
+            pqc_hybrid(&a, &b.id()) && pqc_hybrid(&b, &a.id())
+        })
+        .await;
+        assert!(matches!(
+            call(
+                &a,
+                CallRequest::Dial {
+                    contact: "bob".into()
+                }
+            ),
+            CallResponse::Ok
+        ));
+        ringing_token(&b).await;
+        a.svc.shutdown();
+        b.svc.shutdown();
+        a.node.shutdown().await;
+        b.node.shutdown().await;
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn dial_accept_reaches_connected_and_media_flows() {
     timeout(Duration::from_secs(120), async {
         let relay = relay().await;
