@@ -4,8 +4,8 @@
 //! (a `DiskFileCustody` file store), puts the resulting `FileDepositNotice`
 //! inside an ordinary chat text message, and then leaves. A recipient that
 //! starts only afterwards receives that chat message through the real chat
-//! receive path, recovers the notice from the message text exactly as the chat
-//! engine does, runs the verified fetch, and ends up with a file whose bytes
+//! receive path, captures the notice dispatched by the chat engine, runs the
+//! verified fetch, and ends up with a file whose bytes
 //! equal the original. The holder's items are then cleared and no partial file
 //! is left behind.
 //!
@@ -17,6 +17,9 @@
 //! Keys and salts are random in every test: a hard-coded salt or key array is
 //! both unrealistic and flagged by CodeQL, so none appears here.
 
+use crate as miasma_core;
+
+use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -25,12 +28,12 @@ use tempfile::TempDir;
 
 use miasma_core::chat::crypto::Identity;
 use miasma_core::chat::engine::ChatCore;
-use miasma_core::chat::file_notice::{notice_to_text, text_to_notice};
+use miasma_core::chat::file_notice::notice_to_text;
 use miasma_core::chat::mailbox::client::{MailboxError, MailboxTransport};
 use miasma_core::chat::mailbox::holder::{CustodyStore, DepositOutcome};
 use miasma_core::chat::mailbox::ids::{ItemId, RecipientTag};
 use miasma_core::chat::outbox::Outbox;
-use miasma_core::chat::proto::{AckStatus, FileDepositNotice};
+use miasma_core::chat::proto::{AckStatus, FileDepositNotice, Message};
 use miasma_core::chat::store::{ChatStore, StoreSettings};
 use miasma_core::push::deposit::{self, deposit_file, DepositReceipt};
 use miasma_core::push::file_holder::{DiskFileCustody, FileCustodyLimits};
@@ -221,38 +224,43 @@ fn sender_deposits_and_leaves_then_recipient_receives_through_chat() {
         assert_eq!(receipt.held_by, vec![holder_id]);
         assert!(receipt.manifest.chunks >= 3);
         let notice = notice_from_receipt(&receipt, salt, "report.bin");
-        let text = notice_to_text(&notice);
+        let message = Message {
+            id: rand::random(),
+            seq: 1,
+            sent_ms: 1_000,
+            text: notice_to_text(&notice),
+        }
+        .encode()
+        .expect("encode the notice message");
         let (wire, _id) = sender_chat
             .core
-            .seal_for(&recipient.id(), text.as_bytes())
+            .seal_for(&recipient.id(), &message)
             .expect("seal the notice message for the recipient");
         (wire, file.clone())
         // tx, sender_chat and the receipt are dropped here: the sender is gone.
     };
     drop(sender_chat);
 
-    // Later, the recipient starts and accepts the sealed chat message through
-    // the real receive path.
+    // Later, the recipient accepts the sealed chat message and captures the
+    // authenticated notice dispatched by the same path the service uses.
+    let dispatched = RefCell::new(Vec::new());
     assert_eq!(
         recipient_chat
             .core
-            .accept(&sender.id(), &wire, 2_000)
+            .accept_with_notice(&sender.id(), &wire, 2_000, None, &|notice| {
+                dispatched.borrow_mut().push(notice);
+            })
             .status,
         AckStatus::Stored
     );
 
-    // The notice is recovered from the received chat text exactly as the chat
-    // engine recovers it on the receive path.
-    let texts: Vec<String> = recipient_chat
+    let mut notices = dispatched.into_inner();
+    assert_eq!(notices.len(), 1, "one file deposit notice is dispatched");
+    let notice = notices.pop().unwrap();
+    assert!(recipient_chat
         .core
         .history(&sender.id(), None, 50)
-        .into_iter()
-        .map(|m| m.text)
-        .collect();
-    let notice = texts
-        .iter()
-        .find_map(|t| text_to_notice(t))
-        .expect("the received chat message carries a file deposit notice");
+        .is_empty());
 
     // The verified fetch places the file; its bytes equal the original.
     let rx = Node {
