@@ -1,9 +1,11 @@
 //! Verified, bounded-memory reconstruction of an offline file deposit.
 
 use std::{
+    collections::HashSet,
     fs,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
 };
 
 use sha2::{Digest, Sha256};
@@ -87,19 +89,99 @@ pub fn fetch_verified(
     Ok(place_without_overwrite(&part.0, dir, &name)?)
 }
 
-/// Run a verified fetch away from the async receive loop.
+static FETCHED: OnceLock<Mutex<HashSet<[u8; 16]>>> = OnceLock::new();
+
+/// Run a verified fetch away from the async receive loop. Duplicate manifest IDs
+/// are ignored for the lifetime of this process, including failed attempts.
 pub fn spawn_fetch(
     transport: std::sync::Arc<dyn MailboxTransport + Send + Sync>,
     recipient: [u8; 32],
     notice: FileDepositNotice,
     dir: PathBuf,
     now_ms: u64,
-) -> tokio::task::JoinHandle<Result<PathBuf, ReceiveError>> {
-    tokio::spawn(async move {
+) -> Option<tokio::task::JoinHandle<Result<PathBuf, ReceiveError>>> {
+    if !FETCHED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(notice.manifest_id)
+    {
+        return None;
+    }
+    Some(tokio::spawn(async move {
         tokio::task::spawn_blocking(move || {
             fetch_verified(transport.as_ref(), &recipient, &notice, &dir, now_ms)
         })
         .await
         .unwrap_or_else(|e| Err(ReceiveError::Io(std::io::Error::other(e))))
-    })
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chat::mailbox::{
+        client::MailboxError,
+        holder::DepositOutcome,
+        ids::{ItemId, RecipientTag},
+    };
+    use std::sync::Arc;
+
+    struct UnusedTransport;
+    impl MailboxTransport for UnusedTransport {
+        fn deposit(
+            &self,
+            _: &[u8; 32],
+            _: RecipientTag,
+            _: ItemId,
+            _: &[u8],
+            _: u64,
+        ) -> Result<DepositOutcome, MailboxError> {
+            unreachable!()
+        }
+        fn list(&self, _: &[u8; 32], _: RecipientTag, _: u64) -> Result<Vec<ItemId>, MailboxError> {
+            unreachable!()
+        }
+        fn fetch(
+            &self,
+            _: &[u8; 32],
+            _: RecipientTag,
+            _: ItemId,
+            _: u64,
+        ) -> Result<Option<Vec<u8>>, MailboxError> {
+            unreachable!()
+        }
+        fn delete(&self, _: &[u8; 32], _: RecipientTag, _: ItemId) -> Result<bool, MailboxError> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_is_ignored_while_running_and_after_completion() {
+        let notice = FileDepositNotice {
+            file_key: [0; 32],
+            salt: [0; 16],
+            manifest_id: [255; 16],
+            holders: vec![],
+            file_name: "test".into(),
+            size: 0,
+            sha256: [0; 32],
+        };
+        let call = || {
+            spawn_fetch(
+                Arc::new(UnusedTransport),
+                [0; 32],
+                notice.clone(),
+                PathBuf::new(),
+                0,
+            )
+        };
+        let first = call().expect("first fetch starts");
+        assert!(call().is_none());
+        assert!(matches!(
+            first.await.unwrap(),
+            Err(ReceiveError::InvalidNotice)
+        ));
+        assert!(call().is_none());
+    }
 }

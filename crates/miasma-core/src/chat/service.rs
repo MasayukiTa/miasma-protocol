@@ -106,6 +106,8 @@ pub struct ChatSettings {
     /// Where the record of the last session files written is kept, outside
     /// the data folder. `None` keeps only marks in memory.
     pub anchor_dir: Option<PathBuf>,
+    /// Inbox root for verified offline file deliveries.
+    pub offline_inbox_dir: Option<PathBuf>,
 }
 
 impl Default for ChatSettings {
@@ -134,6 +136,7 @@ impl Default for ChatSettings {
             // `privacy.pqc_mode` (default `prefer`) when it starts.
             pqc_mode: PqcMode::Off,
             anchor_dir: None,
+            offline_inbox_dir: None,
         }
     }
 }
@@ -247,6 +250,7 @@ pub fn start_for_daemon(
         custody_copies: cfg.chat.custody_copies.clamp(1, 8),
         pqc_mode: cfg.privacy.pqc_mode(),
         anchor_dir: crate::paths::anchor_dir(data_dir),
+        offline_inbox_dir: Some(cfg.push.resolved_inbox(data_dir)),
         ..ChatSettings::default()
     };
     // Only a value somebody set is worth a warning; the default is not a request.
@@ -1109,6 +1113,27 @@ impl ChatService {
         rep.held_by.len()
     }
 
+    fn receive_file_notice(&self, peer: [u8; 32], notice: proto::FileDepositNotice) {
+        let Some(contact) = self.contacts.by_endpoint(&peer).filter(|c| c.allow_receive) else {
+            return;
+        };
+        let Some(inbox) = &self.settings.offline_inbox_dir else {
+            return;
+        };
+        let leaf = crate::transfer::manifest::sanitize_file_name(&contact.label)
+            .unwrap_or_else(|| "contact".to_owned());
+        let transport = Arc::new(super::mailbox::transport::ChatMailboxTransport::for_files(
+            self.node.clone(),
+        ));
+        let _ = crate::push::receive_offline::spawn_fetch(
+            transport,
+            self.core.own_id(),
+            notice,
+            inbox.join(leaf),
+            now_ms(),
+        );
+    }
+
     /// Collect from trusted holders whatever waits for us, applying each item
     /// once as a direct delivery. Does nothing when custody is off.
     fn collect_from_holders(&self) {
@@ -1131,7 +1156,14 @@ impl ChatService {
         let me = self.core.own_id();
         let core = self.core.clone();
         let rep = client.collect(&holders, &me, now_ms(), |sender, wire| {
-            core.accept(sender, wire, now_ms()).status.is_delivered()
+            if !self.contact_may_write(sender) {
+                return false;
+            }
+            core.accept_with_notice(sender, wire, now_ms(), None, &|notice| {
+                self.receive_file_notice(*sender, notice);
+            })
+            .status
+            .is_delivered()
         });
         if rep.taken > 0 {
             debug!("collected {} message(s) from holders", rep.taken);
@@ -1336,19 +1368,31 @@ impl ChatService {
                 // Cipher and disk work off the async threads.
                 #[cfg(feature = "pqc")]
                 let sink = self.call_sink.lock().ok().and_then(|s| s.clone());
-                #[cfg(feature = "pqc")]
-                let contacts = self.contacts.clone();
+                let service = self.clone();
                 match tokio::task::spawn_blocking(move || {
                     #[cfg(feature = "pqc")]
                     if let Some(sink) = sink {
                         let now = now_ms();
-                        return core.accept_with_call(&remote, &w, now, &|body| {
-                            let allowed =
-                                matches!(contacts.by_endpoint(&remote), Some(c) if c.allow_receive);
-                            super::call::inbound::dispatch(&sink, remote, allowed, body, now_ms());
-                        });
+                        return core.accept_with_notice(
+                            &remote,
+                            &w,
+                            now,
+                            Some(&|body| {
+                                let allowed = service.contact_may_write(&remote);
+                                super::call::inbound::dispatch(
+                                    &sink,
+                                    remote,
+                                    allowed,
+                                    body,
+                                    now_ms(),
+                                );
+                            }),
+                            &|notice| service.receive_file_notice(remote, notice),
+                        );
                     }
-                    core.accept(&remote, &w, now_ms())
+                    core.accept_with_notice(&remote, &w, now_ms(), None, &|notice| {
+                        service.receive_file_notice(remote, notice);
+                    })
                 })
                 .await
                 {
