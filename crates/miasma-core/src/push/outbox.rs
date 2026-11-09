@@ -21,6 +21,15 @@ use tracing::warn;
 
 use crate::state_crypto::{self, Label, LogReader, LogRewrite, LogWriter, StateKeys};
 
+/// Durable identity and source of an in-progress remote deposit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DepositIntent {
+    pub file_key: [u8; 32],
+    pub salt: [u8; 16],
+    pub path: String,
+    pub size: u64,
+}
+
 /// One file queued for a contact, as it is stored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutJob {
@@ -50,6 +59,8 @@ pub struct OutJob {
     /// Encoded notice, stored only inside the encrypted queue.
     #[serde(default)]
     pub deposit_notice: Option<Vec<u8>>,
+    #[serde(default)]
+    pub deposit_intent: Option<DepositIntent>,
     pub created_at_ms: u64,
 }
 
@@ -313,6 +324,7 @@ mod tests {
             attempt: 0,
             notice_id: None,
             deposit_notice: None,
+            deposit_intent: None,
             created_at_ms: i as u64,
         }
     }
@@ -322,6 +334,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut j = job(1);
         j.deposit_notice = Some(vec![9; 96]);
+        j.deposit_intent = Some(DepositIntent {
+            file_key: [42; 32],
+            salt: [24; 16],
+            path: j.path.clone(),
+            size: j.size,
+        });
         {
             let ob = Outbox::open(dir.path());
             ob.put_checked(&j, true).unwrap();
@@ -329,6 +347,7 @@ mod tests {
         let ob = Outbox::open(dir.path());
         let restored = ob.get(&j.id).unwrap();
         assert_eq!(restored.deposit_notice, j.deposit_notice);
+        assert_eq!(restored.deposit_intent, j.deposit_intent);
         assert_eq!(restored.notice_id, None);
         let raw = std::fs::read(crate::paths::PUSH_OUTBOX.in_dir(dir.path())).unwrap();
         assert!(!raw.windows(32).any(|w| w == [9; 32]));

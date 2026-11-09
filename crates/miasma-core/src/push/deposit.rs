@@ -284,13 +284,30 @@ pub fn deposit_file<R: std::io::Read>(
     holders: &[[u8; 32]],
     recipient: &[u8; 32],
     salt: [u8; 16],
+    src: R,
+    now_ms: u64,
+    threshold: usize,
+) -> Result<DepositReceipt, DepositError> {
+    let mut file_key = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut file_key);
+    deposit_file_with_key(
+        transport, holders, recipient, file_key, salt, src, now_ms, threshold,
+    )
+}
+
+/// Deposit using a previously persisted key and salt, allowing identical retries.
+#[allow(clippy::too_many_arguments)]
+pub fn deposit_file_with_key<R: std::io::Read>(
+    transport: &dyn MailboxTransport,
+    holders: &[[u8; 32]],
+    recipient: &[u8; 32],
+    file_key: [u8; 32],
+    salt: [u8; 16],
     mut src: R,
     now_ms: u64,
     threshold: usize,
 ) -> Result<DepositReceipt, DepositError> {
     let needed = threshold.max(1);
-    let mut file_key = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut file_key);
     let fk = FileKey::derive(&file_key, &salt);
     let tag = RecipientTag::for_recipient(recipient);
 
@@ -637,6 +654,44 @@ mod tests {
         .expect("recipient fetches after the sender left");
         assert_eq!(out, file);
         assert_eq!(m.file_hash, receipt.manifest.file_hash);
+    }
+
+    #[test]
+    fn retry_with_saved_key_and_salt_reuses_items() {
+        let (sender, recipient) = ids();
+        let holder = [7u8; 32];
+        let store = file_holder(sender.id(), recipient.id());
+        let tx = InProcess {
+            holders: vec![(holder, store.clone())],
+            who: sender.id(),
+        };
+        let key = [42; 32];
+        let salt = [24; 16];
+        let first = deposit_file_with_key(
+            &tx,
+            &[holder],
+            &recipient.id(),
+            key,
+            salt,
+            &b"file"[..],
+            0,
+            1,
+        )
+        .unwrap();
+        let second = deposit_file_with_key(
+            &tx,
+            &[holder],
+            &recipient.id(),
+            key,
+            salt,
+            &b"file"[..],
+            1,
+            1,
+        )
+        .unwrap();
+        assert_eq!(first.file_key, second.file_key);
+        assert_eq!(first.manifest_id, second.manifest_id);
+        assert_eq!(store.stats().items, 2);
     }
 
     #[test]

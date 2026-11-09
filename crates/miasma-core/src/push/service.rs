@@ -683,6 +683,7 @@ impl PushService {
             attempt: 0,
             notice_id: None,
             deposit_notice: None,
+            deposit_intent: None,
             created_at_ms: now_ms(),
         };
         self.outbox.put(&rec, true);
@@ -1112,13 +1113,32 @@ impl PushService {
                 .ok_or("invalid file name")?
                 .to_owned();
             let threshold = self.settings.offline_deposit_threshold;
-            let salt: [u8; 16] = rand::random();
+            if rec.deposit_intent.is_none() {
+                rec.deposit_intent = Some(super::outbox::DepositIntent {
+                    file_key: rand::random(),
+                    salt: rand::random(),
+                    path: rec.path.clone(),
+                    size: rec.size,
+                });
+            }
+            let intent = rec
+                .deposit_intent
+                .as_ref()
+                .ok_or("deposit intent missing")?;
+            if intent.path != rec.path || intent.size != rec.size || path != Path::new(&intent.path)
+            {
+                return Err("deposit source changed".into());
+            }
+            let file_key = intent.file_key;
+            let salt = intent.salt;
+            self.outbox.put_checked(rec, true)?;
             let receipt = tokio::task::spawn_blocking(move || {
                 let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
-                super::deposit::deposit_file(
+                super::deposit::deposit_file_with_key(
                     &transport,
                     &holders,
                     &peer,
+                    file_key,
                     salt,
                     file,
                     now_ms(),

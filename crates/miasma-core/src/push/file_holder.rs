@@ -240,8 +240,14 @@ impl CustodyStore for DiskFileCustody {
         let mut g = self.inner.lock().unwrap();
         g.sweep(now_ms);
         let key = (tag, item);
-        if g.items.contains_key(&key) {
-            return Ok(DepositOutcome::Duplicate);
+        if let Some(existing) = g.items.get(&key) {
+            return if existing.from == *who
+                && fs::read(&existing.path).ok().as_deref() == Some(blob)
+            {
+                Ok(DepositOutcome::Duplicate)
+            } else {
+                Err(CustodyError::Full)
+            };
         }
         let blen = blob.len() as u64;
         let (n, b) = g.per_depositor.get(who).copied().unwrap_or((0, 0));

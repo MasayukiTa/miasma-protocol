@@ -88,6 +88,7 @@ fn job(i: usize) -> OutJob {
         attempt: 0,
         notice_id: None,
         deposit_notice: None,
+        deposit_intent: None,
         created_at_ms: i as u64,
     }
 }
