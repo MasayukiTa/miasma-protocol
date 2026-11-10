@@ -464,7 +464,9 @@ pub const DEFAULT_CHAT_CUSTODY_TTL_DAYS: u64 = 14;
 /// Burst of custody requests allowed from one contact. Matches the inbound
 /// message burst so an active contact fetching several waiting items at once
 /// is never falsely throttled, while a flood is still bounded.
-pub const DEFAULT_CHAT_CUSTODY_RATE_BURST: usize = 20;
+// 64 MiB / 16 KiB = 4,096 chunk requests, plus one manifest.
+// The per-minute rate bounds sustained custody request floods after the burst.
+pub const DEFAULT_CHAT_CUSTODY_RATE_BURST: usize = 4_097;
 /// Sustained custody requests per minute from one contact. Matches the inbound
 /// message rate; enough for normal collect/deposit traffic, not for abuse.
 pub const DEFAULT_CHAT_CUSTODY_RATE_PER_MINUTE: usize = 30;

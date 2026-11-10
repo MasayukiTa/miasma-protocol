@@ -400,10 +400,27 @@ fn deposit_one(
     // leaving the operator to guess.
     let mut last_refusal: Option<CustodyError> = None;
     for h in surviving.iter() {
-        match transport.deposit(h, tag, id, blob, now_ms) {
-            Ok(DepositOutcome::Stored) | Ok(DepositOutcome::Duplicate) => kept.push(*h),
-            Err(MailboxError::Unreachable) => {}
-            Err(MailboxError::Refused(e)) => last_refusal = Some(e),
+        let mut delay_ms = 1_000u64;
+        loop {
+            match transport.deposit(h, tag, id, blob, now_ms) {
+                Ok(DepositOutcome::Stored) | Ok(DepositOutcome::Duplicate) => {
+                    kept.push(*h);
+                    break;
+                }
+                Err(MailboxError::Refused(CustodyError::RateLimited)) => {
+                    // The default bucket refills one request every two seconds.
+                    let jitter = u64::from(rand::random::<u16>()) % 501;
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        (delay_ms + jitter).min(5_000),
+                    ));
+                    delay_ms = (delay_ms * 2).min(4_500);
+                }
+                Err(MailboxError::Unreachable) => break,
+                Err(MailboxError::Refused(e)) => {
+                    last_refusal = Some(e);
+                    break;
+                }
+            }
         }
     }
     if kept.len() < needed {
