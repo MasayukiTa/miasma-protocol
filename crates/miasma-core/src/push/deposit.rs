@@ -404,6 +404,7 @@ fn deposit_one(
     let mut last_refusal: Option<CustodyError> = None;
     for h in surviving.iter() {
         let mut delay_ms = 1_000u64;
+        let mut rate_limit_retries = 0;
         loop {
             match transport.deposit(h, tag, id, blob, now_ms) {
                 Ok(DepositOutcome::Stored) | Ok(DepositOutcome::Duplicate) => {
@@ -411,6 +412,11 @@ fn deposit_one(
                     break;
                 }
                 Err(MailboxError::Refused(CustodyError::RateLimited)) => {
+                    last_refusal = Some(CustodyError::RateLimited);
+                    if rate_limit_retries == 3 {
+                        break;
+                    }
+                    rate_limit_retries += 1;
                     // The default bucket refills one request every two seconds.
                     let jitter = u64::from(rand::random::<u16>()) % 501;
                     std::thread::sleep(std::time::Duration::from_millis(
@@ -707,6 +713,33 @@ mod tests {
         .unwrap();
         assert_eq!(receipt.manifest.chunks, 21);
         assert_eq!(receipt.held_by, vec![holder]);
+    }
+    #[test]
+    fn persistent_rate_limit_is_reported_as_a_refusal() {
+        let sender = Identity::from_seed(&rand::random());
+        let recipient = Identity::from_seed(&rand::random());
+        let holder = rand::random();
+        let tx = Limited {
+            inner: InProcess {
+                holders: vec![(holder, file_holder(sender.id(), recipient.id()))],
+                who: sender.id(),
+            },
+            remaining: std::sync::atomic::AtomicUsize::new(4),
+        };
+        let error = deposit_file(
+            &tx,
+            &[holder],
+            &recipient.id(),
+            rand::random(),
+            &b"data"[..],
+            0,
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            DepositError::HolderRefused(CustodyError::RateLimited)
+        );
     }
     /// A custody store with room for a whole small file (the chat defaults are
     /// sized for single messages, not files). The hard ceilings still apply.
