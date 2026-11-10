@@ -44,6 +44,12 @@ pub struct NodeConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustodyConfig {
+    /// Whether this node holds custody deposits from peers that are not
+    /// contacts. The owner decided open deposits are ON BY DEFAULT: a missing
+    /// or `[custody]`-less config, the `Default` impl below, and the serde
+    /// `default_true` all resolve to `true`, so an unknown peer can deposit
+    /// (within the per-identity and class-wide quotas) without any explicit
+    /// opt-in. Set this to `false` to accept deposits from contacts only.
     #[serde(default = "default_true")]
     pub accept_unknown_depositors: bool,
 }
