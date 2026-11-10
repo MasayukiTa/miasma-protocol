@@ -3016,7 +3016,8 @@ mod tests {
         assert_eq!(
             svc.try_offline_deposit(&contact, &path, &mut rec)
                 .await
-                .unwrap_err(),
+                .unwrap_err()
+                .message,
             "no chat service"
         );
         assert!(svc.outbox.get(&rec.id).is_some());
@@ -3074,7 +3075,8 @@ mod tests {
         assert_eq!(
             svc.try_offline_deposit(&contact, &path, &mut rec)
                 .await
-                .unwrap_err(),
+                .unwrap_err()
+                .message,
             "no chat service"
         );
         let stored = svc.outbox.get(&rec.id).unwrap();
@@ -3140,7 +3142,8 @@ mod tests {
         assert_eq!(
             svc.try_offline_deposit(&contact, &path, &mut rec)
                 .await
-                .unwrap_err(),
+                .unwrap_err()
+                .message,
             "no chat service"
         );
         let stored = svc.outbox.get(&rec.id).unwrap();
