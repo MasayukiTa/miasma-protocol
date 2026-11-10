@@ -961,8 +961,20 @@ mod tests {
         let (sender, recipient) = ids();
         let holder = rand::random();
         let store = file_holder(rand::random(), recipient.id());
-        let tx = InProcess { holders: vec![(holder, store)], who: sender.id() };
-        let err = deposit_file(&tx, &[holder], &recipient.id(), rand::random(), &b"data"[..], 0, 1).unwrap_err();
+        let tx = InProcess {
+            holders: vec![(holder, store)],
+            who: sender.id(),
+        };
+        let err = deposit_file(
+            &tx,
+            &[holder],
+            &recipient.id(),
+            rand::random(),
+            &b"data"[..],
+            0,
+            1,
+        )
+        .unwrap_err();
         assert_eq!(err, DepositError::HolderRefused(CustodyError::NotTrusted));
     }
 

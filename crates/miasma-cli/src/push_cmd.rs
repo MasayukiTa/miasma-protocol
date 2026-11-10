@@ -620,7 +620,11 @@ fn waiting_note(t: &PushTransferInfo, now_ms: u64) -> Option<String> {
         } else {
             ". Paused: this computer is not connected to a relay server"
         });
-    } else if let Some(reason) = t.error.as_deref().filter(|e| e.starts_with("holder refused the deposit:")) {
+    } else if let Some(reason) = t
+        .error
+        .as_deref()
+        .filter(|e| e.starts_with("holder refused the deposit:"))
+    {
         s.push_str(&format!(". {reason}"));
     } else if t.error_kind.as_deref() == Some("unreachable") {
         s.push_str(if ja {
