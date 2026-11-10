@@ -264,12 +264,34 @@ impl CustodyStore for DiskFileCustody {
         let (n, b) = g.per_depositor.get(who).copied().unwrap_or((0, 0));
         if n + 1 > self.limits.max_items_per_depositor
             || b + blen > self.limits.max_bytes_per_depositor
-            // Sixteen items prevent an unknown peer from exhausting item slots.
+            // Sixteen items prevent a single unknown peer from exhausting item
+            // slots on its own. The per-identity cap alone is not enough: an
+            // attacker can mint many free endpoint identities, each staying
+            // under its own quota, and fill the store between them (Sybil).
             || (!known && n + 1 > 16)
-            // One eighth reserves space for other depositors.
+            // One eighth caps a single unknown peer's bytes; the class-wide cap
+            // below is what actually bounds the Sybil case.
             || (!known && b + blen > self.limits.max_total_bytes / 8)
         {
             return Err(CustodyError::DepositorBudget);
+        }
+        // Class-wide cap for the whole unknown (non-contact) depositor set.
+        // Per-identity quotas do not bound a Sybil flood of many cheap
+        // identities, so all unknown depositors TOGETHER may hold at most one
+        // quarter of the item count and one quarter of the bytes of the store.
+        // The remaining three quarters are a guaranteed reserve for contacts.
+        if !known {
+            let trusted_now = self.trusted.lock().unwrap().clone();
+            let (unknown_items, unknown_bytes) = g
+                .per_depositor
+                .iter()
+                .filter(|(from, _)| !trusted_now.contains(*from))
+                .fold((0usize, 0u64), |(ni, nb), (_, (i, by))| (ni + i, nb + by));
+            if unknown_items + 1 > self.limits.max_items / 4
+                || unknown_bytes + blen > self.limits.max_total_bytes / 4
+            {
+                return Err(CustodyError::DepositorBudget);
+            }
         }
         if !known && n == 0 {
             let mut recent = HashMap::new();

@@ -396,12 +396,41 @@ impl CustodyStore for MemoryCustody {
         let (n, b) = g.per_depositor.get(who).copied().unwrap_or((0, 0));
         if n + 1 > self.limits.max_items_per_depositor
             || b + blob.len() > self.limits.max_bytes_per_depositor
-            // Sixteen items prevent an unknown peer from exhausting item slots.
+            // Sixteen items prevent a single unknown peer from exhausting item
+            // slots on its own. The per-identity cap alone is not enough: an
+            // attacker can mint many free endpoint identities, each staying
+            // under its own quota, and fill the store between them (Sybil).
             || (!known && n + 1 > 16)
-            // One eighth reserves space for other depositors.
+            // One eighth caps a single unknown peer's bytes; the class-wide cap
+            // below is what actually bounds the Sybil case.
             || (!known && b + blob.len() > self.limits.max_total_bytes / 8)
         {
             return Err(CustodyError::DepositorBudget);
+        }
+        // Class-wide cap for the whole unknown (non-contact) depositor set.
+        // Per-identity quotas do not bound a Sybil flood of many cheap
+        // identities, so all unknown depositors TOGETHER may hold at most one
+        // quarter of the item count and one quarter of the bytes of the store.
+        // The remaining three quarters are a guaranteed reserve for contacts:
+        // the unknown class can never take the last quarter, so a contact can
+        // always deposit even when strangers have flooded their share.
+        if !known {
+            let trusted_now = self.trusted.lock().unwrap().clone();
+            let (unknown_items, unknown_bytes) = g
+                .per_depositor
+                .iter()
+                .filter(|(from, _)| !trusted_now.contains(*from))
+                .fold((0usize, 0usize), |(ni, nb), (_, (i, by))| (ni + i, nb + by));
+            // One quarter of the item count: strangers in total may not hold
+            // more than a quarter of the slots (many free identities each below
+            // their own 16-item quota would otherwise fill every slot).
+            if unknown_items + 1 > self.limits.max_items / 4
+                // One quarter of the bytes: the same cap on total bytes, so a
+                // Sybil cannot starve contacts out of the byte budget either.
+                || unknown_bytes + blob.len() > self.limits.max_total_bytes / 4
+            {
+                return Err(CustodyError::DepositorBudget);
+            }
         }
         if !known && n == 0 {
             let mut recent = HashMap::new();
@@ -872,6 +901,84 @@ mod tests {
         // Deleting frees the room.
         assert!(t.delete(&A, tag(), id(1)).unwrap());
         t.deposit(&A, tag(), id(2), &[0; 10], 0).unwrap();
+    }
+
+    // F-002: the per-identity quota does not bound a Sybil flood -- an attacker
+    // mints many free endpoint IDs, each staying under its own 16-item quota,
+    // and fills the store between them. A class-wide cap holds the whole
+    // unknown (non-contact) depositor set to a quarter of the store, keeping
+    // three quarters reserved for real contacts.
+    #[test]
+    fn the_unknown_class_is_capped_regardless_of_identity_count() {
+        // max_items 8 -> the unknown class may hold at most 8 / 4 = 2 items,
+        // well under the per-identity cap of 16, so the class cap is what binds.
+        let s = store(CustodyLimits {
+            max_items: 8,
+            max_total_bytes: 8_000,
+            max_bytes_per_depositor: 8_000,
+            ..on()
+        });
+        let recipient: [u8; 32] = rand::random();
+        s.trust(recipient);
+        let tag = RecipientTag::for_recipient(&recipient);
+        // Two different strangers each deposit one item: both fit the quarter.
+        let s1: [u8; 32] = [100; 32];
+        let s2: [u8; 32] = [101; 32];
+        assert_eq!(
+            s.deposit(&s1, tag, id(1), b"x", 0),
+            Ok(DepositOutcome::Stored)
+        );
+        assert_eq!(
+            s.deposit(&s2, tag, id(2), b"x", 0),
+            Ok(DepositOutcome::Stored)
+        );
+        // A third fresh identity -- still under its own per-identity quota --
+        // is refused because the unknown class has used its quarter share.
+        let s3: [u8; 32] = [102; 32];
+        assert_eq!(
+            s.deposit(&s3, tag, id(3), b"x", 0),
+            Err(CustodyError::DepositorBudget)
+        );
+        // A real contact is unaffected: the other three quarters are reserved,
+        // so it still deposits even with the unknown class at its cap.
+        assert_eq!(
+            s.deposit(&A, tag, id(4), b"x", 0),
+            Ok(DepositOutcome::Stored)
+        );
+        // Once a stranger's item is gone, the class has room for one more.
+        assert!(s.delete(&recipient, tag, id(1)).unwrap());
+        let s4: [u8; 32] = [103; 32];
+        assert_eq!(
+            s.deposit(&s4, tag, id(5), b"x", 0),
+            Ok(DepositOutcome::Stored)
+        );
+    }
+
+    // F-002 (bytes): the class-wide cap also bounds total bytes, so a Sybil
+    // cannot starve contacts out of the byte budget with many small identities.
+    #[test]
+    fn the_unknown_class_byte_share_is_capped() {
+        // max_total_bytes 400 -> unknown class may hold at most 100 bytes.
+        let s = store(CustodyLimits {
+            max_items: 256,
+            max_total_bytes: 400,
+            max_bytes_per_depositor: 400,
+            ..on()
+        });
+        let recipient: [u8; 32] = rand::random();
+        s.trust(recipient);
+        let tag = RecipientTag::for_recipient(&recipient);
+        let s1: [u8; 32] = [110; 32];
+        let s2: [u8; 32] = [111; 32];
+        s.deposit(&s1, tag, id(1), &[0; 60], 0).unwrap();
+        // 60 + 60 = 120 > 100: the second stranger is over the class byte cap
+        // even though it is a fresh identity under its own per-depositor budget.
+        assert_eq!(
+            s.deposit(&s2, tag, id(2), &[0; 60], 0),
+            Err(CustodyError::DepositorBudget)
+        );
+        // A contact may still use the reserved remainder of the byte budget.
+        s.deposit(&A, tag, id(3), &[0; 200], 0).unwrap();
     }
 
     #[test]
