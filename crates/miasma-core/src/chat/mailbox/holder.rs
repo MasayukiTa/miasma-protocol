@@ -206,6 +206,13 @@ pub struct MemoryCustody {
 }
 
 impl MemoryCustody {
+    // Tags derive from public endpoint IDs; possession is not authentication.
+    fn is_recipient(who: &[u8; 32], tag: RecipientTag) -> bool {
+        tag == RecipientTag::for_recipient(who)
+            || tag == RecipientTag::for_group_recipient(who)
+            || tag == RecipientTag::for_directed_recipient(who)
+    }
+
     pub fn new(limits: CustodyLimits) -> Self {
         Self {
             limits: limits.clamped(),
@@ -403,6 +410,9 @@ impl CustodyStore for MemoryCustody {
         now_ms: u64,
     ) -> Result<Vec<ItemId>, CustodyError> {
         self.check(who)?;
+        if !Self::is_recipient(who, tag) {
+            return Err(CustodyError::NotTrusted);
+        }
         let mut g = self.inner.lock().unwrap();
         g.sweep(now_ms);
         let mut v: Vec<(u64, ItemId)> = g
@@ -425,7 +435,12 @@ impl CustodyStore for MemoryCustody {
         self.check(who)?;
         let mut g = self.inner.lock().unwrap();
         g.sweep(now_ms);
-        Ok(g.items.get(&(tag, item)).map(|h| h.blob.clone()))
+        match g.items.get(&(tag, item)) {
+            Some(h) if h.from != *who && !Self::is_recipient(who, tag) => {
+                Err(CustodyError::NotTrusted)
+            }
+            held => Ok(held.map(|h| h.blob.clone())),
+        }
     }
 
     fn delete(
@@ -435,7 +450,14 @@ impl CustodyStore for MemoryCustody {
         item: ItemId,
     ) -> Result<bool, CustodyError> {
         self.check(who)?;
-        Ok(self.inner.lock().unwrap().remove(&(tag, item)))
+        let mut g = self.inner.lock().unwrap();
+        let key = (tag, item);
+        if let Some(h) = g.items.get(&key) {
+            if h.from != *who && !Self::is_recipient(who, tag) {
+                return Err(CustodyError::NotTrusted);
+            }
+        }
+        Ok(g.remove(&key))
     }
 
     fn sweep(&self, now_ms: u64) -> usize {
@@ -631,7 +653,7 @@ mod tests {
     }
 
     fn tag() -> RecipientTag {
-        RecipientTag([7; 16])
+        RecipientTag::for_recipient(&B)
     }
 
     fn id(n: u8) -> ItemId {
@@ -696,6 +718,27 @@ mod tests {
         // Revoking drops what the contact deposited.
         s.revoke(&A);
         assert_eq!(s.stats(), CustodyStats::default());
+    }
+
+    #[test]
+    fn other_contacts_cannot_access_items() {
+        let s = store(on());
+        let other: [u8; 32] = rand::random();
+        let recipient: [u8; 32] = rand::random();
+        let tag = RecipientTag::for_recipient(&recipient);
+        let item = ItemId(rand::random());
+        s.trust(other);
+        s.trust(recipient);
+        s.deposit(&A, tag, item, b"sealed", 0).unwrap();
+        assert_eq!(s.list(&other, tag, 0), Err(CustodyError::NotTrusted));
+        assert_eq!(s.fetch(&other, tag, item, 0), Err(CustodyError::NotTrusted));
+        assert_eq!(s.delete(&other, tag, item), Err(CustodyError::NotTrusted));
+        assert_eq!(s.list(&recipient, tag, 0).unwrap(), vec![item]);
+        assert_eq!(
+            s.fetch(&recipient, tag, item, 0).unwrap(),
+            Some(b"sealed".to_vec())
+        );
+        assert!(s.delete(&recipient, tag, item).unwrap());
     }
 
     #[test]
@@ -867,7 +910,7 @@ mod disk_tests {
     const B: [u8; 32] = [2; 32];
 
     fn tag() -> RecipientTag {
-        RecipientTag([7; 16])
+        RecipientTag::for_recipient(&B)
     }
     fn id(n: u8) -> ItemId {
         ItemId([n; 16])
@@ -880,6 +923,29 @@ mod disk_tests {
     }
     fn keys(master: u8) -> Arc<StateKeys> {
         Arc::new(StateKeys::from_master_key(&[master; 32]).unwrap())
+    }
+
+    #[test]
+    fn other_contact_is_denied() {
+        let dir = tempdir().unwrap();
+        let key: [u8; 32] = rand::random();
+        let s = DiskCustody::open(
+            on(),
+            Arc::new(StateKeys::from_master_key(&key).unwrap()),
+            dir.path().join("custody"),
+            0,
+        );
+        let depositor: [u8; 32] = rand::random();
+        let recipient: [u8; 32] = rand::random();
+        let other: [u8; 32] = rand::random();
+        let tag = RecipientTag::for_recipient(&recipient);
+        let item = ItemId(rand::random());
+        s.trust(depositor);
+        s.trust(other);
+        s.deposit(&depositor, tag, item, b"sealed", 0).unwrap();
+        assert_eq!(s.list(&other, tag, 0), Err(CustodyError::NotTrusted));
+        assert_eq!(s.fetch(&other, tag, item, 0), Err(CustodyError::NotTrusted));
+        assert_eq!(s.delete(&other, tag, item), Err(CustodyError::NotTrusted));
     }
 
     // A holder that restarts still has what it was keeping for an offline
