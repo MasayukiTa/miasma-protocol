@@ -16,7 +16,7 @@ use std::{
     sync::Mutex,
 };
 
-use super::ids::{ItemId, RecipientTag};
+use super::ids::{item_id_of, ItemId, RecipientTag};
 use crate::{chat::proto::MAX_FRAME_BODY, config::ChatConfig};
 
 /// Ceilings that the settings cannot raise: together they keep the store
@@ -377,6 +377,20 @@ impl CustodyStore for MemoryCustody {
         let known = trusted.contains(who);
         if blob.is_empty() || blob.len() > self.limits.max_item_bytes {
             return Err(CustodyError::TooBig);
+        }
+        // F-005 (chat store only): bind the declared item key to the blob it
+        // carries. A chat deposit is a sealed envelope, so its ItemId is the
+        // envelope id and can be recomputed from the bytes; refuse a deposit
+        // whose declared `item` does not match, which otherwise lets a caller
+        // that knows (tag, item) wedge a different blob under the key and block
+        // the genuine item for its whole TTL (key front-running). The file
+        // holder (push/file_holder.rs) cannot do this check: its blobs are raw
+        // deposit chunks and manifests, not envelopes, so item_id_of would not
+        // recognise them; file chunks stay unchecked there by design.
+        if let Some(derived) = item_id_of(blob) {
+            if derived != item {
+                return Err(CustodyError::Full);
+            }
         }
         let mut g = self.inner.lock().unwrap();
         g.sweep(now_ms);
@@ -1078,6 +1092,60 @@ mod tests {
         // so the emptiness above is expiry, not a store that lost the tag.
         s.deposit(&A, tag(), id(2), b"fresh", 1500).unwrap();
         assert_eq!(s.list(&B, tag(), 2000).unwrap(), vec![id(2)]);
+    }
+
+    // F-005 (chat store): a chat deposit carries a sealed envelope, so its
+    // ItemId can be recomputed from the bytes. Build a real envelope and prove
+    // the store binds the declared key to it: the matching key is stored, a
+    // mismatched key is refused so a caller cannot front-run (tag, item) with a
+    // different blob and block the genuine item for its TTL.
+    fn envelope_with(ct_byte: u8) -> (ItemId, Vec<u8>) {
+        use crate::chat::crypto::{Envelope, Header};
+        // A random id, as real envelopes use; never a literal.
+        let id: [u8; 16] = rand::random();
+        let env = Envelope {
+            id,
+            header: Header {
+                dh_pub: rand::random(),
+                pn: 0,
+                n: 0,
+                init_ek: None,
+            },
+            // At least TAG_LEN bytes so decode accepts the ciphertext length.
+            ciphertext: vec![ct_byte; 16],
+        };
+        let wire = env.encode();
+        // The item id the store should derive is the envelope id.
+        (
+            super::item_id_of(&wire).expect("a built envelope decodes"),
+            wire,
+        )
+    }
+
+    #[test]
+    fn a_chat_deposit_binds_the_item_key_to_the_envelope() {
+        let s = store(on());
+        let (real_id, wire) = envelope_with(0xAB);
+        // The honest deposit declares the id the bytes carry: it is stored.
+        assert_eq!(
+            s.deposit(&A, tag(), real_id, &wire, 0),
+            Ok(DepositOutcome::Stored)
+        );
+        // A caller that declares a different key for the same bytes is refused,
+        // so it cannot wedge this blob under a key it does not belong to.
+        let wrong = ItemId(rand::random());
+        assert_ne!(wrong, real_id);
+        assert_eq!(
+            s.deposit(&A, tag(), wrong, &wire, 0),
+            Err(CustodyError::Full)
+        );
+        // A blob that is not an envelope (a raw chunk) has no derivable id, so
+        // it is not subject to the check and the declared key stands: this is
+        // how file chunks remain usable through the same verb.
+        assert_eq!(
+            s.deposit(&A, tag(), id(9), b"not-an-envelope", 0),
+            Ok(DepositOutcome::Stored)
+        );
     }
 
     #[test]
