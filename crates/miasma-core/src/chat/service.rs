@@ -675,22 +675,48 @@ impl ChatService {
     }
 
     /// Queue this node's custody endpoint for selected contacts.
-    pub fn introduce_self_to_contacts(self: &Arc<Self>, selector: Option<&str>) -> Result<usize, String> {
-        if !(self.settings.custody_enabled || self.settings.file_custody_limits.enabled) { return Err("custody is disabled".into()); }
+    pub fn introduce_self_to_contacts(
+        self: &Arc<Self>,
+        selector: Option<&str>,
+    ) -> Result<usize, String> {
+        if !(self.settings.custody_enabled || self.settings.file_custody_limits.enabled) {
+            return Err("custody is disabled".into());
+        }
         let contacts = match selector {
-            Some(name) => vec![self.contacts.find(name).ok_or_else(|| format!("no contact: {name}"))?],
-            None => self.contacts.list().into_iter().filter(|c| c.allow_send).collect(),
+            Some(name) => vec![self
+                .contacts
+                .find(name)
+                .ok_or_else(|| format!("no contact: {name}"))?],
+            None => self
+                .contacts
+                .list()
+                .into_iter()
+                .filter(|c| c.allow_send)
+                .collect(),
         };
-        let holder = proto::HolderEntry { endpoint_id: self.core.own_id(), expires_ms: now_ms().saturating_add(24 * 60 * 60 * 1000), file_custody: self.settings.file_custody_limits.enabled, chat_custody: self.settings.custody_enabled };
+        let holder = proto::HolderEntry {
+            endpoint_id: self.core.own_id(),
+            expires_ms: now_ms().saturating_add(24 * 60 * 60 * 1000),
+            file_custody: self.settings.file_custody_limits.enabled,
+            chat_custody: self.settings.custody_enabled,
+        };
         for contact in &contacts {
-            if !contact.allow_send { return Err(format!("sending to {} is disabled", contact.label)); }
-            self.introduce_holders(contact, std::slice::from_ref(&holder)).map_err(|e| format!("{e:?}"))?;
+            if !contact.allow_send {
+                return Err(format!("sending to {} is disabled", contact.label));
+            }
+            self.introduce_holders(contact, std::slice::from_ref(&holder))
+                .map_err(|e| format!("{e:?}"))?;
         }
         Ok(contacts.len())
     }
     pub fn custody_peer_counts(&self) -> (usize, usize) {
         let introduced = self.introduced_holders.lock().unwrap().count(now_ms());
-        let allowed = self.contacts.list().iter().filter(|c| c.allow_receive && c.endpoint_bytes().is_some()).count();
+        let allowed = self
+            .contacts
+            .list()
+            .iter()
+            .filter(|c| c.allow_receive && c.endpoint_bytes().is_some())
+            .count();
         (introduced, allowed)
     }
 
