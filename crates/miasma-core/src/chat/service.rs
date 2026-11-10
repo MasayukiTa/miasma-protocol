@@ -1224,11 +1224,21 @@ impl ChatService {
                     Err(e) => Response::Refused(e),
                 }
             }
-            Request::List { tag, now_ms } => match store.list(&who, tag, now_ms) {
+            // F-001: List and Fetch must sweep expiry on the server clock, the
+            // same as Deposit and Delete. The now_ms on the wire is caller-
+            // supplied; honouring it let one trusted contact send now_ms =
+            // u64::MAX once and expire every held item (any tag, any depositor),
+            // or now_ms = 0 to read past an item's TTL. The wire field is kept
+            // for protocol compatibility but is deliberately ignored here.
+            Request::List { tag, now_ms: _ } => match store.list(&who, tag, now) {
                 Ok(v) => Response::Listing(v),
                 Err(e) => Response::Refused(e),
             },
-            Request::Fetch { tag, item, now_ms } => match store.fetch(&who, tag, item, now_ms) {
+            Request::Fetch {
+                tag,
+                item,
+                now_ms: _,
+            } => match store.fetch(&who, tag, item, now) {
                 Ok(o) => Response::Item(o),
                 Err(e) => Response::Refused(e),
             },

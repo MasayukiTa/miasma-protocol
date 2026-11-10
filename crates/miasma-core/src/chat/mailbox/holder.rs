@@ -1031,6 +1031,55 @@ mod tests {
         );
     }
 
+    // F-001: the store expires strictly on the clock argument it is handed.
+    // serve_custody was passing the caller-supplied now_ms from the wire into
+    // list/fetch; the fix passes the server clock instead. These two tests pin
+    // the store contract the fix relies on: whatever clock the server passes is
+    // the one that decides expiry, so a caller cannot pick its own.
+    //
+    // A huge clock (the u64::MAX an attacker would send) expires everything --
+    // which is exactly why the server, not the caller, must choose it. list and
+    // fetch both honour the clock they are given.
+    #[test]
+    fn list_and_fetch_expire_on_the_clock_they_are_given() {
+        let s = store(CustodyLimits {
+            ttl_ms: 1000,
+            ..on()
+        });
+        s.deposit(&A, tag(), id(1), b"live", 0).unwrap();
+        // At a sane server clock inside the TTL the item is visible.
+        assert_eq!(s.list(&B, tag(), 500).unwrap(), vec![id(1)]);
+        assert_eq!(
+            s.fetch(&B, tag(), id(1), 500).unwrap(),
+            Some(b"live".to_vec())
+        );
+        // If u64::MAX reaches the store, every item is swept: this is the clock
+        // the attacker supplied, and the fix is precisely to keep it off the
+        // wire so only the server's real clock ever gets here.
+        assert!(s.list(&B, tag(), u64::MAX).unwrap().is_empty());
+        assert_eq!(s.fetch(&B, tag(), id(1), u64::MAX).unwrap(), None);
+    }
+
+    // The mirror case: an item already past its TTL is not resurrected by a
+    // now_ms of 0. With the server clock, a fetch after expiry returns nothing;
+    // the store does not hand back an item the caller's clock claims is live.
+    #[test]
+    fn a_zero_clock_does_not_resurrect_an_expired_item() {
+        let s = store(CustodyLimits {
+            ttl_ms: 1000,
+            ..on()
+        });
+        // Deposited far in the past so it is expired at any real server clock.
+        s.deposit(&A, tag(), id(1), b"old", 0).unwrap();
+        // The server's real clock is past the TTL: the item is gone.
+        assert_eq!(s.fetch(&B, tag(), id(1), 2000).unwrap(), None);
+        assert!(s.list(&B, tag(), 2000).unwrap().is_empty());
+        // Re-deposit and prove a fresh item at the same real clock is visible,
+        // so the emptiness above is expiry, not a store that lost the tag.
+        s.deposit(&A, tag(), id(2), b"fresh", 1500).unwrap();
+        assert_eq!(s.list(&B, tag(), 2000).unwrap(), vec![id(2)]);
+    }
+
     #[test]
     fn the_same_item_twice_is_held_once_and_not_extended() {
         let s = store(CustodyLimits {
