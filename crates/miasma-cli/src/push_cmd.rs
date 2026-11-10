@@ -610,27 +610,47 @@ fn waiting_note(t: &PushTransferInfo, now_ms: u64) -> Option<String> {
     } else {
         format!("Waiting to retry (next attempt {when}, attempt {attempt})")
     };
-    if t.error
-        .as_deref()
-        .is_some_and(|e| e.contains("not connected to a relay server"))
-    {
+    let err = t.error.as_deref().unwrap_or("");
+    let holder_refusal = err.strip_prefix("holder refused the deposit: ");
+    if err.contains("not connected to a relay server") {
         // It is this computer's relay link that is down, not the other side.
         s.push_str(if ja {
             "。一時停止中: この PC がリレーサーバに接続できていません"
         } else {
             ". Paused: this computer is not connected to a relay server"
         });
-    } else if let Some(reason) = t
-        .error
-        .as_deref()
-        .filter(|e| e.starts_with("holder refused the deposit:"))
+    } else if holder_refusal
+        .is_some_and(|r| r.contains("too many custody requests") || r.contains("slow down"))
     {
-        s.push_str(&format!(". {reason}"));
-    } else if t.error_kind.as_deref() == Some("unreachable") {
+        // A reachable holder throttled us (RateLimited): not offline, just busy.
         s.push_str(if ja {
-            "。受信者に接続できませんでした"
+            "。預かり役が混んでいます。再試行します"
         } else {
-            ". The recipient could not be reached"
+            ". Holders are busy, retrying"
+        });
+    } else if let Some(reason) = holder_refusal {
+        // Some other refusal from a reachable holder: name the holder's reason.
+        s.push_str(if ja {
+            &format!("。預かり役が預け入れを断りました: {reason}")
+        } else {
+            &format!(". A holder refused the deposit: {reason}")
+        });
+    } else if err.contains("waiting in holder") || t.state == PushState::Deposited {
+        // The file is already deposited; we are waiting for the recipient.
+        s.push_str(if ja {
+            "。受取人のオフライン中、預かり役で待機しています"
+        } else {
+            ". Recipient offline, waiting in holder"
+        });
+    } else if t.error_kind.as_deref() == Some("unreachable")
+        || err.contains("cannot reach the other side")
+        || err.contains("no holder reachable")
+    {
+        // No holder could be dialled and the recipient was not reachable either.
+        s.push_str(if ja {
+            "。預かり役に接続できません"
+        } else {
+            ". No holder reachable"
         });
     }
     Some(s)
@@ -1018,7 +1038,46 @@ mod tests {
         let mut transfer = info_with(None, PushState::Waiting, 0);
         transfer.error = Some("holder refused the deposit: the store is full".into());
         let note = waiting_note(&transfer, 0).unwrap();
-        assert!(note.contains("holder refused the deposit: the store is full"));
+        assert!(note.contains("A holder refused the deposit: the store is full"));
+        assert!(!note.contains("the other side is offline"));
+    }
+    #[test]
+    fn waiting_note_names_rate_limit_as_busy_not_offline() {
+        let mut transfer = info_with(None, PushState::Waiting, 0);
+        transfer.error =
+            Some("holder refused the deposit: too many custody requests; slow down".into());
+        let note = waiting_note(&transfer, 0).unwrap();
+        assert!(note.contains("Holders are busy, retrying"), "{note}");
+        assert!(!note.contains("the other side is offline"), "{note}");
+        assert!(!note.contains("No holder reachable"), "{note}");
+    }
+    #[test]
+    fn waiting_note_unreachable_says_no_holder_reachable() {
+        let mut transfer = info_with(None, PushState::Waiting, 0);
+        transfer.error_kind = Some("unreachable".into());
+        transfer.error = Some(
+            "cannot reach the other side: the dial timed out. Is their Miasma running?".into(),
+        );
+        let note = waiting_note(&transfer, 0).unwrap();
+        assert!(note.contains("No holder reachable"), "{note}");
+        assert!(!note.contains("the other side is offline"), "{note}");
+    }
+    #[test]
+    fn waiting_note_deposited_says_waiting_in_holder() {
+        let transfer = info_with(None, PushState::Deposited, 0);
+        // Deposited is not a Waiting state, so the note is only shown while a
+        // deposited transfer is briefly re-queued (error carries the marker).
+        let mut waiting = info_with(None, PushState::Waiting, 0);
+        waiting.error = Some("deposited; waiting in holder for the recipient".into());
+        let note = waiting_note(&waiting, 0).unwrap();
+        assert!(
+            note.contains("Recipient offline, waiting in holder"),
+            "{note}"
+        );
+        assert_eq!(
+            state_label(transfer.state),
+            "deposited, waiting for the recipient"
+        );
     }
 
     #[test]
