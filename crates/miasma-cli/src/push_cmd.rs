@@ -688,6 +688,9 @@ fn progress_line(t: &PushTransferInfo) -> String {
         speed_shown(),
         lang() == Lang::Ja,
     ));
+    if let Some(stage) = t.stage.as_deref() {
+        s.push_str(&format!(" - {stage}"));
+    }
     if let Some(n) = waiting_note(t, clock_ms()) {
         s.push_str(&format!(" - {n}"));
     }
@@ -1015,6 +1018,7 @@ mod tests {
             error: None,
             reject_reason: None,
             error_kind: None,
+            stage: None,
             source_path: None,
             saved_as: None,
             created_at_ms: 0,
@@ -1032,6 +1036,16 @@ mod tests {
         let note = waiting_note(&transfer, 0).unwrap();
         assert!(!note.contains("the other side is offline"));
         assert!(!note.contains("相手がオフライン"));
+    }
+    #[test]
+    fn progress_line_shows_the_deposit_stage() {
+        let mut t = info_with(None, PushState::Sending, 0);
+        t.stage = Some("depositing to holders (3/8 chunks)".into());
+        let line = progress_line(&t);
+        assert!(
+            line.contains("depositing to holders (3/8 chunks)"),
+            "{line}"
+        );
     }
     #[test]
     fn waiting_note_shows_holder_refusal() {

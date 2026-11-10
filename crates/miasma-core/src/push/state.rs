@@ -138,6 +138,10 @@ pub struct PushTransferInfo {
     /// failure behind a `Waiting` state (see [`error_kind`]).
     /// `error` stays the English text; UIs map this to their own words.
     pub error_kind: Option<String>,
+    /// A coarse progress stage shown to the person while a long step runs
+    /// (for example `depositing to holders (3/8 chunks)`), so a transfer never
+    /// sits silently at 0%. `None` when there is no distinct stage to show.
+    pub stage: Option<String>,
     /// Outbound only: the file this transfer sends, so a UI (or a later
     /// session) can offer "send again" without guessing.
     pub source_path: Option<String>,
@@ -177,6 +181,8 @@ struct InfoWire {
     reject_reason: Option<String>,
     #[serde(default)]
     error_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stage: Option<String>,
     #[serde(default)]
     source_path: Option<String>,
     #[serde(default)]
@@ -207,6 +213,7 @@ impl From<&PushTransferInfo> for InfoWire {
             error: i.error.clone(),
             reject_reason: i.reject_reason.clone(),
             error_kind: i.error_kind.clone(),
+            stage: i.stage.clone(),
             source_path: i.source_path.clone(),
             saved_as: i.saved_as.clone(),
             created_at_ms: i.created_at_ms,
@@ -233,6 +240,7 @@ impl From<InfoWire> for PushTransferInfo {
             error: w.error,
             reject_reason: w.reject_reason,
             error_kind: w.error_kind,
+            stage: w.stage,
             source_path: w.source_path,
             saved_as: w.saved_as,
             created_at_ms: w.created_at_ms,
@@ -395,6 +403,7 @@ impl Board {
             error: None,
             reject_reason: None,
             error_kind: None,
+            stage: None,
             source_path: None,
             saved_as: None,
             created_at_ms: now,

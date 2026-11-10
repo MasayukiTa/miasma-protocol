@@ -315,9 +315,38 @@ pub fn deposit_file_with_key<R: std::io::Read>(
     recipient: &[u8; 32],
     file_key: [u8; 32],
     salt: [u8; 16],
+    src: R,
+    now_ms: u64,
+    threshold: usize,
+) -> Result<DepositReceipt, DepositError> {
+    deposit_file_with_key_progress(
+        transport,
+        holders,
+        recipient,
+        file_key,
+        salt,
+        src,
+        now_ms,
+        threshold,
+        |_| {},
+    )
+}
+
+/// As [`deposit_file_with_key`], but reports progress: `on_chunk(n)` is called
+/// after each chunk is held by the needed holders, with `n` the number of
+/// chunks deposited so far. A long deposit can then show how far it has got
+/// instead of sitting at 0%. The manifest (deposited last) is not counted.
+#[allow(clippy::too_many_arguments)]
+pub fn deposit_file_with_key_progress<R: std::io::Read>(
+    transport: &dyn MailboxTransport,
+    holders: &[[u8; 32]],
+    recipient: &[u8; 32],
+    file_key: [u8; 32],
+    salt: [u8; 16],
     mut src: R,
     now_ms: u64,
     threshold: usize,
+    mut on_chunk: impl FnMut(u64),
 ) -> Result<DepositReceipt, DepositError> {
     let needed = threshold.max(1);
     let fk = FileKey::derive(&file_key, &salt);
@@ -353,6 +382,7 @@ pub fn deposit_file_with_key<R: std::io::Read>(
         let blob = seal(&key, &nonce, &aad, plain);
         deposit_one(transport, &mut surviving, tag, id, &blob, now_ms, needed)?;
         index += 1;
+        on_chunk(index);
         // A short read means the source ended; a full read may still be the end.
         if n < CHUNK_PLAINTEXT {
             break;
@@ -730,6 +760,39 @@ mod tests {
             Identity::from_seed(&[11u8; 32]),
             Identity::from_seed(&[22u8; 32]),
         )
+    }
+
+    #[test]
+    fn progress_reports_every_chunk_in_order() {
+        let (sender, recipient) = ids();
+        let holder_id = [7u8; 32];
+        let store = file_holder(sender.id(), recipient.id());
+        let salt = rand::random();
+        let file_key: [u8; 32] = rand::random();
+        // Three full chunks and a partial fourth.
+        let file: Vec<u8> = (0..(CHUNK_PLAINTEXT * 3 + 7))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let tx = InProcess {
+            holders: vec![(holder_id, store)],
+            who: sender.id(),
+        };
+        let mut seen = Vec::new();
+        let receipt = deposit_file_with_key_progress(
+            &tx,
+            &[holder_id],
+            &recipient.id(),
+            file_key,
+            salt,
+            &file[..],
+            1_000,
+            1,
+            |done| seen.push(done),
+        )
+        .expect("deposit succeeds with one holder");
+        // One call per chunk, strictly increasing, ending at the chunk count.
+        assert_eq!(seen, vec![1, 2, 3, 4]);
+        assert_eq!(receipt.manifest.chunks, 4);
     }
 
     #[test]

@@ -1541,9 +1541,18 @@ impl PushService {
             let file_key = intent.file_key;
             let salt = intent.salt;
             self.outbox.put_checked(rec, true)?;
+            // The file is cut into fixed-size chunks; show how many have been
+            // handed to the holders so a large deposit never sits at 0%.
+            let total_chunks = rec
+                .size
+                .div_ceil(super::deposit::CHUNK_PLAINTEXT as u64)
+                .max(1);
+            let board = self.board.clone();
+            let tid = rec.id.clone();
             let receipt = tokio::task::spawn_blocking(move || {
                 let file = std::fs::File::open(path).map_err(|e| (false, e.to_string()))?;
-                super::deposit::deposit_file_with_key(
+                let mut last_logged = 0u64;
+                super::deposit::deposit_file_with_key_progress(
                     &transport,
                     &holders,
                     &peer,
@@ -1552,6 +1561,15 @@ impl PushService {
                     file,
                     now_ms(),
                     threshold,
+                    |done| {
+                        let stage = format!("depositing to holders ({done}/{total_chunks} chunks)");
+                        // Log only when the stage text actually changes.
+                        if done != last_logged {
+                            last_logged = done;
+                            info!(transfer = %tid, "{stage}");
+                        }
+                        board.update(&tid, |i| i.stage = Some(stage));
+                    },
                 )
                 .map_err(|e| {
                     (
@@ -1565,6 +1583,8 @@ impl PushService {
             })
             .await
             .map_err(|e| e.to_string())?;
+            // The deposit step is over; clear its progress stage.
+            self.board.update(&rec.id, |i| i.stage = None);
             let receipt = match receipt {
                 Ok(receipt) => receipt,
                 Err((true, _)) => {
