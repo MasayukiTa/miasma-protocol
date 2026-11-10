@@ -1194,7 +1194,21 @@ impl ChatService {
             let _ = tx.finish();
             return;
         }
-        store.trust(*who);
+        let allowed = self.contact_may_write(who);
+        if !allowed && !matches!(&req, Request::Deposit { .. }) {
+            let _ = wire::write_response(
+                tx,
+                &Response::Refused(super::mailbox::holder::CustodyError::NotTrusted),
+            )
+            .await;
+            let _ = tx.finish();
+            return;
+        }
+        if allowed {
+            store.trust(*who);
+        } else {
+            store.untrust(who);
+        }
         let now = now_ms();
         let who = *who;
         let resp = tokio::task::spawn_blocking(move || match req {
@@ -1482,21 +1496,8 @@ impl ChatService {
         let mut bad = 0u32;
         let mut announced = false;
         for _ in 0..MAX_STREAMS_PER_CONNECTION {
-            // Looked up for every stream: a contact removed or switched off
-            // mid-connection stops being served at once.
-            match self.contacts.by_endpoint(&remote) {
-                Some(c) if c.allow_receive => {}
-                _ => {
-                    self.contacts.note_unknown(&remote);
-                    let loud = self.unknown.lock().unwrap().allow(remote);
-                    if loud {
-                        debug!(peer = %fingerprint(&remote), "chat refused: not a contact that may write");
-                    }
-                    conn.close(CLOSE_NOT_ALLOWED.into(), b"");
-                    return;
-                }
-            }
-            if !announced {
+            let allowed = self.contact_may_write(&remote);
+            if allowed && !announced {
                 announced = true;
                 // The contact is online: let our own queue for it go out now,
                 // and ask our holders in case this contact (or any) kept
@@ -1510,6 +1511,10 @@ impl ChatService {
                     // `Sync` arrives on a unidirectional stream (see
                     // `sync_with`); the answer goes back on one of ours.
                     let Ok(mut urx) = u else { break };
+                    if !allowed {
+                        conn.close(CLOSE_NOT_ALLOWED.into(), b"");
+                        return;
+                    }
                     let frame = tokio::time::timeout(
                         self.settings.read_timeout,
                         proto::read_frame(&mut urx),
@@ -1563,14 +1568,17 @@ impl ChatService {
                 _ => break,
             };
             if first == super::mailbox::wire::CUSTODY_STREAM_TAG {
-                if self.contact_may_write(&remote) {
-                    self.serve_custody(&remote, &mut tx, &mut rx).await;
-                } else {
-                    // Not offering custody, or not a contact that may use it.
-                    conn.close(CLOSE_NOT_ALLOWED.into(), b"");
-                    return;
-                }
+                self.serve_custody(&remote, &mut tx, &mut rx).await;
                 continue;
+            }
+            if !allowed {
+                self.contacts.note_unknown(&remote);
+                let loud = self.unknown.lock().unwrap().allow(remote);
+                if loud {
+                    debug!(peer = %fingerprint(&remote), "chat refused: not a contact that may write");
+                }
+                conn.close(CLOSE_NOT_ALLOWED.into(), b"");
+                return;
             }
             let first_byte = [first];
             let mut rx = AsyncReadExt::chain(&first_byte[..], rx);

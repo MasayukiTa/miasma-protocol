@@ -20,7 +20,7 @@
 //!   of items and bytes per depositor (so one contact cannot use it all);
 //! * every item expires after a fixed time and is dropped by the next call
 //!   that touches the store, or by [`CustodyStore::sweep`];
-//! * only contacts the holder trusts may deposit, list, fetch or delete;
+//! * unknown peers can deposit within tighter quotas; other verbs require trust;
 //! * with the switch off (the default) every deposit is refused.
 
 use std::{
@@ -225,6 +225,10 @@ impl CustodyStore for DiskFileCustody {
         DiskFileCustody::trust(self, id);
     }
 
+    fn untrust(&self, id: &[u8; 32]) {
+        self.trusted.lock().unwrap().remove(id);
+    }
+
     fn deposit(
         &self,
         who: &[u8; 32],
@@ -233,7 +237,11 @@ impl CustodyStore for DiskFileCustody {
         blob: &[u8],
         now_ms: u64,
     ) -> Result<DepositOutcome, CustodyError> {
-        self.check(who)?;
+        if !self.limits.enabled {
+            return Err(CustodyError::Disabled);
+        }
+        let trusted = self.trusted.lock().unwrap().clone();
+        let known = trusted.contains(who);
         if blob.is_empty() || blob.len() > self.limits.max_item_bytes {
             return Err(CustodyError::TooBig);
         }
@@ -253,8 +261,33 @@ impl CustodyStore for DiskFileCustody {
         let (n, b) = g.per_depositor.get(who).copied().unwrap_or((0, 0));
         if n + 1 > self.limits.max_items_per_depositor
             || b + blen > self.limits.max_bytes_per_depositor
+            // Sixteen items prevent an unknown peer from exhausting item slots.
+            || (!known && n + 1 > 16)
+            // One eighth reserves space for other depositors.
+            || (!known && b + blen > self.limits.max_total_bytes / 8)
         {
             return Err(CustodyError::DepositorBudget);
+        }
+        if !known && n == 0 {
+            let mut recent = HashMap::new();
+            for held in g.items.values().filter(|h| !trusted.contains(&h.from)) {
+                let order = recent.entry(held.from).or_insert(held.order);
+                *order = (*order).max(held.order);
+            }
+            // Cap identities at 256 to bound unknown-depositor bookkeeping.
+            if recent.len() >= 256 {
+                if let Some((&oldest, _)) = recent.iter().min_by_key(|(_, order)| *order) {
+                    let keys: Vec<_> = g
+                        .items
+                        .iter()
+                        .filter(|(_, h)| h.from == oldest)
+                        .map(|(k, _)| *k)
+                        .collect();
+                    for key in keys {
+                        g.remove(&key);
+                    }
+                }
+            }
         }
         if g.items.len() + 1 > self.limits.max_items || g.bytes + blen > self.limits.max_total_bytes
         {
@@ -296,6 +329,9 @@ impl CustodyStore for DiskFileCustody {
         now_ms: u64,
     ) -> Result<Vec<ItemId>, CustodyError> {
         self.check(who)?;
+        if !is_recipient(who, tag) {
+            return Err(CustodyError::NotTrusted);
+        }
         let mut g = self.inner.lock().unwrap();
         g.sweep(now_ms);
         let mut v: Vec<(u64, ItemId)> = g
@@ -321,6 +357,9 @@ impl CustodyStore for DiskFileCustody {
         let Some(m) = g.items.get(&(tag, item)) else {
             return Ok(None);
         };
+        if m.from != *who && !is_recipient(who, tag) {
+            return Err(CustodyError::NotTrusted);
+        }
         let mut buf = Vec::with_capacity(m.len as usize);
         // One item at a time: the holder reads a single item into memory, never
         // the whole file.
@@ -339,7 +378,14 @@ impl CustodyStore for DiskFileCustody {
         item: ItemId,
     ) -> Result<bool, CustodyError> {
         self.check(who)?;
-        Ok(self.inner.lock().unwrap().remove(&(tag, item)))
+        let mut g = self.inner.lock().unwrap();
+        let key = (tag, item);
+        if let Some(m) = g.items.get(&key) {
+            if m.from != *who && !is_recipient(who, tag) {
+                return Err(CustodyError::NotTrusted);
+            }
+        }
+        Ok(g.remove(&key))
     }
 
     fn sweep(&self, now_ms: u64) -> usize {
@@ -353,4 +399,11 @@ impl CustodyStore for DiskFileCustody {
             bytes: g.bytes as usize,
         }
     }
+}
+
+// Tags are derived from public endpoint IDs, so authenticate the recipient ID.
+fn is_recipient(who: &[u8; 32], tag: RecipientTag) -> bool {
+    tag == RecipientTag::for_recipient(who)
+        || tag == RecipientTag::for_group_recipient(who)
+        || tag == RecipientTag::for_directed_recipient(who)
 }

@@ -8,7 +8,7 @@
 //!   of items and bytes per depositor (so one contact cannot use it all);
 //! * every item expires after a fixed time and is dropped by the next call
 //!   that touches the store;
-//! * only contacts the holder trusts may deposit, list, fetch or delete;
+//! * unknown peers can deposit within tighter quotas; other verbs require trust;
 //! * with the switch off (the default) every deposit is refused.
 
 use std::{
@@ -118,6 +118,8 @@ pub trait CustodyStore: Send + Sync {
     /// Let the contact `id` use this holder. Called again for a caller on each
     /// request, so a contact added after start is served without a restart.
     fn trust(&self, id: [u8; 32]);
+    /// Remove contact privileges without dropping existing deposits.
+    fn untrust(&self, id: &[u8; 32]);
 
     fn deposit(
         &self,
@@ -356,6 +358,10 @@ impl CustodyStore for MemoryCustody {
         self.trusted.lock().unwrap().insert(id);
     }
 
+    fn untrust(&self, id: &[u8; 32]) {
+        self.trusted.lock().unwrap().remove(id);
+    }
+
     fn deposit(
         &self,
         who: &[u8; 32],
@@ -364,21 +370,54 @@ impl CustodyStore for MemoryCustody {
         blob: &[u8],
         now_ms: u64,
     ) -> Result<DepositOutcome, CustodyError> {
-        self.check(who)?;
+        if !self.limits.enabled {
+            return Err(CustodyError::Disabled);
+        }
+        let trusted = self.trusted.lock().unwrap().clone();
+        let known = trusted.contains(who);
         if blob.is_empty() || blob.len() > self.limits.max_item_bytes {
             return Err(CustodyError::TooBig);
         }
         let mut g = self.inner.lock().unwrap();
         g.sweep(now_ms);
         let key = (tag, item);
-        if g.items.contains_key(&key) {
-            return Ok(DepositOutcome::Duplicate);
+        if let Some(held) = g.items.get(&key) {
+            return if held.from == *who && held.blob == blob {
+                Ok(DepositOutcome::Duplicate)
+            } else {
+                Err(CustodyError::Full)
+            };
         }
         let (n, b) = g.per_depositor.get(who).copied().unwrap_or((0, 0));
         if n + 1 > self.limits.max_items_per_depositor
             || b + blob.len() > self.limits.max_bytes_per_depositor
+            // Sixteen items prevent an unknown peer from exhausting item slots.
+            || (!known && n + 1 > 16)
+            // One eighth reserves space for other depositors.
+            || (!known && b + blob.len() > self.limits.max_total_bytes / 8)
         {
             return Err(CustodyError::DepositorBudget);
+        }
+        if !known && n == 0 {
+            let mut recent = HashMap::new();
+            for held in g.items.values().filter(|h| !trusted.contains(&h.from)) {
+                let order = recent.entry(held.from).or_insert(held.order);
+                *order = (*order).max(held.order);
+            }
+            // Cap identities at 256 to bound unknown-depositor bookkeeping.
+            if recent.len() >= 256 {
+                if let Some((&oldest, _)) = recent.iter().min_by_key(|(_, order)| *order) {
+                    let keys: Vec<_> = g
+                        .items
+                        .iter()
+                        .filter(|(_, h)| h.from == oldest)
+                        .map(|(k, _)| *k)
+                        .collect();
+                    for key in keys {
+                        g.remove(&key);
+                    }
+                }
+            }
         }
         if g.items.len() + 1 > self.limits.max_items
             || g.bytes + blob.len() > self.limits.max_total_bytes
@@ -558,6 +597,10 @@ impl CustodyStore for DiskCustody {
         self.mem.trust(id);
     }
 
+    fn untrust(&self, id: &[u8; 32]) {
+        self.mem.untrust(id);
+    }
+
     fn deposit(
         &self,
         who: &[u8; 32],
@@ -699,11 +742,11 @@ mod tests {
     }
 
     #[test]
-    fn only_trusted_contacts_may_use_it() {
+    fn unknown_peers_may_only_deposit() {
         let s = store(on());
         assert_eq!(
-            s.deposit(&STRANGER, tag(), id(1), b"x", 0),
-            Err(CustodyError::NotTrusted)
+            s.deposit(&STRANGER, tag(), id(2), b"x", 0),
+            Ok(DepositOutcome::Stored)
         );
         s.deposit(&A, tag(), id(1), b"x", 0).unwrap();
         assert_eq!(s.list(&STRANGER, tag(), 0), Err(CustodyError::NotTrusted));
@@ -717,6 +760,7 @@ mod tests {
         );
         // Revoking drops what the contact deposited.
         s.revoke(&A);
+        s.sweep(u64::MAX);
         assert_eq!(s.stats(), CustodyStats::default());
     }
 
