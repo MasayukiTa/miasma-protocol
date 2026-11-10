@@ -620,6 +620,8 @@ fn waiting_note(t: &PushTransferInfo, now_ms: u64) -> Option<String> {
         } else {
             ". Paused: this computer is not connected to a relay server"
         });
+    } else if let Some(reason) = t.error.as_deref().filter(|e| e.starts_with("holder refused the deposit:")) {
+        s.push_str(&format!(". {reason}"));
     } else if t.error_kind.as_deref() == Some("unreachable") {
         s.push_str(if ja {
             "。受信者に接続できませんでした"
@@ -1007,6 +1009,14 @@ mod tests {
         assert!(!note.contains("the other side is offline"));
         assert!(!note.contains("相手がオフライン"));
     }
+    #[test]
+    fn waiting_note_shows_holder_refusal() {
+        let mut transfer = info_with(None, PushState::Waiting, 0);
+        transfer.error = Some("holder refused the deposit: the store is full".into());
+        let note = waiting_note(&transfer, 0).unwrap();
+        assert!(note.contains("holder refused the deposit: the store is full"));
+    }
+
     #[test]
     fn live_text_running_finished_and_old_daemon() {
         let running = TransferStats {

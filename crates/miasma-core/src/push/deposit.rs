@@ -138,6 +138,9 @@ pub enum DepositError {
     /// Not enough holders acknowledged the deposit; the file is NOT delivered.
     #[error("only {held} of {needed} holders took the deposit")]
     NotDeposited { held: usize, needed: usize },
+    /// A reachable holder refused the deposit.
+    #[error("holder refused the deposit: {0}")]
+    HolderRefused(CustodyError),
     /// A fetched item did not decrypt or did not match its hash.
     #[error("a fetched item is corrupt or altered")]
     Corrupt,
@@ -431,6 +434,9 @@ fn deposit_one(
                 reason = %e,
                 "a file chunk could not be deposited with enough holders"
             );
+        }
+        if let Some(reason) = last_refusal {
+            return Err(DepositError::HolderRefused(reason));
         }
         return Err(DepositError::NotDeposited {
             held: kept.len(),
@@ -948,6 +954,16 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, DepositError::NotDeposited { held: 2, needed: 3 });
+    }
+
+    #[test]
+    fn reachable_holder_refusal_is_preserved() {
+        let (sender, recipient) = ids();
+        let holder = rand::random();
+        let store = file_holder(rand::random(), recipient.id());
+        let tx = InProcess { holders: vec![(holder, store)], who: sender.id() };
+        let err = deposit_file(&tx, &[holder], &recipient.id(), rand::random(), &b"data"[..], 0, 1).unwrap_err();
+        assert_eq!(err, DepositError::HolderRefused(CustodyError::NotTrusted));
     }
 
     #[test]
