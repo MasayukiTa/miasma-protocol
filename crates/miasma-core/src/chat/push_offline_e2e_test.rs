@@ -42,7 +42,7 @@ use miasma_core::state_crypto::StateKeys;
 
 /// Exercises file delivery through an in-process holder.
 #[test]
-fn depositor_delivers_file_in_process() {
+fn unknown_depositor_delivers_file_in_process() {
     use sha2::{Digest, Sha256};
     let tmp = tempfile::tempdir().unwrap();
     let sender_seed: [u8; 32] = rand::random();
@@ -50,7 +50,12 @@ fn depositor_delivers_file_in_process() {
     let sender = Identity::from_seed(&sender_seed);
     let recipient = Identity::from_seed(&recipient_seed);
     let holder_id: [u8; 32] = rand::random();
-    let store = file_holder(&tmp.path().join("holder"), sender.id(), recipient.id());
+    let limits = FileCustodyLimits {
+        enabled: true,
+        ..FileCustodyLimits::default()
+    };
+    let store = Arc::new(DiskFileCustody::new(limits, tmp.path().join("holder")).unwrap());
+    store.trust(recipient.id());
     let sender_transport = Node {
         holders: vec![(holder_id, store.clone())],
         who: sender.id(),
@@ -83,6 +88,50 @@ fn depositor_delivers_file_in_process() {
     assert_eq!(
         Sha256::digest(&file),
         Sha256::digest(fs::read(placed).unwrap())
+    );
+}
+
+#[tokio::test]
+async fn unknown_depositor_quota_and_third_party_are_refused() {
+    use miasma_core::chat::mailbox::holder::CustodyError;
+    use miasma_core::chat::mailbox::wire::{self, Response};
+    let tmp = tempfile::tempdir().unwrap();
+    let limits = FileCustodyLimits {
+        enabled: true,
+        ..FileCustodyLimits::default()
+    };
+    let store = DiskFileCustody::new(limits, tmp.path()).unwrap();
+    let sender: [u8; 32] = rand::random();
+    let recipient: [u8; 32] = rand::random();
+    let third: [u8; 32] = rand::random();
+    store.trust(third);
+    let tag = RecipientTag::for_recipient(&recipient);
+    let mut first = None;
+    for _ in 0..16 {
+        let item = ItemId(rand::random());
+        first.get_or_insert(item);
+        store.deposit(&sender, tag, item, b"sealed", 0).unwrap();
+    }
+    let error = store
+        .deposit(&sender, tag, ItemId(rand::random()), b"sealed", 0)
+        .unwrap_err();
+    assert_eq!(error, CustodyError::DepositorBudget);
+    let (mut tx, mut rx) = tokio::io::duplex(128);
+    wire::write_response(&mut tx, &Response::Refused(error))
+        .await
+        .unwrap();
+    assert_eq!(
+        wire::read_response(&mut rx).await.unwrap(),
+        Response::Refused(CustodyError::DepositorBudget)
+    );
+    let item = first.unwrap();
+    assert_eq!(
+        store.fetch(&third, tag, item, 0),
+        Err(CustodyError::NotTrusted)
+    );
+    assert_eq!(
+        store.delete(&third, tag, item),
+        Err(CustodyError::NotTrusted)
     );
 }
 
