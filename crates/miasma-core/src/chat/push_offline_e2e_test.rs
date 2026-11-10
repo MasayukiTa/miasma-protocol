@@ -40,6 +40,32 @@ use miasma_core::push::file_holder::{DiskFileCustody, FileCustodyLimits};
 use miasma_core::push::receive_offline::fetch_verified;
 use miasma_core::state_crypto::StateKeys;
 
+/// Exercises the delivery harness with an explicit recipient-scoped introduction.
+/// The production service does not yet use this authorization store.
+#[test]
+fn introduced_depositor_delivers_file_in_process() {
+    use crate::chat::allowed_depositors::AllowedDepositors;
+    use sha2::{Digest, Sha256};
+    let tmp = tempfile::tempdir().unwrap();
+    let sender_seed: [u8; 32] = rand::random();
+    let recipient_seed: [u8; 32] = rand::random();
+    let sender = Identity::from_seed(&sender_seed);
+    let recipient = Identity::from_seed(&recipient_seed);
+    let holder_id: [u8; 32] = rand::random();
+    let mut allowed = AllowedDepositors::open(tmp.path()).unwrap();
+    assert!(allowed.introduce(recipient.id(), sender.id(), true, 1).unwrap());
+    assert!(allowed.allows(&recipient.id(), &sender.id(), 1));
+    let store = file_holder(&tmp.path().join("holder"), sender.id(), recipient.id());
+    let sender_transport = Node { holders: vec![(holder_id, store.clone())], who: sender.id() };
+    let file = multi_chunk_file();
+    let salt: [u8; 16] = rand::random();
+    let receipt = deposit_file(&sender_transport, &[holder_id], &recipient.id(), salt, &file[..], 1, 1).unwrap();
+    let notice = notice_from_receipt(&receipt, salt, "report.bin");
+    let recipient_transport = Node { holders: vec![(holder_id, store)], who: recipient.id() };
+    let placed = fetch_verified(&recipient_transport, &recipient.id(), &notice, &tmp.path().join("inbox"), 2).unwrap();
+    assert_eq!(Sha256::digest(&file), Sha256::digest(fs::read(placed).unwrap()));
+}
+
 /// An in-process transport for one node over a set of shared holders. The node
 /// authenticates as `who`; each holder is a `DiskFileCustody` file store.
 struct Node {
