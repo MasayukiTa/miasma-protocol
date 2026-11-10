@@ -3110,4 +3110,42 @@ mod tests {
         }
         assert!(l.buckets.len() <= Limiter::CAP);
     }
+
+    // The established contract (crates/miasma-core/tests/push_resilience_test.rs):
+    // a dial that was refused or could not connect keeps the kind `unreachable`.
+    // It must not decay into `connection_lost` just because the offline-deposit
+    // fallback also failed. The sole exception is a reachable holder that
+    // refused custody because of its per-contact rate limit.
+    #[test]
+    fn refused_dial_keeps_unreachable_when_the_fallback_deposit_fails() {
+        // No deposit attempted at all: the original kind is kept verbatim.
+        assert_eq!(
+            deposit_retry_kind(error_kind::UNREACHABLE, None),
+            error_kind::UNREACHABLE
+        );
+        // The fallback deposit failed for an ordinary reason: still unreachable.
+        assert_eq!(
+            deposit_retry_kind(error_kind::UNREACHABLE, Some("no holder answered")),
+            error_kind::UNREACHABLE
+        );
+        // A lost connection that then failed its deposit stays connection_lost.
+        assert_eq!(
+            deposit_retry_kind(error_kind::CONNECTION_LOST, Some("holder dropped")),
+            error_kind::CONNECTION_LOST
+        );
+    }
+
+    #[test]
+    fn a_rate_limited_holder_is_reported_as_rate_limited_not_unreachable() {
+        let msg = "holder said: too many custody requests, slow down";
+        assert_eq!(
+            deposit_retry_kind(error_kind::UNREACHABLE, Some(msg)),
+            error_kind::RATE_LIMITED
+        );
+        // The same holder reply overrides a connection_lost original too.
+        assert_eq!(
+            deposit_retry_kind(error_kind::CONNECTION_LOST, Some(msg)),
+            error_kind::RATE_LIMITED
+        );
+    }
 }
