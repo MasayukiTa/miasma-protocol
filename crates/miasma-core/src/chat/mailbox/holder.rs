@@ -382,11 +382,13 @@ impl CustodyStore for MemoryCustody {
         g.sweep(now_ms);
         let key = (tag, item);
         if let Some(held) = g.items.get(&key) {
-            return if held.from == *who && held.blob == blob {
-                Ok(DepositOutcome::Duplicate)
-            } else {
-                Err(CustodyError::Full)
-            };
+            if held.from != *who || held.blob != blob {
+                return Err(CustodyError::Full);
+            }
+            let order = g.next_order;
+            g.next_order += 1;
+            g.items.get_mut(&key).unwrap().order = order;
+            return Ok(DepositOutcome::Duplicate);
         }
         let (n, b) = g.per_depositor.get(who).copied().unwrap_or((0, 0));
         if n + 1 > self.limits.max_items_per_depositor
@@ -610,10 +612,8 @@ impl CustodyStore for DiskCustody {
         now_ms: u64,
     ) -> Result<DepositOutcome, CustodyError> {
         let out = self.mem.deposit(who, tag, item, blob, now_ms)?;
-        // A duplicate changed nothing; only a fresh item needs a new snapshot.
-        if out == DepositOutcome::Stored {
-            self.persist();
-        }
+        // Duplicate deposits also update the depositor's recency.
+        self.persist();
         Ok(out)
     }
 
@@ -762,6 +762,28 @@ mod tests {
         s.revoke(&A);
         s.sweep(u64::MAX);
         assert_eq!(s.stats(), CustodyStats::default());
+    }
+
+    #[test]
+    fn unknown_depositors_evict_the_least_recently_used() {
+        let s = MemoryCustody::new(on());
+        let recipient: [u8; 32] = rand::random();
+        s.trust(recipient);
+        let tag = RecipientTag::for_recipient(&recipient);
+        let mut entries = Vec::new();
+        for _ in 0..256 {
+            let sender: [u8; 32] = rand::random();
+            let item = ItemId(rand::random());
+            s.deposit(&sender, tag, item, b"x", 0).unwrap();
+            entries.push((sender, item));
+        }
+        s.deposit(&entries[0].0, tag, entries[0].1, b"x", 0)
+            .unwrap();
+        let newcomer: [u8; 32] = rand::random();
+        s.deposit(&newcomer, tag, ItemId(rand::random()), b"x", 0)
+            .unwrap();
+        assert!(s.fetch(&recipient, tag, entries[0].1, 0).unwrap().is_some());
+        assert!(s.fetch(&recipient, tag, entries[1].1, 0).unwrap().is_none());
     }
 
     #[test]

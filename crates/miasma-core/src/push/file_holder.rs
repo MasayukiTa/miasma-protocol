@@ -249,13 +249,13 @@ impl CustodyStore for DiskFileCustody {
         g.sweep(now_ms);
         let key = (tag, item);
         if let Some(existing) = g.items.get(&key) {
-            return if existing.from == *who
-                && fs::read(&existing.path).ok().as_deref() == Some(blob)
-            {
-                Ok(DepositOutcome::Duplicate)
-            } else {
-                Err(CustodyError::Full)
-            };
+            if existing.from != *who || fs::read(&existing.path).ok().as_deref() != Some(blob) {
+                return Err(CustodyError::Full);
+            }
+            let order = g.next_order;
+            g.next_order += 1;
+            g.items.get_mut(&key).unwrap().order = order;
+            return Ok(DepositOutcome::Duplicate);
         }
         let blen = blob.len() as u64;
         let (n, b) = g.per_depositor.get(who).copied().unwrap_or((0, 0));
