@@ -810,26 +810,41 @@ mod tests {
         assert_eq!(s.stats(), CustodyStats::default());
     }
 
+    // F-002: the unknown (non-contact) depositor class is now hard-capped at a
+    // quarter of the store rather than filled to the 256-identity bookkeeping
+    // limit and then LRU-evicted. With max_items 1024 the class quarter is 256,
+    // so 256 strangers each holding one item exactly fill the unknown share; the
+    // 257th fresh identity is refused outright (DepositorBudget) instead of
+    // evicting the oldest, and nothing already held is dropped. This supersedes
+    // the old "fill 256 then evict the least-recently-used" behaviour.
     #[test]
-    fn unknown_depositors_evict_the_least_recently_used() {
-        let s = MemoryCustody::new(on());
+    fn the_unknown_class_is_capped_not_lru_evicted() {
+        let s = MemoryCustody::new(CustodyLimits {
+            max_items: 1024,
+            ..on()
+        });
         let recipient: [u8; 32] = rand::random();
         s.trust(recipient);
         let tag = RecipientTag::for_recipient(&recipient);
         let mut entries = Vec::new();
+        // 256 = 1024 / 4: the whole unknown quarter, each a distinct identity.
         for _ in 0..256 {
             let sender: [u8; 32] = rand::random();
             let item = ItemId(rand::random());
             s.deposit(&sender, tag, item, b"x", 0).unwrap();
             entries.push((sender, item));
         }
-        s.deposit(&entries[0].0, tag, entries[0].1, b"x", 0)
-            .unwrap();
+        // A 257th fresh stranger is refused by the class cap, not absorbed by
+        // evicting an older item.
         let newcomer: [u8; 32] = rand::random();
-        s.deposit(&newcomer, tag, ItemId(rand::random()), b"x", 0)
-            .unwrap();
+        assert_eq!(
+            s.deposit(&newcomer, tag, ItemId(rand::random()), b"x", 0),
+            Err(CustodyError::DepositorBudget)
+        );
+        // The first-deposited item is still held: nothing was LRU-evicted.
         assert!(s.fetch(&recipient, tag, entries[0].1, 0).unwrap().is_some());
-        assert!(s.fetch(&recipient, tag, entries[1].1, 0).unwrap().is_none());
+        // A real contact still deposits: the other three quarters are reserved.
+        s.deposit(&A, tag, ItemId(rand::random()), b"x", 0).unwrap();
     }
 
     #[test]
@@ -984,15 +999,22 @@ mod tests {
         let tag = RecipientTag::for_recipient(&recipient);
         let s1: [u8; 32] = [110; 32];
         let s2: [u8; 32] = [111; 32];
-        s.deposit(&s1, tag, id(1), &[0; 60], 0).unwrap();
-        // 60 + 60 = 120 > 100: the second stranger is over the class byte cap
-        // even though it is a fresh identity under its own per-depositor budget.
+        let s3: [u8; 32] = [112; 32];
+        // Each stranger deposits 50 bytes: exactly the per-identity eighth
+        // (max_total_bytes / 8 = 50), so the per-identity cap is not what binds.
+        s.deposit(&s1, tag, id(1), &[0; 50], 0).unwrap();
+        // Two strangers hold 50 + 50 = 100 = the class quarter (400 / 4): still
+        // allowed, the unknown class is exactly at its byte share now.
+        s.deposit(&s2, tag, id(2), &[0; 50], 0).unwrap();
+        // A third fresh identity, even a single byte, is over the class byte
+        // cap (100 + 1 > 100) though it is well under its own per-depositor
+        // budget: this is the Sybil case the class cap exists to stop.
         assert_eq!(
-            s.deposit(&s2, tag, id(2), &[0; 60], 0),
+            s.deposit(&s3, tag, id(3), &[0; 1], 0),
             Err(CustodyError::DepositorBudget)
         );
         // A contact may still use the reserved remainder of the byte budget.
-        s.deposit(&A, tag, id(3), &[0; 200], 0).unwrap();
+        s.deposit(&A, tag, id(4), &[0; 200], 0).unwrap();
     }
 
     #[test]
