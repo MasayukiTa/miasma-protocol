@@ -226,6 +226,7 @@ pub struct MiasmaApp {
     // Hybrid post-quantum protection of private conversations (`privacy.pqc_mode`)
     pqc_mode: miasma_core::config::PqcMode,
     custody_enabled: bool,
+    accept_unknown_depositors: bool,
 
     // Storage (the shares this node keeps: listing and deletion)
     storage: StorageState,
@@ -600,6 +601,9 @@ impl MiasmaApp {
             logs: LogsState::new(&data_dir),
             pqc_mode: miasma_core::logging::load_privacy(&data_dir).pqc_mode(),
             custody_enabled: miasma_core::config::load_custody_enabled(&data_dir),
+            accept_unknown_depositors: miasma_core::config::load_accept_unknown_depositors(
+                &data_dir,
+            ),
             storage: StorageState::new(),
             updates: crate::updates::UpdatesUi::new(data_dir.clone()),
             network: crate::network_ui::NetworkUi::new(data_dir.clone()),
@@ -3146,6 +3150,20 @@ impl MiasmaApp {
                 }
             }
             kit::hint(ui, st.custody_desc);
+            let mut accept = self.accept_unknown_depositors;
+            if ui.checkbox(&mut accept, st.custody_unknown_label).changed() {
+                let saved = miasma_core::config::set_accept_unknown_depositors_persistent(
+                    &self.data_dir,
+                    accept,
+                )
+                .is_ok();
+                self.accept_unknown_depositors =
+                    miasma_core::config::load_accept_unknown_depositors(&self.data_dir);
+                if !saved || self.accept_unknown_depositors != accept {
+                    self.set_msg(MsgKind::Error, st.custody_unknown_label);
+                }
+            }
+            kit::hint(ui, st.custody_unknown_desc);
         });
     }
 

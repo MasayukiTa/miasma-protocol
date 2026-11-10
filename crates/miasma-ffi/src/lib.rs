@@ -427,6 +427,7 @@ pub fn initialize_node(
             discovery: Default::default(),
             push: Default::default(),
             chat: Default::default(),
+            custody: Default::default(),
             privacy: Default::default(),
             update: miasma_core::update::UpdateConfig::stealth_preset(),
             transfer: Default::default(),

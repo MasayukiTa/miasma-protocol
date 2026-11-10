@@ -997,6 +997,7 @@ fn do_init(data_dir: &Path) -> anyhow::Result<()> {
         discovery: Default::default(),
         push: Default::default(),
         chat: Default::default(),
+        custody: Default::default(),
         privacy: Default::default(),
         update: Default::default(),
         transfer: Default::default(),

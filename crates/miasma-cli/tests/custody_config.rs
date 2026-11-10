@@ -14,7 +14,11 @@ fn run(dir: &std::path::Path, args: &[&str]) -> Output {
 #[test]
 fn custody_config_round_trip_and_offline_check() {
     let dir = tempfile::tempdir().unwrap();
-    for key in ["chat.custody_enabled", "push.file_custody_enabled"] {
+    for key in [
+        "chat.custody_enabled",
+        "push.file_custody_enabled",
+        "custody.accept_unknown_depositors",
+    ] {
         for value in ["false", "true"] {
             let set = run(dir.path(), &["config", "--key", key, "--value", value]);
             assert!(set.status.success(), "{set:?}");
@@ -23,6 +27,35 @@ fn custody_config_round_trip_and_offline_check() {
             assert_eq!(String::from_utf8(get.stdout).unwrap().trim(), value);
         }
     }
+    let set = run(
+        dir.path(),
+        &[
+            "config",
+            "--key",
+            "custody.accept_unknown_depositors",
+            "--value",
+            "false",
+        ],
+    );
+    assert!(set.status.success(), "{set:?}");
+    for command in ["offline-check", "status"] {
+        let output = run(dir.path(), &[command]);
+        assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8(output.stdout)
+            .unwrap()
+            .contains("Accept unknown depositors: no"));
+    }
+    let set = run(
+        dir.path(),
+        &[
+            "config",
+            "--key",
+            "custody.accept_unknown_depositors",
+            "--value",
+            "true",
+        ],
+    );
+    assert!(set.status.success(), "{set:?}");
     let list = run(dir.path(), &["config"]);
     assert!(list.status.success(), "{list:?}");
     let listing = String::from_utf8(list.stdout).unwrap();

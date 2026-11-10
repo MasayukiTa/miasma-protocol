@@ -93,6 +93,7 @@ pub struct ChatSettings {
     /// copy with trusted holders when a direct send cannot go through
     /// (`chat.custody_enabled`, default on).
     pub custody_enabled: bool,
+    pub accept_unknown_depositors: bool,
     /// Limits and switch for the separate file holder.
     pub file_custody_limits: crate::push::file_holder::FileCustodyLimits,
     /// How many trusted holders get a copy when a direct send fails
@@ -135,6 +136,7 @@ impl Default for ChatSettings {
             inbound_per_minute: 30.0,
             group_auto_join: true,
             custody_enabled: false,
+            accept_unknown_depositors: true,
             file_custody_limits: Default::default(),
             custody_copies: crate::config::DEFAULT_CHAT_CUSTODY_COPIES,
             custody_burst: crate::config::DEFAULT_CHAT_CUSTODY_RATE_BURST as f64,
@@ -255,6 +257,7 @@ pub fn start_for_daemon(
         max_message_bytes: cfg.chat.max_message_bytes.clamp(1, proto::MAX_TEXT_BYTES),
         group_auto_join: cfg.chat.group_auto_join,
         custody_enabled: cfg.chat.custody_enabled,
+        accept_unknown_depositors: cfg.custody.accept_unknown_depositors,
         file_custody_limits: crate::push::file_holder::FileCustodyLimits::from_config(&cfg.push),
         custody_copies: cfg.chat.custody_copies.clamp(1, 8),
         custody_burst: cfg.chat.custody_rate_burst.max(1) as f64,
@@ -1195,7 +1198,10 @@ impl ChatService {
             return;
         }
         let allowed = self.contact_may_write(who);
-        if !allowed && !matches!(&req, Request::Deposit { .. }) {
+        if !allowed
+            && (!matches!(&req, Request::Deposit { .. })
+                || !self.settings.accept_unknown_depositors)
+        {
             let _ = wire::write_response(
                 tx,
                 &Response::Refused(super::mailbox::holder::CustodyError::NotTrusted),
