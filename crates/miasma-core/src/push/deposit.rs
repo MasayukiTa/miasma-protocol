@@ -725,6 +725,16 @@ mod tests {
         s
     }
 
+    /// A holder that is reachable but has custody switched off: every deposit
+    /// is refused with `CustodyError::Disabled`.
+    fn off_holder() -> Arc<MemoryCustody> {
+        let limits = CustodyLimits {
+            enabled: false,
+            ..CustodyLimits::default()
+        };
+        Arc::new(MemoryCustody::new(limits))
+    }
+
     fn ids() -> (Identity, Identity) {
         (
             Identity::from_seed(&[11u8; 32]),
@@ -960,7 +970,9 @@ mod tests {
     fn reachable_holder_refusal_is_preserved() {
         let (sender, recipient) = ids();
         let holder = rand::random();
-        let store = file_holder(rand::random(), recipient.id());
+        // The holder is reachable but has custody switched off, so it refuses
+        // every deposit. The refusal reason must survive to the caller.
+        let store = off_holder();
         let tx = InProcess {
             holders: vec![(holder, store)],
             who: sender.id(),
@@ -975,7 +987,7 @@ mod tests {
             1,
         )
         .unwrap_err();
-        assert_eq!(err, DepositError::HolderRefused(CustodyError::NotTrusted));
+        assert_eq!(err, DepositError::HolderRefused(CustodyError::Disabled));
     }
 
     #[test]
