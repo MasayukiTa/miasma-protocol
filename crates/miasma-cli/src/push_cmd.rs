@@ -622,9 +622,9 @@ fn waiting_note(t: &PushTransferInfo, now_ms: u64) -> Option<String> {
         });
     } else if t.error_kind.as_deref() == Some("unreachable") {
         s.push_str(if ja {
-            "。一時停止中: 相手がオフラインです"
+            "。受信者に接続できませんでした"
         } else {
-            ". Paused: the other side is offline"
+            ". The recipient could not be reached"
         });
     }
     Some(s)
@@ -999,6 +999,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn waiting_for_unreachable_recipient_does_not_assert_offline() {
+        let mut transfer = info_with(None, PushState::Waiting, 0);
+        transfer.error_kind = Some("unreachable".into());
+        let note = waiting_note(&transfer, 0).unwrap();
+        assert!(!note.contains("the other side is offline"));
+        assert!(!note.contains("相手がオフライン"));
+    }
     #[test]
     fn live_text_running_finished_and_old_daemon() {
         let running = TransferStats {

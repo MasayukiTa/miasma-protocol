@@ -1181,7 +1181,7 @@ impl PushService {
                 Ok(()) => break,
                 Err(e) => {
                     if !self
-                        .wait_retry(&mut job, &mut st, error_kind::UNREACHABLE, e, &mut stop)
+                        .wait_retry(&mut job, &mut st, error_kind::CONNECTION_LOST, e, &mut stop)
                         .await
                     {
                         return;
@@ -1290,7 +1290,17 @@ impl PushService {
                         return;
                     }
                     if self
-                        .wait_retry(&mut job, &mut st, kind, describe_dial_error(&e), &mut stop)
+                        .wait_retry(
+                            &mut job,
+                            &mut st,
+                            if deposit_error.is_some() {
+                                error_kind::CONNECTION_LOST
+                            } else {
+                                kind
+                            },
+                            deposit_error.unwrap_or_else(|| describe_dial_error(&e)),
+                            &mut stop,
+                        )
                         .await
                     {
                         continue;
@@ -1407,7 +1417,20 @@ impl PushService {
                         .await;
                         return;
                     }
-                    if !self.wait_retry(&mut job, &mut st, kind, m, &mut stop).await {
+                    if !self
+                        .wait_retry(
+                            &mut job,
+                            &mut st,
+                            if deposit_error.is_some() {
+                                error_kind::CONNECTION_LOST
+                            } else {
+                                kind
+                            },
+                            deposit_error.unwrap_or(m),
+                            &mut stop,
+                        )
+                        .await
+                    {
                         return;
                     }
                 }
@@ -1426,7 +1449,7 @@ impl PushService {
     ) {
         loop {
             if !self
-                .wait_retry(job, st, error_kind::UNREACHABLE, error, stop)
+                .wait_retry(job, st, error_kind::CONNECTION_LOST, error, stop)
                 .await
             {
                 return;
