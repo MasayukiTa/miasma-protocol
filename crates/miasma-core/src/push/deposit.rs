@@ -621,6 +621,87 @@ mod tests {
         }
     }
 
+    struct Limited {
+        inner: InProcess,
+        remaining: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MailboxTransport for Limited {
+        fn deposit(
+            &self,
+            holder: &[u8; 32],
+            tag: RecipientTag,
+            item: ItemId,
+            blob: &[u8],
+            now_ms: u64,
+        ) -> Result<DepositOutcome, MailboxError> {
+            if self
+                .remaining
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |n| n.checked_sub(1),
+                )
+                .is_ok()
+            {
+                return Err(MailboxError::Refused(CustodyError::RateLimited));
+            }
+            self.inner.deposit(holder, tag, item, blob, now_ms)
+        }
+        fn list(
+            &self,
+            holder: &[u8; 32],
+            tag: RecipientTag,
+            now_ms: u64,
+        ) -> Result<Vec<ItemId>, MailboxError> {
+            self.inner.list(holder, tag, now_ms)
+        }
+        fn fetch(
+            &self,
+            holder: &[u8; 32],
+            tag: RecipientTag,
+            item: ItemId,
+            now_ms: u64,
+        ) -> Result<Option<Vec<u8>>, MailboxError> {
+            self.inner.fetch(holder, tag, item, now_ms)
+        }
+        fn delete(
+            &self,
+            holder: &[u8; 32],
+            tag: RecipientTag,
+            item: ItemId,
+        ) -> Result<bool, MailboxError> {
+            self.inner.delete(holder, tag, item)
+        }
+    }
+
+    #[test]
+    fn rate_limited_holder_retries_and_deposits_more_than_old_burst() {
+        let sender = Identity::from_seed(&rand::random());
+        let recipient = Identity::from_seed(&rand::random());
+        let holder = rand::random();
+        let store = file_holder(sender.id(), recipient.id());
+        let tx = Limited {
+            inner: InProcess {
+                holders: vec![(holder, store)],
+                who: sender.id(),
+            },
+            remaining: std::sync::atomic::AtomicUsize::new(2),
+        };
+        let data = vec![0; CHUNK_PLAINTEXT * 21];
+        let receipt = deposit_file(
+            &tx,
+            &[holder],
+            &recipient.id(),
+            rand::random(),
+            &data[..],
+            1_000,
+            1,
+        )
+        .unwrap();
+        assert_eq!(receipt.manifest.chunks, 21);
+        assert_eq!(receipt.held_by, vec![holder]);
+    }
     /// A custody store with room for a whole small file (the chat defaults are
     /// sized for single messages, not files). The hard ceilings still apply.
     fn file_holder(depositor: [u8; 32], recipient: [u8; 32]) -> Arc<MemoryCustody> {
