@@ -250,6 +250,35 @@ fn deposit_line(v: DepositVerdict) -> &'static str {
     }
 }
 
+pub async fn custody_peer_counts(data_dir: &Path) -> Option<(usize, usize)> {
+    use miasma_core::chat::{ChatRequest, ChatResponse};
+    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+    match daemon_request(
+        data_dir,
+        ControlRequest::Chat(ChatRequest::CustodyPeerCounts {}),
+    )
+    .await
+    {
+        Ok(ControlResponse::Chat(ChatResponse::CustodyPeerCounts {
+            introduced_holders,
+            allowed_depositors,
+        })) => Some((introduced_holders, allowed_depositors)),
+        _ => None,
+    }
+}
+pub async fn print_custody_peer_counts(data_dir: &Path) {
+    match custody_peer_counts(data_dir).await {
+        Some((holders, depositors)) => {
+            println!("  Introduced holders: {holders}");
+            println!("  Allowed depositors: {depositors}");
+        }
+        None => {
+            println!("  Introduced holders: unknown (chat unavailable)");
+            println!("  Allowed depositors: unknown (chat unavailable)");
+        }
+    }
+}
+
 /// Run the self-check: gather, judge, and print. Human text by default; a
 /// stable JSON object with `--json`.
 pub async fn run(data_dir: &Path, json: bool) -> Result<()> {
@@ -273,8 +302,11 @@ pub async fn run(data_dir: &Path, json: bool) -> Result<()> {
         .map(|s| s.discovery_peers_found)
         .unwrap_or(0);
 
+    let counts = custody_peer_counts(data_dir).await;
     if json {
         let obj = serde_json::json!({
+            "introduced_holders": counts.map(|v| v.0),
+            "allowed_depositors": counts.map(|v| v.1),
             "discovery_enabled": discovery_enabled,
             "discovery_peers_found": discovery_peers_found,
             "bootstrap_reachability": match report.bootstrap {
@@ -302,6 +334,7 @@ pub async fn run(data_dir: &Path, json: bool) -> Result<()> {
     }
 
     println!("Miasma Offline-Delivery Self-Check");
+    print_custody_peer_counts(data_dir).await;
     println!(
         "  Network discovery: {}, peers found last round {}",
         if discovery_enabled {

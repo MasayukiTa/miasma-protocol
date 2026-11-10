@@ -17,6 +17,8 @@ pub enum ChatRequest {
         contact: String,
         text: String,
     },
+    HolderIntro { contact: Option<String> },
+    CustodyPeerCounts {},
     /// Every conversation, newest first.
     Conversations {},
     /// A page of one conversation: at most `limit` messages (default 50) with
@@ -479,6 +481,8 @@ pub enum ChatResponse {
     Queued {
         id: String,
     },
+    HolderIntroQueued { count: usize },
+    CustodyPeerCounts { introduced_holders: usize, allowed_depositors: usize },
     Conversations(Vec<ConversationInfo>),
     History {
         endpoint_id: String,
@@ -625,6 +629,14 @@ pub fn handle_with(
             Some(gs) => ChatResponse::Group(super::group::ipc::handle_with(gs, g)),
             None => err("unavailable", "group chat is not running"),
         },
+        ChatRequest::HolderIntro { contact } => match svc.introduce_self_to_contacts(contact.as_deref()) {
+            Ok(count) => ChatResponse::HolderIntroQueued { count },
+            Err(e) => err("holder_intro", e),
+        },
+        ChatRequest::CustodyPeerCounts {} => {
+            let (introduced_holders, allowed_depositors) = svc.custody_peer_counts();
+            ChatResponse::CustodyPeerCounts { introduced_holders, allowed_depositors }
+        }
         ChatRequest::Send { contact, text } => {
             let Some(c) = svc.contacts().find(&contact) else {
                 return unknown(&contact);

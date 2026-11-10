@@ -99,6 +99,12 @@ enum Commands {
         total_shards: usize,
     },
 
+    /// Introduce this node as a custody holder to contacts.
+    HolderIntro {
+        #[arg(long)]
+        contact: Option<String>,
+    },
+
     /// Show node status (peer ID, storage usage, config summary).
     Status,
 
@@ -664,6 +670,24 @@ async fn main() -> Result<()> {
             total_shards,
         ),
 
+        Commands::HolderIntro { contact } => {
+            use miasma_core::chat::{ChatRequest, ChatResponse};
+            use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+            match daemon_request(
+                &data_dir,
+                ControlRequest::Chat(ChatRequest::HolderIntro { contact }),
+            )
+            .await?
+            {
+                ControlResponse::Chat(ChatResponse::HolderIntroQueued { count }) => {
+                    println!("Queued holder introductions for {count} contact(s)");
+                    Ok(())
+                }
+                ControlResponse::Chat(ChatResponse::Error { message, .. })
+                | ControlResponse::Error(message) => bail!("{message}"),
+                _ => bail!("unexpected daemon response"),
+            }
+        }
         Commands::Status => cmd_status(&data_dir).await,
 
         Commands::Logs {
@@ -1023,6 +1047,7 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
         use miasma_core::ControlResponse;
         if let ControlResponse::Status(s) = resp {
             println!("Miasma Daemon Status");
+            offline_check::print_custody_peer_counts(data_dir).await;
             println!("  Peer ID:             {}", s.peer_id);
             for addr in &s.listen_addrs {
                 println!("  Listen addr:         {addr}/p2p/{}", s.peer_id);

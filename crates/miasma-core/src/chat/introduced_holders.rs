@@ -99,6 +99,9 @@ impl IntroducedHolders {
         }
         Ok(inserted)
     }
+    pub fn count(&self, now: u64) -> usize {
+        self.entries.iter().filter(|entry| entry.expires_ms > now).count()
+    }
     pub fn holders_for_deposit(
         &self,
         now: u64,
