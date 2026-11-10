@@ -249,7 +249,10 @@ impl CustodyStore for DiskFileCustody {
         g.sweep(now_ms);
         let key = (tag, item);
         if let Some(existing) = g.items.get(&key) {
-            if existing.from != *who || fs::read(&existing.path).ok().as_deref() != Some(blob) {
+            // A repeated identical deposit (same key and blob) is a duplicate
+            // regardless of who re-sends it, and never counts against a quota;
+            // only a key collision carrying a different blob is refused.
+            if fs::read(&existing.path).ok().as_deref() != Some(blob) {
                 return Err(CustodyError::Full);
             }
             let order = g.next_order;
