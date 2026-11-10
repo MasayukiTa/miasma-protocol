@@ -1517,6 +1517,14 @@ impl ChatService {
         let mut announced = false;
         for _ in 0..MAX_STREAMS_PER_CONNECTION {
             let allowed = self.contact_may_write(&remote);
+            if !allowed {
+                // A stranger that reaches us is remembered as a suggestion for
+                // the contact list as soon as it connects, whether it goes on
+                // to send a chat frame (refused below) or an open custody
+                // deposit (accepted within quota). This is `note_unknown`'s own
+                // job to keep idempotent and to skip for known contacts.
+                self.contacts.note_unknown(&remote);
+            }
             if allowed && !announced {
                 announced = true;
                 // The contact is online: let our own queue for it go out now,
@@ -1592,7 +1600,7 @@ impl ChatService {
                 continue;
             }
             if !allowed {
-                self.contacts.note_unknown(&remote);
+                // Already noted as a suggestion at the top of the loop.
                 let loud = self.unknown.lock().unwrap().allow(remote);
                 if loud {
                     debug!(peer = %fingerprint(&remote), "chat refused: not a contact that may write");
