@@ -303,6 +303,11 @@ pub mod error_kind {
     pub const SOURCE_CHANGED: &str = "source_changed";
     /// Outbound: the other side answered but its build has no file push.
     pub const PEER_NO_PUSH: &str = "peer_no_push";
+    /// Outbound: a reachable holder refused an offline deposit because the
+    /// sender exceeded its per-contact custody rate. The holder is up; the
+    /// sender is being told to slow down, so this is neither unreachable nor a
+    /// dropped connection.
+    pub const RATE_LIMITED: &str = "rate_limited";
 }
 
 pub fn now_ms() -> u64 {

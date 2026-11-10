@@ -1293,11 +1293,7 @@ impl PushService {
                         .wait_retry(
                             &mut job,
                             &mut st,
-                            if deposit_error.is_some() {
-                                error_kind::CONNECTION_LOST
-                            } else {
-                                kind
-                            },
+                            deposit_retry_kind(kind, deposit_error.as_deref()),
                             deposit_error.unwrap_or_else(|| describe_dial_error(&e)),
                             &mut stop,
                         )
@@ -1421,11 +1417,7 @@ impl PushService {
                         .wait_retry(
                             &mut job,
                             &mut st,
-                            if deposit_error.is_some() {
-                                error_kind::CONNECTION_LOST
-                            } else {
-                                kind
-                            },
+                            deposit_retry_kind(kind, deposit_error.as_deref()),
                             deposit_error.unwrap_or(m),
                             &mut stop,
                         )
@@ -2609,6 +2601,20 @@ fn reject_text(r: RejectReason) -> String {
         }
     }
     .to_owned()
+}
+
+/// The kind to report after a failed dial (or a lost connection) when an
+/// offline deposit was also attempted and did not go through. A dial that was
+/// refused or could not connect keeps its original kind (`unreachable`); it
+/// does not become `connection_lost` just because the fallback deposit failed.
+/// The one exception: a reachable holder that refused the deposit because of
+/// its per-contact rate limit is reported with its own kind, so the operator
+/// sees "slow down" rather than "offline" or "dropped".
+fn deposit_retry_kind(original: &'static str, deposit_error: Option<&str>) -> &'static str {
+    match deposit_error {
+        Some(msg) if msg.contains("too many custody requests") => error_kind::RATE_LIMITED,
+        _ => original,
+    }
 }
 
 fn describe_dial_error(e: &IrohClientError) -> String {
