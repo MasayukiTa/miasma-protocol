@@ -630,11 +630,12 @@ fn waiting_note(t: &PushTransferInfo, now_ms: u64) -> Option<String> {
         });
     } else if let Some(reason) = holder_refusal {
         // Some other refusal from a reachable holder: name the holder's reason.
-        s.push_str(if ja {
-            &format!("。預かり役が預け入れを断りました: {reason}")
+        let note = if ja {
+            format!("。預かり役が預け入れを断りました: {reason}")
         } else {
-            &format!(". A holder refused the deposit: {reason}")
-        });
+            format!(". A holder refused the deposit: {reason}")
+        };
+        s.push_str(&note);
     } else if err.contains("waiting in holder") || t.state == PushState::Deposited {
         // The file is already deposited; we are waiting for the recipient.
         s.push_str(if ja {
@@ -1219,6 +1220,7 @@ mod tests {
             error: Some("raw daemon text".into()),
             reject_reason: None,
             error_kind: Some("brand_new_kind".into()),
+            stage: None,
             source_path: None,
             saved_as: None,
             created_at_ms: 0,
