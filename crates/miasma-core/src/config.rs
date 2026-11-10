@@ -44,6 +44,15 @@ pub struct NodeConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustodyConfig {
+    /// Whether this holder accepts deposits from senders who are not contacts.
+    ///
+    /// Default: ON. This is a deliberate owner decision (review finding F-004):
+    /// open deposits are on by default so that a correspondent who is not yet a
+    /// contact can still leave a sealed message for an offline recipient. A node
+    /// whose `[custody]` section is absent therefore accepts unknown depositors
+    /// without an explicit opt-in. The unknown class is bounded separately (see
+    /// the class-wide cap in the holder), so turning this off is a tightening,
+    /// not a safety fix. Set it to `false` to accept deposits from contacts only.
     #[serde(default = "default_true")]
     pub accept_unknown_depositors: bool,
 }

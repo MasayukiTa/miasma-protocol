@@ -93,6 +93,10 @@ pub struct ChatSettings {
     /// copy with trusted holders when a direct send cannot go through
     /// (`chat.custody_enabled`, default on).
     pub custody_enabled: bool,
+    /// Accept deposits from non-contacts. Default ON by owner decision (F-004);
+    /// mirrors `CustodyConfig::accept_unknown_depositors`. The non-contact class
+    /// is bounded by the holder's class-wide cap, so this flag is a policy knob,
+    /// not the protection against abuse.
     pub accept_unknown_depositors: bool,
     /// Limits and switch for the separate file holder.
     pub file_custody_limits: crate::push::file_holder::FileCustodyLimits,
