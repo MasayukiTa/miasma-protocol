@@ -411,6 +411,7 @@ fn deposit_one(
                     break;
                 }
                 Err(MailboxError::Refused(CustodyError::RateLimited)) => {
+                    last_refusal = Some(CustodyError::RateLimited);
                     // The default bucket refills one request every two seconds.
                     let jitter = u64::from(rand::random::<u16>()) % 501;
                     std::thread::sleep(std::time::Duration::from_millis(

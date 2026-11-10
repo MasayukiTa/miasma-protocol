@@ -286,6 +286,10 @@ pub mod error_kind {
     pub const UNREACHABLE: &str = "unreachable";
     /// The connection broke mid-transfer (outbound: retries ran out). Resumable.
     pub const CONNECTION_LOST: &str = "connection_lost";
+    /// A reachable holder refused the deposit.
+    pub const HOLDER_REFUSED: &str = "holder_refused";
+    /// A reachable holder rate limited the deposit.
+    pub const RATE_LIMITED: &str = "rate_limited";
     /// Nothing moved / no answer within the time limit.
     pub const TIMED_OUT: &str = "timed_out";
     /// Inbound, state `Cancelled`: the sender stopped the transfer on purpose.

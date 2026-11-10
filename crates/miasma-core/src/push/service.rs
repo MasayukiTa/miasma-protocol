@@ -271,6 +271,45 @@ struct AttemptStats {
     accepted: Option<u64>,
 }
 
+#[derive(Debug)]
+struct DepositFailure {
+    message: String,
+    kind: Option<&'static str>,
+}
+impl From<String> for DepositFailure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            kind: None,
+        }
+    }
+}
+impl From<&str> for DepositFailure {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+impl From<super::deposit::DepositError> for DepositFailure {
+    fn from(error: super::deposit::DepositError) -> Self {
+        let kind = match &error {
+            super::deposit::DepositError::HolderRefused(
+                crate::chat::mailbox::holder::CustodyError::RateLimited,
+            ) => Some(error_kind::RATE_LIMITED),
+            super::deposit::DepositError::HolderRefused(_) => Some(error_kind::HOLDER_REFUSED),
+            _ => None,
+        };
+        Self {
+            kind,
+            message: error.to_string(),
+        }
+    }
+}
+impl DepositFailure {
+    fn with_fallback(self, fallback: &'static str) -> (&'static str, String) {
+        (self.kind.unwrap_or(fallback), self.message)
+    }
+}
+
 /// Bookkeeping of one job across its attempts.
 struct RetryState {
     /// Failed attempts in a row since bytes last moved.
@@ -1181,7 +1220,13 @@ impl PushService {
                 Ok(()) => break,
                 Err(e) => {
                     if !self
-                        .wait_retry(&mut job, &mut st, error_kind::CONNECTION_LOST, e, &mut stop)
+                        .wait_retry(
+                            &mut job,
+                            &mut st,
+                            e.kind.unwrap_or(error_kind::UNREACHABLE),
+                            e.message,
+                            &mut stop,
+                        )
                         .await
                     {
                         return;
@@ -1284,7 +1329,9 @@ impl PushService {
                             &target,
                             &mut st,
                             &mut stop,
-                            deposit_error.unwrap_or_else(|| "cannot send deposit notice".into()),
+                            deposit_error
+                                .unwrap_or_else(|| "cannot send deposit notice".into())
+                                .with_fallback(kind),
                         )
                         .await;
                         return;
@@ -1293,12 +1340,13 @@ impl PushService {
                         .wait_retry(
                             &mut job,
                             &mut st,
-                            if deposit_error.is_some() {
-                                error_kind::CONNECTION_LOST
-                            } else {
-                                kind
-                            },
-                            deposit_error.unwrap_or_else(|| describe_dial_error(&e)),
+                            deposit_error
+                                .as_ref()
+                                .and_then(|error| error.kind)
+                                .unwrap_or(kind),
+                            deposit_error
+                                .map(|error| error.message)
+                                .unwrap_or_else(|| describe_dial_error(&e)),
                             &mut stop,
                         )
                         .await
@@ -1412,7 +1460,9 @@ impl PushService {
                             &target,
                             &mut st,
                             &mut stop,
-                            deposit_error.unwrap_or_else(|| "cannot send deposit notice".into()),
+                            deposit_error
+                                .unwrap_or_else(|| "cannot send deposit notice".into())
+                                .with_fallback(kind),
                         )
                         .await;
                         return;
@@ -1421,12 +1471,11 @@ impl PushService {
                         .wait_retry(
                             &mut job,
                             &mut st,
-                            if deposit_error.is_some() {
-                                error_kind::CONNECTION_LOST
-                            } else {
-                                kind
-                            },
-                            deposit_error.unwrap_or(m),
+                            deposit_error
+                                .as_ref()
+                                .and_then(|error| error.kind)
+                                .unwrap_or(kind),
+                            deposit_error.map(|error| error.message).unwrap_or(m),
                             &mut stop,
                         )
                         .await
@@ -1445,13 +1494,10 @@ impl PushService {
         target: &[u8; 32],
         st: &mut RetryState,
         stop: &mut watch::Receiver<bool>,
-        mut error: String,
+        mut error: (&'static str, String),
     ) {
         loop {
-            if !self
-                .wait_retry(job, st, error_kind::CONNECTION_LOST, error, stop)
-                .await
-            {
+            if !self.wait_retry(job, st, error.0, error.1, stop).await {
                 return;
             }
             match self
@@ -1463,7 +1509,7 @@ impl PushService {
                     return;
                 }
                 Err(e) => {
-                    error = e;
+                    error = e.with_fallback(error.0);
                 }
             }
         }
@@ -1474,7 +1520,7 @@ impl PushService {
         contact: &Contact,
         path: &Path,
         rec: &mut OutJob,
-    ) -> Result<(), String> {
+    ) -> Result<(), DepositFailure> {
         // A changed source needs a new key and salt before another deposit.
         if rec.deposit_notice.is_none()
             && rec.network_share_id.is_none()
@@ -1506,13 +1552,19 @@ impl PushService {
             return Err("no protected session".into());
         }
         if rec.network_share_id.is_some() || rec.network_intent.is_some() {
-            return self.send_network_fallback(&chat, contact, path, rec).await;
+            return self
+                .send_network_fallback(&chat, contact, path, rec)
+                .await
+                .map_err(Into::into);
         }
         if rec.deposit_notice.is_none() {
             let mut holders = chat.holders_for_kind(&peer, true);
             holders.truncate(8);
             if holders.is_empty() {
-                return self.send_network_fallback(&chat, contact, path, rec).await;
+                return self
+                    .send_network_fallback(&chat, contact, path, rec)
+                    .await
+                    .map_err(Into::into);
             }
             let transport = chat.file_mailbox_transport();
             let path = path.to_owned();
@@ -1542,7 +1594,8 @@ impl PushService {
             let salt = intent.salt;
             self.outbox.put_checked(rec, true)?;
             let receipt = tokio::task::spawn_blocking(move || {
-                let file = std::fs::File::open(path).map_err(|e| (false, e.to_string()))?;
+                let file = std::fs::File::open(path)
+                    .map_err(|e| (false, DepositFailure::from(e.to_string())))?;
                 super::deposit::deposit_file_with_key(
                     &transport,
                     &holders,
@@ -1559,7 +1612,7 @@ impl PushService {
                             &e,
                             super::deposit::DepositError::NotDeposited { held: 0, .. }
                         ),
-                        e.to_string(),
+                        DepositFailure::from(e),
                     )
                 })
             })
@@ -1571,7 +1624,8 @@ impl PushService {
                     let source = PathBuf::from(&rec.path);
                     return self
                         .send_network_fallback(&chat, contact, &source, rec)
-                        .await;
+                        .await
+                        .map_err(Into::into);
                 }
                 Err((false, e)) => return Err(e),
             };
@@ -1593,7 +1647,7 @@ impl PushService {
         rec.notice_id = Some(message_id);
         if let Err(e) = self.outbox.put_checked(rec, true) {
             rec.notice_id = None;
-            return Err(e);
+            return Err(e.into());
         }
         self.board
             .update(&rec.id, |i| i.state = PushState::Deposited);
@@ -2731,6 +2785,31 @@ pub fn place_without_overwrite(part: &Path, dir: &Path, name: &str) -> std::io::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deposit_failure_preserves_refusal_kind_and_dial_fallback() {
+        use super::super::deposit::DepositError;
+        use crate::chat::mailbox::holder::CustodyError;
+        let failure = DepositFailure::from(DepositError::HolderRefused(CustodyError::RateLimited));
+        let (kind, message) = failure.with_fallback(error_kind::UNREACHABLE);
+        assert_eq!(kind, error_kind::RATE_LIMITED);
+        assert!(message.contains("holder refused the deposit"));
+        let failure = DepositFailure::from(DepositError::HolderRefused(CustodyError::Full));
+        assert_eq!(
+            failure.with_fallback(error_kind::UNREACHABLE).0,
+            error_kind::HOLDER_REFUSED
+        );
+        let failure = DepositFailure::from("no chat service");
+        assert_eq!(
+            failure.with_fallback(error_kind::UNREACHABLE).0,
+            error_kind::UNREACHABLE
+        );
+        let failure = DepositFailure::from("no chat service");
+        assert_eq!(
+            failure.with_fallback(error_kind::CONNECTION_LOST).0,
+            error_kind::CONNECTION_LOST
+        );
+    }
 
     fn network_job(path: &Path) -> OutJob {
         let (size, mtime_ms) = stamp(&std::fs::metadata(path).unwrap());
