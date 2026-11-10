@@ -9,7 +9,6 @@
 //! and are retried ([`service`]).
 
 pub mod activity;
-pub mod allowed_depositors;
 pub mod anchor;
 #[cfg(feature = "pqc")]
 pub mod call;
