@@ -138,6 +138,7 @@ jobs:
           --test persisted_paths_lint --test call_media_pr5_test --test call_e2e_pr6_test
           --test call_e2e_video_test --test call_ipc_media_test
           --test call_e2e_call1_test
+          --test call_e2e_call2_test
           --test chat_custody_net_test
 
       - name: Check the mobile bridge with the feature
