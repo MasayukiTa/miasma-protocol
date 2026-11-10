@@ -823,6 +823,10 @@ mod tests {
             max_items: 1024,
             ..on()
         });
+        // A is a real contact here, as the `store()` helper trusts it; the
+        // final deposit below must exercise the three quarters reserved for
+        // contacts, not fall into the unknown class the strangers fill.
+        s.trust(A);
         let recipient: [u8; 32] = rand::random();
         s.trust(recipient);
         let tag = RecipientTag::for_recipient(&recipient);
