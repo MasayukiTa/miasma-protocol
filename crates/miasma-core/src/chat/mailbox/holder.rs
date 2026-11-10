@@ -382,7 +382,10 @@ impl CustodyStore for MemoryCustody {
         g.sweep(now_ms);
         let key = (tag, item);
         if let Some(held) = g.items.get(&key) {
-            if held.from != *who || held.blob != blob {
+            // A repeated identical deposit (same key and blob) is a duplicate
+            // regardless of who re-sends it, and never counts against a quota;
+            // only a key collision carrying a different blob is refused.
+            if held.blob != blob {
                 return Err(CustodyError::Full);
             }
             let order = g.next_order;
