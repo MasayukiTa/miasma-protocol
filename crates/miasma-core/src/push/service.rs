@@ -2603,6 +2603,13 @@ fn reject_text(r: RejectReason) -> String {
     .to_owned()
 }
 
+/// Substring that marks a holder's per-contact rate-limit refusal. It is the
+/// stable prefix of the holder-side message
+/// (`chat::mailbox::holder` `RateLimited`: "too many custody requests; slow
+/// down"); the match is case-insensitive so a holder that capitalises its
+/// wording is still recognised. Keep this in step with that message.
+const RATE_LIMIT_REFUSAL_NEEDLE: &str = "too many custody requests";
+
 /// The kind to report after a failed dial (or a lost connection) when an
 /// offline deposit was also attempted and did not go through. A dial that was
 /// refused or could not connect keeps its original kind (`unreachable`); it
@@ -2612,11 +2619,7 @@ fn reject_text(r: RejectReason) -> String {
 /// sees "slow down" rather than "offline" or "dropped".
 fn deposit_retry_kind(original: &'static str, deposit_error: Option<&str>) -> &'static str {
     match deposit_error {
-        Some(msg)
-            if msg
-                .to_ascii_lowercase()
-                .contains("too many custody requests") =>
-        {
+        Some(msg) if msg.to_ascii_lowercase().contains(RATE_LIMIT_REFUSAL_NEEDLE) => {
             error_kind::RATE_LIMITED
         }
         _ => original,
