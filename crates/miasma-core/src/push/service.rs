@@ -1180,10 +1180,8 @@ impl PushService {
             {
                 Ok(()) => break,
                 Err(e) => {
-                    if !self
-                        .wait_retry(&mut job, &mut st, error_kind::CONNECTION_LOST, e, &mut stop)
-                        .await
-                    {
+                    let kind = deposit_retry_kind(error_kind::CONNECTION_LOST, Some(&e));
+                    if !self.wait_retry(&mut job, &mut st, kind, e, &mut stop).await {
                         return;
                     }
                 }
@@ -1440,10 +1438,8 @@ impl PushService {
         mut error: String,
     ) {
         loop {
-            if !self
-                .wait_retry(job, st, error_kind::CONNECTION_LOST, error, stop)
-                .await
-            {
+            let kind = deposit_retry_kind(error_kind::CONNECTION_LOST, Some(&error));
+            if !self.wait_retry(job, st, kind, error, stop).await {
                 return;
             }
             match self
