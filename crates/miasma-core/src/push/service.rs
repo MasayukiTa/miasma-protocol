@@ -2612,7 +2612,13 @@ fn reject_text(r: RejectReason) -> String {
 /// sees "slow down" rather than "offline" or "dropped".
 fn deposit_retry_kind(original: &'static str, deposit_error: Option<&str>) -> &'static str {
     match deposit_error {
-        Some(msg) if msg.contains("too many custody requests") => error_kind::RATE_LIMITED,
+        Some(msg)
+            if msg
+                .to_ascii_lowercase()
+                .contains("too many custody requests") =>
+        {
+            error_kind::RATE_LIMITED
+        }
         _ => original,
     }
 }
@@ -3145,6 +3151,14 @@ mod tests {
         // The same holder reply overrides a connection_lost original too.
         assert_eq!(
             deposit_retry_kind(error_kind::CONNECTION_LOST, Some(msg)),
+            error_kind::RATE_LIMITED
+        );
+        // The holder's wording may be capitalised; the match is case-insensitive.
+        assert_eq!(
+            deposit_retry_kind(
+                error_kind::UNREACHABLE,
+                Some("Too Many Custody Requests from this contact")
+            ),
             error_kind::RATE_LIMITED
         );
     }
