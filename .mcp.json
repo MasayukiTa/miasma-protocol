@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "agent-eln": {
+      "command": "C:\\Users\\M118A8586\\AppData\\Local\\Programs\\Python\\Python310\\python.exe",
+      "args": [
+        "C:\\work\\agent-eln\\eln_mcp.py",
+        "--project",
+        "C:\\work\\miasma-beta12-src",
+        "--agent",
+        "claude-code"
+      ]
+    }
+  }
+}

@@ -78,3 +78,10 @@
 - `RELEASE-NOTES.md`
 - `docs/variant-guide.md`
 - `docs/adr/`
+
+## Experiment Notebook (agent-eln)
+
+- Development work in this repo is recorded in the agent-eln notebook under `.eln/`.
+- Follow ELN_PROTOCOL.md: write the hypothesis before the work, run commands through
+  the observer (eln_run), attach evidence to observations, never edit .eln files directly.
+- Reviews/approvals are human-only. Before reporting, run eln_verify.

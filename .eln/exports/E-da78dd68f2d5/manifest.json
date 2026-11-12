@@ -1,0 +1,342 @@
+{
+  "entry": "E-da78dd68f2d5",
+  "exported_at": "2026-10-29T12:00:56+09:00",
+  "project": "miasma-beta12-src",
+  "nodes": [
+    {
+      "id": "E-da78dd68f2d5",
+      "seq": 17,
+      "type": "conclusion",
+      "claim": "declared",
+      "title": "現状サマリ (2026-10-29): beta12監査完了・指摘は修正フェーズ・通話とbeta13が並行",
+      "ts": "2026-10-29T11:59:18+09:00",
+      "hash": "0ad21e03fbcb6cfedf42a7d7973140f4782314dc6b2afc34876c0661c3af2199",
+      "links": [
+        "E-fb0678f7e5d4",
+        "E-4e813c0d9849",
+        "E-13c0415f8b62",
+        "E-9bb849df647a",
+        "E-3a652f4f06d3",
+        "E-b888e594ecc2",
+        "E-4967d055b167",
+        "E-191929397594"
+      ],
+      "supersedes": null
+    },
+    {
+      "id": "E-fb0678f7e5d4",
+      "seq": 6,
+      "type": "observation",
+      "claim": "declared",
+      "title": "UI/UX監査の所見: 高3 / 中7 / 低6",
+      "ts": "2026-10-26T13:00:00+09:00",
+      "hash": "17977a3ff6f11849a5d16c28dadce7286c358a558cfe244a1ed8de954e799418",
+      "links": [
+        "E-0af066d14d7a"
+      ],
+      "supersedes": null
+    },
+    {
+      "id": "E-0af066d14d7a",
+      "seq": 5,
+      "type": "experiment",
+      "claim": "declared",
+      "title": "beta12 UI/UX 実機監査の実施",
+      "ts": "2026-10-26T12:00:00+09:00",
+      "hash": "451a46b33d50511a2d1f324bdf86f84182683d4f4c52737a18eae58aefb01f5e",
+      "links": [
+        "E-e3c92335b648"
+      ],
+      "supersedes": null
+    },
+    {
+      "id": "E-e3c92335b648",
+      "seq": 1,
+      "type": "note",
+      "claim": "declared",
+      "title": "過去分バックフィル: beta12 UI/UX監査群 (2026-10-26 - 28)",
+      "ts": "2026-10-26T23:59:00+09:00",
+      "hash": "0e262fc4443179457b4ecea17c50d405b3671def2ac898ba809f2fe1851cd34e",
+      "links": [],
+      "supersedes": null
+    },
+    {
+      "id": "E-4e813c0d9849",
+      "seq": 8,
+      "type": "observation",
+      "claim": "declared",
+      "title": "チャット監査の所見: 高2 / 中6 / 低5",
+      "ts": "2026-10-26T19:00:00+09:00",
+      "hash": "f7a27ea6bb0ec3494d121792949ffe9bbf220d49ada10c92513461a58f2a45f2",
+      "links": [
+        "E-6bbaf23ea882"
+      ],
+      "supersedes": null
+    },
+    {
+      "id": "E-6bbaf23ea882",
+      "seq": 7,
+      "type": "experiment",
+      "claim": "declared",
+      "title": "実チャット / グループチャット監査の実施 (実送信検証つき)",
+      "ts": "2026-10-26T18:00:00+09:00",
+      "hash": "0bd73b44aa1dd08d5220b5243a0b31e12b2dfa79a8637a68677c52702797bdcc",
+      "links": [
+        "E-e3c92335b648"
+      ],
+      "supersedes": null
+    },
+    {
+      "id": "E-13c0415f8b62",
+      "seq": 10,
+      "type": "observation",
+      "claim": "declared",
+      "title": "AIポンだし感 第1段階の所見: S1-S6",
+      "ts": "2026-10-26T21:30:00+09:00",
+      "hash": "9347ce54a0ecb0d26bdd7fd37347a54ffe3befa518c3e7e6898a936694d00d8d",
+      "links": [
+        "E-7b9953721c0a"
+      ],
+      "supersedes": null
+    },
+    {
+      "id": "E-7b9953721c0a",
+      "seq": 9,
+      "type": "experiment",
+      "claim": "declared",
+      "title": "AIポンだし感監査 第1段階: 既存証拠の再整理",
+      "ts": "2026-10-26T21:00:00+09:00",
+      "hash": "302b858328bee2847f44eeaa8c0da00818a840835f165d80e44960de664519d6",
+      "links": [
+        "E-e3c92335b648"
+      ],
+      "supersedes": null
+    },
+    {
+      "id": "E-9bb849df647a",
+      "seq": 12,
+      "type": "observation",
+      "claim": "declared",
+      "title": "AIポンだし感 第2段階の所見: T1-T13 + 訂正",
+      "ts": "2026-10-27T11:00:00+09:00",
+      "hash": "45ac75a36c37b2485b6dfb62d6382d46233e2059d97b24912ef6c4147eb6bb16",
+      "links": [
+        "E-8204aca52b33",
+        "E-4e813c0d9849"
+      ],
+      "supersedes": null
+    },
+    {
+      "id": "E-8204aca52b33",
+      "seq": 11,
+      "type": "experiment",
+      "claim": "declared",
+      "title": "AIポンだし感監査 第2段階: 実走査 (テクニカル/かんたん両モード・全タブ/設定/ダイアログ)",
+      "ts": "2026-10-27T10:00:00+09:00",
+      "hash": "d13331b1946cd5b8f9420714b9ad73b27a1f907b2a2d65b0a2c14af87001c479",
+      "links": [
+        "E-e3c92335b648"
+      ],
+      "supersedes": null
+    },
+    {
+      "id": "E-3a652f4f06d3",
+      "seq": 14,
+      "type": "observation",
+      "claim": "declared",
+      "title": "文面ダイエット監査の所見: ルール化7件 / 削除7件 / 短縮11件",
+      "ts": "2026-10-27T16:00:00+09:00",
+      "hash": "b9500d917085d3f3bad72d0c5104649c96b5689adac69a00fa85622969e6f8ac",
+      "links": [
+        "E-ff320116bef3"
+      ],
+      "supersedes": null
+    },
+    {
+      "id": "E-ff320116bef3",
+      "seq": 13,
+      "type": "experiment",
+      "claim": "declared",
+      "title": "文面ダイエット監査の実施 (第3弾)",
+      "ts": "2026-10-27T15:00:00+09:00",
+      "hash": "69a7c82f7a57435458ed94136f4125e036f756cdedc236e1c241b9eaa1758a98",
+      "links": [
+        "E-e3c92335b648"
+      ],
+      "supersedes": null
+    },
+    {
+      "id": "E-b888e594ecc2",
+      "seq": 15,
+      "type": "decision",
+      "claim": "declared",
+      "title": "監査指摘は修正フェーズへ移行 (作業指示として各レポートを miasma セッションへ引き渡し)",
+      "ts": "2026-10-27T17:00:00+09:00",
+      "hash": "591d651e67ace38e1afcf070589636aa34610a0be5507e3fb12d1dd4378f6623",
+      "links": [
+        "E-fb0678f7e5d4",
+        "E-4e813c0d9849",
+        "E-13c0415f8b62",
+        "E-9bb849df647a",
+        "E-3a652f4f06d3"
+      ],
+      "supersedes": null
+    },
+    {
+      "id": "E-4967d055b167",
+      "seq": 16,
+      "type": "note",
+      "claim": "declared",
+      "title": "作業コピー群から見える並行開発ストリーム (再構成・未検証)",
+      "ts": "2026-10-28T12:00:00+09:00",
+      "hash": "c9f8062ff2b0b2c196c2378c81b6f368b2f7043cfcce7878895ca68b62e2e5f0",
+      "links": [
+        "E-b888e594ecc2"
+      ],
+      "supersedes": null
+    },
+    {
+      "id": "E-191929397594",
+      "seq": 4,
+      "type": "note",
+      "claim": "declared",
+      "title": "前身記録: v0.3.1-beta.1 リリースノート (本リポジトリ所収)",
+      "ts": "2026-10-21T12:00:00+09:00",
+      "hash": "3acb36797073cef36fa68a1c25c1162d4da6a2660b44e769011b41d510403502",
+      "links": [
+        "E-e3c92335b648"
+      ],
+      "supersedes": null
+    }
+  ],
+  "files": [
+    {
+      "kind": "evidence",
+      "of_entry": "E-fb0678f7e5d4",
+      "path": "C:\\work\\beta12-review\\UIUX_AUDIT_beta12.md",
+      "recorded_sha256": "27b95d4e5922f24d091f769099bf36b755450b6b575872519000a2426b0267f5",
+      "state_at_export": "OK",
+      "copied_to": "files\\C__work__beta12-review__UIUX_AUDIT_beta12.md"
+    },
+    {
+      "kind": "evidence",
+      "of_entry": "E-0af066d14d7a",
+      "path": "C:\\work\\beta12-review\\UIUX_AUDIT_beta12.md",
+      "recorded_sha256": "27b95d4e5922f24d091f769099bf36b755450b6b575872519000a2426b0267f5",
+      "state_at_export": "OK",
+      "copied_to": "files\\C__work__beta12-review__UIUX_AUDIT_beta12.md"
+    },
+    {
+      "kind": "evidence",
+      "of_entry": "E-e3c92335b648",
+      "path": "C:\\work\\beta12-review\\UIUX_AUDIT_beta12.md",
+      "recorded_sha256": "27b95d4e5922f24d091f769099bf36b755450b6b575872519000a2426b0267f5",
+      "state_at_export": "OK",
+      "copied_to": "files\\C__work__beta12-review__UIUX_AUDIT_beta12.md"
+    },
+    {
+      "kind": "evidence",
+      "of_entry": "E-e3c92335b648",
+      "path": "C:\\work\\beta12-review\\UIUX_AUDIT_beta12_aislop.md",
+      "recorded_sha256": "16d6f2288f8d3c0e04a0cab1c4ac141cb8b364672d30f4f8b08dab9c6e91c915",
+      "state_at_export": "OK",
+      "copied_to": "files\\C__work__beta12-review__UIUX_AUDIT_beta12_aislop.md"
+    },
+    {
+      "kind": "evidence",
+      "of_entry": "E-e3c92335b648",
+      "path": "C:\\work\\beta12-review\\UIUX_AUDIT_beta12_aislop2.md",
+      "recorded_sha256": "d1fd0c42c52ce32d4ce1c20e5f7b78eeb72bbb4587569aa953969de6a75c5fb7",
+      "state_at_export": "OK",
+      "copied_to": "files\\C__work__beta12-review__UIUX_AUDIT_beta12_aislop2.md"
+    },
+    {
+      "kind": "evidence",
+      "of_entry": "E-e3c92335b648",
+      "path": "C:\\work\\beta12-review\\UIUX_AUDIT_beta12_copydiet.md",
+      "recorded_sha256": "ef0354b01b65edeb32259693b74b253dbc341e04ab9586ab448961a7fffb9373",
+      "state_at_export": "OK",
+      "copied_to": "files\\C__work__beta12-review__UIUX_AUDIT_beta12_copydiet.md"
+    },
+    {
+      "kind": "evidence",
+      "of_entry": "E-e3c92335b648",
+      "path": "C:\\work\\beta12-review\\UIUX_AUDIT_beta12_chat.md",
+      "recorded_sha256": "e39a285c652419821977fbf580ca0905148e4ebdd34dd01b994e7cc77958e328",
+      "state_at_export": "OK",
+      "copied_to": "files\\C__work__beta12-review__UIUX_AUDIT_beta12_chat.md"
+    },
+    {
+      "kind": "evidence",
+      "of_entry": "E-4e813c0d9849",
+      "path": "C:\\work\\beta12-review\\UIUX_AUDIT_beta12_chat.md",
+      "recorded_sha256": "e39a285c652419821977fbf580ca0905148e4ebdd34dd01b994e7cc77958e328",
+      "state_at_export": "OK",
+      "copied_to": "files\\C__work__beta12-review__UIUX_AUDIT_beta12_chat.md"
+    },
+    {
+      "kind": "evidence",
+      "of_entry": "E-6bbaf23ea882",
+      "path": "C:\\work\\beta12-review\\UIUX_AUDIT_beta12_chat.md",
+      "recorded_sha256": "e39a285c652419821977fbf580ca0905148e4ebdd34dd01b994e7cc77958e328",
+      "state_at_export": "OK",
+      "copied_to": "files\\C__work__beta12-review__UIUX_AUDIT_beta12_chat.md"
+    },
+    {
+      "kind": "evidence",
+      "of_entry": "E-13c0415f8b62",
+      "path": "C:\\work\\beta12-review\\UIUX_AUDIT_beta12_aislop.md",
+      "recorded_sha256": "16d6f2288f8d3c0e04a0cab1c4ac141cb8b364672d30f4f8b08dab9c6e91c915",
+      "state_at_export": "OK",
+      "copied_to": "files\\C__work__beta12-review__UIUX_AUDIT_beta12_aislop.md"
+    },
+    {
+      "kind": "evidence",
+      "of_entry": "E-7b9953721c0a",
+      "path": "C:\\work\\beta12-review\\UIUX_AUDIT_beta12_aislop.md",
+      "recorded_sha256": "16d6f2288f8d3c0e04a0cab1c4ac141cb8b364672d30f4f8b08dab9c6e91c915",
+      "state_at_export": "OK",
+      "copied_to": "files\\C__work__beta12-review__UIUX_AUDIT_beta12_aislop.md"
+    },
+    {
+      "kind": "evidence",
+      "of_entry": "E-9bb849df647a",
+      "path": "C:\\work\\beta12-review\\UIUX_AUDIT_beta12_aislop2.md",
+      "recorded_sha256": "d1fd0c42c52ce32d4ce1c20e5f7b78eeb72bbb4587569aa953969de6a75c5fb7",
+      "state_at_export": "OK",
+      "copied_to": "files\\C__work__beta12-review__UIUX_AUDIT_beta12_aislop2.md"
+    },
+    {
+      "kind": "evidence",
+      "of_entry": "E-8204aca52b33",
+      "path": "C:\\work\\beta12-review\\UIUX_AUDIT_beta12_aislop2.md",
+      "recorded_sha256": "d1fd0c42c52ce32d4ce1c20e5f7b78eeb72bbb4587569aa953969de6a75c5fb7",
+      "state_at_export": "OK",
+      "copied_to": "files\\C__work__beta12-review__UIUX_AUDIT_beta12_aislop2.md"
+    },
+    {
+      "kind": "evidence",
+      "of_entry": "E-3a652f4f06d3",
+      "path": "C:\\work\\beta12-review\\UIUX_AUDIT_beta12_copydiet.md",
+      "recorded_sha256": "ef0354b01b65edeb32259693b74b253dbc341e04ab9586ab448961a7fffb9373",
+      "state_at_export": "OK",
+      "copied_to": "files\\C__work__beta12-review__UIUX_AUDIT_beta12_copydiet.md"
+    },
+    {
+      "kind": "evidence",
+      "of_entry": "E-ff320116bef3",
+      "path": "C:\\work\\beta12-review\\UIUX_AUDIT_beta12_copydiet.md",
+      "recorded_sha256": "ef0354b01b65edeb32259693b74b253dbc341e04ab9586ab448961a7fffb9373",
+      "state_at_export": "OK",
+      "copied_to": "files\\C__work__beta12-review__UIUX_AUDIT_beta12_copydiet.md"
+    },
+    {
+      "kind": "evidence",
+      "of_entry": "E-191929397594",
+      "path": "RELEASE-NOTES.md",
+      "recorded_sha256": "c81ec936620ec136b9abc93f083af6dacce4fc48a874f196fc00cb956c57abae",
+      "state_at_export": "OK",
+      "copied_to": "files\\RELEASE-NOTES.md"
+    }
+  ]
+}
