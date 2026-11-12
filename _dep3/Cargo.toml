@@ -1,0 +1,11 @@
+[workspace]
+
+[package]
+name="dep3"
+version="0.1.0"
+edition="2021"
+
+[dependencies]
+hex="0.4"
+thiserror="2"
+sha2="0.10"

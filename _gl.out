@@ -1,0 +1,8 @@
+db39f8e Japanese wording: fill in sentences missing from eight messages (#158)
+057fd50 Add a contact by scanning its QR code with the camera (#156)
+445595f ci: Windows installer built and attached to releases (#157)
+e2e7812 Add a contact from a picture of its QR code (#151)
+7b7cbda Make the hybrid key exchange the default (prefer) (#150)
+a2ff654 Keep the computer awake while transfers or message delivery are in flight (#154)
+32278e8 ci: carry the pre-release label into the macOS builds (#149)
+2db4522 Open the Transfers section when a transfer starts; test the receiving card (#152)

@@ -1,0 +1,1 @@
+fn main(){println!("{}",hex::encode([1u8,2,3]));}

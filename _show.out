@@ -1,0 +1,17 @@
+Default host: x86_64-pc-windows-msvc
+rustup home:  C:\Users\M118A8586\.rustup
+
+installed toolchains
+--------------------
+stable-x86_64-pc-windows-gnu
+stable-x86_64-pc-windows-msvc (active, default)
+
+active toolchain
+----------------
+name: stable-x86_64-pc-windows-msvc
+active because: it's the default toolchain
+installed targets:
+  aarch64-linux-android
+  wasm32-unknown-unknown
+  x86_64-linux-android
+  x86_64-pc-windows-msvc

@@ -1,0 +1,265 @@
+diff --git a/crates/miasma-core/src/directed/inbox.rs b/crates/miasma-core/src/directed/inbox.rs
+index 18b1852..fe8fd67 100644
+--- a/crates/miasma-core/src/directed/inbox.rs
++++ b/crates/miasma-core/src/directed/inbox.rs
+@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
+ use zeroize::Zeroizing;
+ 
+ use super::envelope::{DirectedEnvelope, EnvelopeState};
++use super::state::{Effects, IncomingEvent, IncomingRecord, Now};
+ use crate::state_crypto::{self, doc, Label, StateError, StateKeys};
+ 
+ /// Maximum number of envelopes allowed in a single directory (inbox or outbox).
+@@ -75,7 +76,13 @@ impl fmt::Debug for EnvelopeSummary {
+ pub struct DirectedInbox {
+     incoming_dir: PathBuf,
+     outgoing_dir: PathBuf,
++    v2_incoming_dir: PathBuf,
++    v2_outgoing_dir: PathBuf,
+     keys: StateKeys,
++    /// One lock per envelope id, so a read-modify-write of a v2 record is not
++    /// interleaved with another on the same id. The outer lock guards the map
++    /// only; it is never held across a file write.
++    locks: std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<()>>>>,
+ }
+ 
+ impl DirectedInbox {
+@@ -83,14 +90,21 @@ impl DirectedInbox {
+     pub fn open(data_dir: &Path) -> Result<Self> {
+         let incoming_dir = crate::paths::directed_incoming_dir(data_dir);
+         let outgoing_dir = crate::paths::directed_outgoing_dir(data_dir);
++        let v2_incoming_dir = crate::paths::directed_v2_incoming_dir(data_dir);
++        let v2_outgoing_dir = crate::paths::directed_v2_outgoing_dir(data_dir);
+         let keys =
+             StateKeys::open_or_init(data_dir).context("open the state key for directed shares")?;
+         std::fs::create_dir_all(&incoming_dir).context("create incoming dir")?;
+         std::fs::create_dir_all(&outgoing_dir).context("create outgoing dir")?;
++        std::fs::create_dir_all(&v2_incoming_dir).context("create v2 incoming dir")?;
++        std::fs::create_dir_all(&v2_outgoing_dir).context("create v2 outgoing dir")?;
+         Ok(Self {
+             incoming_dir,
+             outgoing_dir,
++            v2_incoming_dir,
++            v2_outgoing_dir,
+             keys,
++            locks: std::sync::Mutex::new(std::collections::HashMap::new()),
+         })
+     }
+ 
+@@ -186,12 +200,20 @@ impl DirectedInbox {
+         self.list_dir(&self.incoming_dir, true)
+     }
+ 
+-    /// Delete an incoming envelope.
++    /// Delete an incoming envelope and every sidecar that belongs to it.
++    ///
++    /// Earlier this removed the `.json` and the `.peer` binding but left the
++    /// `.challenge` file behind, so a deleted envelope's confirmation code
++    /// stayed on disk (design 6.6 item 4). All three are removed now.
+     pub fn delete_incoming(&self, id_hex: &str) -> Result<()> {
+         let path = self.incoming_path(id_hex);
+         if path.exists() {
+             std::fs::remove_file(&path).context("delete incoming envelope")?;
+         }
++        let challenge_path = self.incoming_dir.join(format!("{id_hex}.challenge"));
++        if challenge_path.exists() {
++            std::fs::remove_file(&challenge_path).context("delete incoming challenge code")?;
++        }
+         let peer_path = self.incoming_dir.join(format!("{id_hex}.peer"));
+         if peer_path.exists() {
+             std::fs::remove_file(&peer_path).context("delete incoming peer binding")?;
+@@ -270,6 +292,116 @@ impl DirectedInbox {
+         }
+     }
+ 
++    // ─── Incoming v2 (recipient state machine) ──────────────────────────
++
++    /// Path of a v2 incoming record.
++    fn v2_incoming_path(&self, id_hex: &str) -> PathBuf {
++        self.v2_incoming_dir.join(format!("{id_hex}.json"))
++    }
++
++    /// The per-id lock, created on first use.
++    fn id_lock(&self, id_hex: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
++        let mut map = self.locks.lock().unwrap_or_else(|e| e.into_inner());
++        map.entry(id_hex.to_string())
++            .or_insert_with(|| std::sync::Arc::new(std::sync::Mutex::new(())))
++            .clone()
++    }
++
++    /// Store a freshly built v2 incoming record with a single create-only write
++    /// (design 6.4). `Ok(true)` when this call created it; `Ok(false)` when a
++    /// record for the id was already present (a duplicate Invite).
++    pub fn store_incoming_v2_new(&self, record: &IncomingRecord) -> Result<bool> {
++        let id_hex = record.wire.id_hex();
++        if !self.v2_incoming_path(&id_hex).exists() {
++            self.check_limit(&self.v2_incoming_dir, "v2 inbox")?;
++        }
++        let lock = self.id_lock(&id_hex);
++        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
++        let path = self.v2_incoming_path(&id_hex);
++        let json = Zeroizing::new(serde_json::to_vec(record).context("serialize v2 record")?);
++        let created = doc::write_document_new(&self.keys, Label::DirectedMeta, &path, json.as_slice())
++            .context("write v2 incoming record")?;
++        Ok(created)
++    }
++
++    /// Load a v2 incoming record by id.
++    pub fn load_incoming_v2(&self, id_hex: &str) -> Result<IncomingRecord> {
++        let path = self.v2_incoming_path(id_hex);
++        let json = self
++            .read_meta(&path)
++            .with_context(|| format!("read v2 incoming {id_hex}"))?;
++        serde_json::from_slice(json.as_slice()).context("deserialize v2 record")
++    }
++
++    /// Apply one event to a v2 incoming record under its id lock, persist the
++    /// result in a single write, and carry out the file-level side effects
++    /// (dropping the record when the step says so). Returns the effects.
++    ///
++    /// The step mutates an in-memory copy; the record on disk changes exactly
++    /// once (or is removed once), so a crash leaves either the old or the new
++    /// record, never a half-written one.
++    pub fn step_incoming_v2(
++        &self,
++        id_hex: &str,
++        event: IncomingEvent,
++        now: Now,
++    ) -> Result<Effects> {
++        let lock = self.id_lock(id_hex);
++        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
++
++        let mut record = self.load_incoming_v2(id_hex)?;
++        let fx = record
++            .step(event, now)
++            .map_err(|e| anyhow::anyhow!("{e}"))?;
++        if fx.no_write {
++            return Ok(fx);
++        }
++        if fx.delete_file {
++            let path = self.v2_incoming_path(id_hex);
++            if path.exists() {
++                std::fs::remove_file(&path).context("remove failed v2 record")?;
++            }
++            return Ok(fx);
++        }
++        let path = self.v2_incoming_path(id_hex);
++        let json = Zeroizing::new(serde_json::to_vec(&record).context("serialize v2 record")?);
++        self.write_meta(&path, json.as_slice())
++            .context("persist stepped v2 record")?;
++        Ok(fx)
++    }
++
++    /// List v2 incoming records.
++    pub fn list_incoming_v2(&self) -> Vec<IncomingRecord> {
++        let mut out = Vec::new();
++        let Ok(entries) = std::fs::read_dir(&self.v2_incoming_dir) else {
++            return out;
++        };
++        for entry in entries.flatten() {
++            let path = entry.path();
++            if path.extension().and_then(|e| e.to_str()) != Some("json") {
++                continue;
++            }
++            if let Ok(json) = self.read_meta(&path) {
++                if let Ok(rec) = serde_json::from_slice::<IncomingRecord>(json.as_slice()) {
++                    out.push(rec);
++                }
++            }
++        }
++        out.sort_by(|a, b| b.wire.created_at.cmp(&a.wire.created_at));
++        out
++    }
++
++    /// Remove a v2 incoming record by id (recipient delete of a stored record).
++    pub fn delete_incoming_v2(&self, id_hex: &str) -> Result<()> {
++        let lock = self.id_lock(id_hex);
++        let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
++        let path = self.v2_incoming_path(id_hex);
++        if path.exists() {
++            std::fs::remove_file(&path).context("delete v2 incoming record")?;
++        }
++        Ok(())
++    }
++
+     // ─── Helpers ────────────────────────────────────────────────────────
+ 
+     /// Check that the directory has not exceeded `MAX_ENVELOPES` .json files.
+diff --git a/crates/miasma-core/src/directed/mod.rs b/crates/miasma-core/src/directed/mod.rs
+index 95d21aa..3d01473 100644
+--- a/crates/miasma-core/src/directed/mod.rs
++++ b/crates/miasma-core/src/directed/mod.rs
+@@ -55,6 +55,8 @@ pub mod challenge;
+ pub mod envelope;
+ pub mod inbox;
+ pub mod protocol;
++pub mod state;
++mod state_step;
+ 
+ pub use challenge::{
+     generate_challenge, verify_challenge, CHALLENGE_MAX_ATTEMPTS, CHALLENGE_TTL_SECS,
+@@ -67,3 +69,7 @@ pub use envelope::{
+ };
+ pub use inbox::{DirectedInbox, EnvelopeSummary};
+ pub use protocol::{DirectedCodec, DirectedRequest, DirectedResponse};
++pub use state::{
++    ChallengeLocal, Effects, Illegal, IncomingEvent, IncomingLocal, IncomingRecord, InviteExtV2,
++    MonoDeadline, Now, OutgoingEvent, OutgoingPhase, OutgoingRecord, Protection, LEGACY_SENDER,
++};
+diff --git a/crates/miasma-core/src/paths.rs b/crates/miasma-core/src/paths.rs
+index 03c5e4a..3199ff5 100644
+--- a/crates/miasma-core/src/paths.rs
++++ b/crates/miasma-core/src/paths.rs
+@@ -478,6 +478,28 @@ spec!(
+     "D18",
+     "Outgoing envelopes (<id>.json) and their .peer sidecars."
+ );
++spec!(
++    DIRECTED_V2_INCOMING,
++    "directed/v2/incoming",
++    Dir,
++    DataDir,
++    State,
++    Encrypt,
++    CryptoEraseOverwriteRemove,
++    "D18",
++    "v2 incoming records (<id>.json): one file per envelope, challenge and sender PeerId and ephemeral secret inline."
++);
++spec!(
++    DIRECTED_V2_OUTGOING,
++    "directed/v2/outgoing",
++    Dir,
++    DataDir,
++    State,
++    Encrypt,
++    CryptoEraseOverwriteRemove,
++    "D18",
++    "v2 outgoing records (<id>.json): one file per envelope, sender secrets inline until delivery is acknowledged."
++);
+ 
+ spec!(
+     CHAT_DIR,
+@@ -1034,6 +1056,8 @@ pub const REGISTRY: &[PathSpec] = &[
+     DIRECTED_DIR,
+     DIRECTED_INCOMING,
+     DIRECTED_OUTGOING,
++    DIRECTED_V2_INCOMING,
++    DIRECTED_V2_OUTGOING,
+     CHAT_DIR,
+     CHAT_SESSION,
+     CHAT_HISTORY,
+@@ -1191,6 +1215,14 @@ pub fn directed_incoming_dir(data_dir: &Path) -> PathBuf {
+ pub fn directed_outgoing_dir(data_dir: &Path) -> PathBuf {
+     DIRECTED_OUTGOING.in_dir(data_dir)
+ }
++/// `<data>/directed/v2/incoming`
++pub fn directed_v2_incoming_dir(data_dir: &Path) -> PathBuf {
++    DIRECTED_V2_INCOMING.in_dir(data_dir)
++}
++/// `<data>/directed/v2/outgoing`
++pub fn directed_v2_outgoing_dir(data_dir: &Path) -> PathBuf {
++    DIRECTED_V2_OUTGOING.in_dir(data_dir)
++}
+ /// Default push inbox: `<data>/inbox`.
+ pub fn default_push_inbox(data_dir: &Path) -> PathBuf {
+     PUSH_INBOX.in_dir(data_dir)

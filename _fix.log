@@ -1,0 +1,22 @@
+﻿rustup.exe : info: syncing channel updates for stable-x86_64-pc-windows-msvc
+発生場所 行:1 文字:1
++ & 'C:\Users\M118A8586\.cargo\bin\rustup.exe' toolchain install stable ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (info: syncing c...pc-windows-msvc:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+info: latest update on 2026-10-15 for version 1.99.1 (58cf8f9c3 2026-10-13)
+info: removing previous version of component rust-std for target x86_64-linux-android
+info: removing previous version of component rust-std for target wasm32-unknown-unknown
+info: removing previous version of component rust-std for target aarch64-linux-android
+info: removing previous version of component rust-src
+info: removing previous version of component cargo
+info: removing previous version of component clippy
+info: removing previous version of component rust-docs
+info: removing previous version of component rust-std
+info: removing previous version of component rustc
+info: removing previous version of component rustfmt
+info: downloading 10 components
+
+  stable-x86_64-pc-windows-msvc updated - (error reading rustc version) (from rustc 1.94.0 (4a4ef493e 2026-03-02))
+

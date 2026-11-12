@@ -1,0 +1,4 @@
+error: failed to download `adler2 v2.0.1`
+
+Caused by:
+  attempting to make an HTTP request, but --offline was specified

@@ -1,0 +1,9 @@
+[workspace]
+
+[package]
+name="dep1"
+version="0.1.0"
+edition="2021"
+
+[dependencies]
+adler2="=2.0.1"

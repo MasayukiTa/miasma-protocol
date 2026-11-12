@@ -1,0 +1,1 @@
+fn main(){println!("{}",adler2::Adler32::new().checksum());}
