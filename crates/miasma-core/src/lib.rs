@@ -19,6 +19,7 @@ pub mod daemon;
 pub mod directed;
 pub mod dissolution;
 pub mod error;
+pub mod format;
 pub mod logging;
 pub mod network;
 pub mod onion;
