@@ -1,0 +1,58 @@
+C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\link.exe
+C:\Users\M118A8586\AppData\Local\Programs\Git\usr\bin\link.exe
+===BEGIN===  
+    Checking noq-proto v1.3.0
+    Checking libp2p v0.57.0
+    Checking noq v1.3.0
+    Checking iroh-relay v1.3.0
+    Checking iroh v1.3.0
+    Checking iroh-mdns-address-lookup v0.6.0
+    Checking miasma-core v0.3.2 (C:\work\b13-v4recv-fresh\crates\miasma-core)
+warning: field `v2_outgoing_dir` is never read
+  --> crates\miasma-core\src\directed\inbox.rs:80:5
+   |
+76 | pub struct DirectedInbox {
+   |            ------------- field in this struct
+...
+80 |     v2_outgoing_dir: PathBuf,
+   |     ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `miasma-core` (lib) generated 1 warning
+warning: field `node` is never read
+  --> crates\miasma-core\tests\wire_compat_net_test.rs:99:5
+   |
+96 | struct Side {
+   |        ---- field in this struct
+...
+99 |     node: Arc<IrohNode>,
+   |     ^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `miasma-core` (test "wire_compat_net_test") generated 1 warning
+warning: unused imports: `CALL_ALPN` and `TransportConfig`
+  --> crates\miasma-core\tests\call_transport_pr0_test.rs:38:24
+   |
+38 |     config::{IrohMode, TransportConfig},
+   |                        ^^^^^^^^^^^^^^^
+...
+42 |         CALL_ALPN, CHAT_ALPN, MAX_CALL_CONNECTIONS,
+   |         ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `miasma-core` (test "call_transport_pr0_test") generated 1 warning (run `cargo fix --test "call_transport_pr0_test" -p miasma-core` to apply 1 suggestion)
+warning: field `sender_binding` is never read
+   --> crates\miasma-core\src\directed\v2\seal.rs:254:9
+    |
+242 |     struct World {
+    |            ----- field in this struct
+...
+254 |         sender_binding: [u8; 64],
+    |         ^^^^^^^^^^^^^^
+
+warning: `miasma-core` (lib test) generated 2 warnings (1 duplicate)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 14m 12s
+CHECK_EXIT_0  
