@@ -66,6 +66,65 @@ const KIND_READ: u8 = 2;
 /// Reserved for a file deposit notice inside a sealed chat envelope.
 pub const KIND_FILE_DEPOSIT: u8 = 3;
 
+/// A bounded introduction carried inside an encrypted text message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HolderIntro {
+    pub holders: Vec<HolderEntry>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HolderEntry {
+    pub endpoint_id: [u8; 32],
+    pub expires_ms: u64,
+    pub file_custody: bool,
+    pub chat_custody: bool,
+}
+impl HolderIntro {
+    pub fn encode(&self) -> Result<Vec<u8>, ProtoError> {
+        if self.holders.len() > 8 {
+            return Err(ProtoError::Malformed("holder intro"));
+        }
+        let mut out = vec![5, self.holders.len() as u8];
+        for h in &self.holders {
+            out.extend_from_slice(&h.endpoint_id);
+            out.extend_from_slice(&h.expires_ms.to_be_bytes());
+            out.push(u8::from(h.file_custody));
+            out.push(u8::from(h.chat_custody));
+        }
+        Ok(out)
+    }
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProtoError> {
+        let bad = |_| ProtoError::Malformed("holder intro");
+        let mut r = Rd::new(bytes);
+        if r.u8().map_err(bad)? != 5 {
+            return Err(ProtoError::Malformed("holder intro kind"));
+        }
+        let count = r.u8().map_err(bad)? as usize;
+        if count > 8 {
+            return Err(ProtoError::Malformed("holder intro count"));
+        }
+        let mut holders = Vec::with_capacity(count);
+        for _ in 0..count {
+            let endpoint_id = r.arr::<32>().map_err(bad)?;
+            let expires_ms = r.u64().map_err(bad)?;
+            let file = r.u8().map_err(bad)?;
+            let chat = r.u8().map_err(bad)?;
+            if file > 1 || chat > 1 {
+                return Err(ProtoError::Malformed("holder intro flags"));
+            }
+            holders.push(HolderEntry {
+                endpoint_id,
+                expires_ms,
+                file_custody: file == 1,
+                chat_custody: chat == 1,
+            });
+        }
+        if r.remaining() != 0 {
+            return Err(ProtoError::Malformed("holder intro trailing bytes"));
+        }
+        Ok(Self { holders })
+    }
+}
+
 /// Metadata needed to retrieve a file from custody. The key must only travel
 /// inside an authenticated, encrypted chat envelope.
 #[derive(Clone, PartialEq, Eq)]
@@ -840,5 +899,40 @@ mod tests {
         let mut zero = msg("abc");
         zero.seq = 0;
         assert!(Message::decode(&zero.encode().unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod holder_intro_tests {
+    use super::*;
+    #[test]
+    fn round_trip_and_bounds() {
+        let entry = HolderEntry {
+            endpoint_id: rand::random(),
+            expires_ms: 42,
+            file_custody: true,
+            chat_custody: false,
+        };
+        let mut intro = HolderIntro {
+            holders: vec![entry; 8],
+        };
+        let bytes = intro.encode().unwrap();
+        assert_eq!(HolderIntro::decode(&bytes).unwrap(), intro);
+        for n in 0..bytes.len() {
+            assert!(HolderIntro::decode(&bytes[..n]).is_err());
+        }
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(HolderIntro::decode(&trailing).is_err());
+        intro.holders.push(intro.holders[0].clone());
+        assert!(intro.encode().is_err());
+        assert!(HolderIntro::decode(&[5, 9]).is_err());
+        assert!(super::super::file_notice::text_to_holder_intro("ordinary text").is_none());
+        intro.holders.pop();
+        let text = super::super::file_notice::holder_intro_to_text(&intro).unwrap();
+        assert_eq!(
+            super::super::file_notice::text_to_holder_intro(&text),
+            Some(intro)
+        );
     }
 }

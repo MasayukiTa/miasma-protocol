@@ -991,7 +991,9 @@ impl ChatUi {
                 }
             }
             // Group answers go to the group screen (see `on_reply`).
-            ChatResponse::Group(_) => {}
+            ChatResponse::Group(_)
+            | ChatResponse::HolderIntroQueued { .. }
+            | ChatResponse::CustodyPeerCounts { .. } => {}
             // Call answers update the call screen state. `now_ms` starts the duration clock.
             #[cfg(feature = "pqc")]
             ChatResponse::Call(resp) => {

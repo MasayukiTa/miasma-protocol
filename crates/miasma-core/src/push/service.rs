@@ -792,7 +792,11 @@ impl PushService {
         code: &ContactCode,
         label: Option<&str>,
     ) -> Result<Contact, ContactError> {
-        self.contacts.add(code, label, Some(&self.own_id))
+        let contact = self.contacts.add(code, label, Some(&self.own_id))?;
+        if let Some(chat) = crate::chat::service::service_for(&self.data_dir) {
+            chat.introduce_self(&contact);
+        }
+        Ok(contact)
     }
 
     /// [`add_contact`](Self::add_contact) with sending and receiving both set to `allowed`.
@@ -802,8 +806,13 @@ impl PushService {
         label: Option<&str>,
         allowed: bool,
     ) -> Result<Contact, ContactError> {
-        self.contacts
-            .add_with(code, label, Some(&self.own_id), allowed)
+        let contact = self
+            .contacts
+            .add_with(code, label, Some(&self.own_id), allowed)?;
+        if let Some(chat) = crate::chat::service::service_for(&self.data_dir) {
+            chat.introduce_self(&contact);
+        }
+        Ok(contact)
     }
 
     pub fn update_contact(
@@ -1172,7 +1181,7 @@ impl PushService {
                 Ok(()) => break,
                 Err(e) => {
                     if !self
-                        .wait_retry(&mut job, &mut st, error_kind::UNREACHABLE, e, &mut stop)
+                        .wait_retry(&mut job, &mut st, error_kind::CONNECTION_LOST, e, &mut stop)
                         .await
                     {
                         return;
@@ -1281,7 +1290,13 @@ impl PushService {
                         return;
                     }
                     if self
-                        .wait_retry(&mut job, &mut st, kind, describe_dial_error(&e), &mut stop)
+                        .wait_retry(
+                            &mut job,
+                            &mut st,
+                            deposit_retry_kind(kind, deposit_error.as_deref()),
+                            deposit_error.unwrap_or_else(|| describe_dial_error(&e)),
+                            &mut stop,
+                        )
                         .await
                     {
                         continue;
@@ -1398,7 +1413,16 @@ impl PushService {
                         .await;
                         return;
                     }
-                    if !self.wait_retry(&mut job, &mut st, kind, m, &mut stop).await {
+                    if !self
+                        .wait_retry(
+                            &mut job,
+                            &mut st,
+                            deposit_retry_kind(kind, deposit_error.as_deref()),
+                            deposit_error.unwrap_or(m),
+                            &mut stop,
+                        )
+                        .await
+                    {
                         return;
                     }
                 }
@@ -1417,7 +1441,7 @@ impl PushService {
     ) {
         loop {
             if !self
-                .wait_retry(job, st, error_kind::UNREACHABLE, error, stop)
+                .wait_retry(job, st, error_kind::CONNECTION_LOST, error, stop)
                 .await
             {
                 return;
@@ -1477,7 +1501,7 @@ impl PushService {
             return self.send_network_fallback(&chat, contact, path, rec).await;
         }
         if rec.deposit_notice.is_none() {
-            let mut holders = chat.holders_for(&peer);
+            let mut holders = chat.holders_for_kind(&peer, true);
             holders.truncate(8);
             if holders.is_empty() {
                 return self.send_network_fallback(&chat, contact, path, rec).await;
@@ -2577,6 +2601,20 @@ fn reject_text(r: RejectReason) -> String {
         }
     }
     .to_owned()
+}
+
+/// The kind to report after a failed dial (or a lost connection) when an
+/// offline deposit was also attempted and did not go through. A dial that was
+/// refused or could not connect keeps its original kind (`unreachable`); it
+/// does not become `connection_lost` just because the fallback deposit failed.
+/// The one exception: a reachable holder that refused the deposit because of
+/// its per-contact rate limit is reported with its own kind, so the operator
+/// sees "slow down" rather than "offline" or "dropped".
+fn deposit_retry_kind(original: &'static str, deposit_error: Option<&str>) -> &'static str {
+    match deposit_error {
+        Some(msg) if msg.contains("too many custody requests") => error_kind::RATE_LIMITED,
+        _ => original,
+    }
 }
 
 fn describe_dial_error(e: &IrohClientError) -> String {

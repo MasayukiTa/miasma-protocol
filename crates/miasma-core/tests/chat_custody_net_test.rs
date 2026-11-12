@@ -167,6 +167,81 @@ async fn file_and_legacy_chat_requests_reach_separate_stores() {
     assert_eq!(holder.custody_stats().unwrap().items, 1);
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_deposits_can_be_disabled_for_both_stores() {
+    use miasma_core::chat::mailbox::{
+        client::{MailboxError, MailboxTransport},
+        holder::{CustodyError, DepositOutcome},
+        ids::{ItemId, RecipientTag},
+        transport::ChatMailboxTransport,
+    };
+    let r = relay().await;
+    let holder_seed = rand::random();
+    let sender_seed = rand::random();
+    let holder_node = start_node(&r, &holder_seed).await;
+    let sender_node = start_node(&r, &sender_seed).await;
+    let dir = tempfile::tempdir().unwrap();
+    let contacts = Arc::new(ContactStore::open(dir.path()));
+    let mut cfg = settings();
+    cfg.accept_unknown_depositors = false;
+    cfg.file_custody_limits.enabled = true;
+    let keys = Arc::new(StateKeys::open_or_init(dir.path()).unwrap());
+    let _holder = ChatService::start(
+        &dir.path().join("chat"),
+        holder_node.clone(),
+        &holder_seed,
+        keys,
+        contacts.clone(),
+        StoreSettings::default(),
+        cfg,
+    )
+    .unwrap();
+    let holder_id = holder_node.endpoint_id();
+    let sender_id = sender_node.endpoint_id();
+    let sender = sender_node.clone();
+    tokio::task::spawn_blocking(move || {
+        for transport in [
+            ChatMailboxTransport::new(sender.clone()),
+            ChatMailboxTransport::for_files(sender),
+        ] {
+            assert_eq!(
+                transport.deposit(
+                    &holder_id,
+                    RecipientTag(rand::random()),
+                    ItemId(rand::random()),
+                    b"sealed",
+                    0
+                ),
+                Err(MailboxError::Refused(CustodyError::NotTrusted))
+            );
+        }
+    })
+    .await
+    .unwrap();
+    contacts
+        .add(&ContactCode::new(sender_id), Some("sender"), None)
+        .unwrap();
+    tokio::task::spawn_blocking(move || {
+        for transport in [
+            ChatMailboxTransport::new(sender_node.clone()),
+            ChatMailboxTransport::for_files(sender_node),
+        ] {
+            assert_eq!(
+                transport.deposit(
+                    &holder_id,
+                    RecipientTag(rand::random()),
+                    ItemId(rand::random()),
+                    b"sealed",
+                    0
+                ),
+                Ok(DepositOutcome::Stored)
+            );
+        }
+    })
+    .await
+    .unwrap();
+}
+
 /// A sends to B while B is offline. The copy lands with the holder C. When B
 /// starts, its worker collects from C and the message appears in B's history.
 #[tokio::test(flavor = "multi_thread")]

@@ -26,6 +26,8 @@ pub struct NodeConfig {
     /// One-to-one chat.
     #[serde(default)]
     pub chat: ChatConfig,
+    #[serde(default)]
+    pub custody: CustodyConfig,
     /// Logging and traces left on this machine.
     #[serde(default)]
     pub privacy: PrivacyConfig,
@@ -38,6 +40,35 @@ pub struct NodeConfig {
     /// Calls (on by default; no audio device yet).
     #[serde(default)]
     pub call: CallConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustodyConfig {
+    #[serde(default = "default_true")]
+    pub accept_unknown_depositors: bool,
+}
+impl Default for CustodyConfig {
+    fn default() -> Self {
+        Self {
+            accept_unknown_depositors: true,
+        }
+    }
+}
+pub fn load_accept_unknown_depositors(data_dir: &Path) -> bool {
+    NodeConfig::load(data_dir)
+        .map(|c| c.custody.accept_unknown_depositors)
+        .unwrap_or(true)
+}
+pub fn set_accept_unknown_depositors_persistent(data_dir: &Path, on: bool) -> std::io::Result<()> {
+    let mut c = NodeConfig::load(data_dir)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    if c.custody.accept_unknown_depositors != on {
+        c.custody.accept_unknown_depositors = on;
+        c.save(data_dir)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+    }
+    c.transport.zeroize_secret_copies();
+    Ok(())
 }
 
 /// Settings for finding peers through the public Mainline DHT.
@@ -464,7 +495,9 @@ pub const DEFAULT_CHAT_CUSTODY_TTL_DAYS: u64 = 14;
 /// Burst of custody requests allowed from one contact. Matches the inbound
 /// message burst so an active contact fetching several waiting items at once
 /// is never falsely throttled, while a flood is still bounded.
-pub const DEFAULT_CHAT_CUSTODY_RATE_BURST: usize = 20;
+// 64 MiB / 16 KiB = 4,096 chunk requests, plus one manifest.
+// The per-minute rate bounds sustained custody request floods after the burst.
+pub const DEFAULT_CHAT_CUSTODY_RATE_BURST: usize = 4_097;
 /// Sustained custody requests per minute from one contact. Matches the inbound
 /// message rate; enough for normal collect/deposit traffic, not for abuse.
 pub const DEFAULT_CHAT_CUSTODY_RATE_PER_MINUTE: usize = 30;
@@ -2275,6 +2308,12 @@ mod custody_default_tests {
     #[test]
     fn custody_defaults_are_enabled_even_when_fields_are_missing() {
         let config = NodeConfig::default();
+        assert!(config.custody.accept_unknown_depositors);
+        assert!(
+            toml::from_str::<CustodyConfig>("")
+                .unwrap()
+                .accept_unknown_depositors
+        );
         assert!(config.chat.custody_enabled);
         assert!(config.push.file_custody_enabled);
         let chat: ChatConfig = toml::from_str("").unwrap();

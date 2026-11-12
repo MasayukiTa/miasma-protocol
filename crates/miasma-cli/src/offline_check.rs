@@ -46,6 +46,7 @@ pub struct OfflineCheckInput {
     /// Whether chat custody (holding deposits for contacts) is enabled.
     pub custody_enabled: bool,
     pub file_custody_enabled: bool,
+    pub accept_unknown_depositors: bool,
     /// Configured number of custody copies to aim for.
     pub custody_copies: usize,
     /// Contacts that can act as a holder for a deposit: they have a usable iroh
@@ -76,6 +77,7 @@ pub struct OfflineCheckReport {
     pub holders_reachable: usize,
     pub custody_enabled: bool,
     pub file_custody_enabled: bool,
+    pub accept_unknown_depositors: bool,
     pub custody_copies: usize,
     pub deposit: DepositVerdict,
     /// Short machine-stable reason for the deposit verdict.
@@ -167,6 +169,7 @@ pub fn evaluate(input: &OfflineCheckInput) -> OfflineCheckReport {
         holders_reachable,
         custody_enabled: input.custody_enabled,
         file_custody_enabled: input.file_custody_enabled,
+        accept_unknown_depositors: input.accept_unknown_depositors,
         custody_copies: input.custody_copies,
         deposit,
         deposit_reason,
@@ -225,6 +228,7 @@ pub async fn collect(data_dir: &Path) -> OfflineCheckInput {
         iroh_relay_connected,
         custody_enabled,
         file_custody_enabled,
+        accept_unknown_depositors: miasma_core::config::load_accept_unknown_depositors(data_dir),
         custody_copies,
         holder_candidates: count_holder_candidates(data_dir),
     }
@@ -247,6 +251,45 @@ fn deposit_line(v: DepositVerdict) -> &'static str {
         DepositVerdict::Ok => "YES",
         DepositVerdict::Partial => "PARTIAL",
         DepositVerdict::No => "NO",
+    }
+}
+
+pub async fn custody_peer_counts(data_dir: &Path) -> Option<(usize, usize)> {
+    use miasma_core::chat::{ChatRequest, ChatResponse};
+    use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+    match daemon_request(
+        data_dir,
+        ControlRequest::Chat(ChatRequest::CustodyPeerCounts {}),
+    )
+    .await
+    {
+        Ok(ControlResponse::Chat(ChatResponse::CustodyPeerCounts {
+            introduced_holders,
+            allowed_depositors,
+        })) => Some((introduced_holders, allowed_depositors)),
+        _ => None,
+    }
+}
+pub fn print_accept_unknown_depositors(data_dir: &Path) {
+    println!(
+        "  Accept unknown depositors: {} (configured; restart to apply)",
+        if miasma_core::config::load_accept_unknown_depositors(data_dir) {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+}
+pub async fn print_custody_peer_counts(data_dir: &Path) {
+    match custody_peer_counts(data_dir).await {
+        Some((holders, depositors)) => {
+            println!("  Introduced holders: {holders}");
+            println!("  Allowed depositors: {depositors}");
+        }
+        None => {
+            println!("  Introduced holders: unknown (chat unavailable)");
+            println!("  Allowed depositors: unknown (chat unavailable)");
+        }
     }
 }
 
@@ -273,8 +316,11 @@ pub async fn run(data_dir: &Path, json: bool) -> Result<()> {
         .map(|s| s.discovery_peers_found)
         .unwrap_or(0);
 
+    let counts = custody_peer_counts(data_dir).await;
     if json {
         let obj = serde_json::json!({
+            "introduced_holders": counts.map(|v| v.0),
+            "allowed_depositors": counts.map(|v| v.1),
             "discovery_enabled": discovery_enabled,
             "discovery_peers_found": discovery_peers_found,
             "bootstrap_reachability": match report.bootstrap {
@@ -289,6 +335,7 @@ pub async fn run(data_dir: &Path, json: bool) -> Result<()> {
             "holders_reachable_via_iroh": report.holders_reachable,
             "custody_enabled": report.custody_enabled,
             "file_custody_enabled": report.file_custody_enabled,
+            "accept_unknown_depositors": report.accept_unknown_depositors,
             "custody_copies": report.custody_copies,
             "deposit_would_succeed": match report.deposit {
                 DepositVerdict::Ok => "yes",
@@ -302,6 +349,7 @@ pub async fn run(data_dir: &Path, json: bool) -> Result<()> {
     }
 
     println!("Miasma Offline-Delivery Self-Check");
+    print_custody_peer_counts(data_dir).await;
     println!(
         "  Network discovery: {}, peers found last round {}",
         if discovery_enabled {
@@ -332,6 +380,7 @@ pub async fn run(data_dir: &Path, json: bool) -> Result<()> {
         }
     );
     println!("  Holders reachable via iroh: {}", report.holders_reachable);
+    print_accept_unknown_depositors(data_dir);
     println!(
         "  Custody enabled:            {} (copies wanted: {})",
         if report.custody_enabled { "yes" } else { "no" },
@@ -366,6 +415,7 @@ mod tests {
             iroh_relay_connected: true,
             custody_enabled: true,
             file_custody_enabled: true,
+            accept_unknown_depositors: true,
             custody_copies: 2,
             holder_candidates: 2,
         }

@@ -298,7 +298,9 @@ fn a_holder_that_is_down_or_off_is_skipped() {
         .failed
         .iter()
         .any(|(h, er)| *h == e.id() && *er == MailboxError::Unreachable));
-    // A contact the holder does not trust cannot use it.
+    // A contact the holder does not trust is now accepted within the
+    // unknown-depositor quota (open deposits), so it does get a copy on the
+    // reachable, enabled holder C.
     let stranger = side();
     let cs = client(&net, stranger.id(), 1);
     let rep = cs.deposit(
@@ -309,11 +311,12 @@ fn a_holder_that_is_down_or_off_is_skipped() {
         b"abc",
         5,
     );
-    assert!(rep.held_by.is_empty());
     assert_eq!(
-        rep.failed[0].1,
-        MailboxError::Refused(CustodyError::NotTrusted)
+        rep.held_by,
+        vec![c.id()],
+        "an open holder takes a copy from an unknown sender within quota"
     );
+    assert!(rep.failed.is_empty());
 }
 
 #[test]
@@ -488,23 +491,37 @@ fn a_deposit_that_reaches_no_holder_is_never_a_delivery() {
 }
 
 #[test]
-fn a_deposit_only_to_an_untrusting_holder_takes_no_copy() {
-    // The sender's single candidate holder does not trust the sender, so it
-    // refuses. `held_by` is empty and `failed` records the refusal: not
-    // delivered, and distinguishable from success.
+fn a_deposit_to_a_holder_that_does_not_know_the_sender_is_taken_within_quota() {
+    // Open deposits replace the old owner requirement: a holder that does not
+    // trust the sender still takes one copy, within the unknown-depositor
+    // quota, and a sender past that quota is refused for budget.
     let (a, b, c) = (side(), side(), side());
     let net = Arc::new(Net::default());
-    // C trusts only B, not the sender A.
+    // C trusts only B, not the sender A; A is an unknown depositor to C.
     net.add_holder(c.id(), on(), &[b.id()]);
-    a.core.enqueue(&b.id(), "refused everywhere", 1).unwrap();
+    a.core.enqueue(&b.id(), "held for a stranger", 1).unwrap();
     let ca = client(&net, a.id(), 1);
     let (_item, n) = deposit_oldest(&ca, &a, &b, &[c.id()], 1_000);
-    assert_eq!(n, 0, "an untrusting holder takes no copy");
-    assert_eq!(net.holder(&c.id()).stats().items, 0);
+    assert_eq!(n, 1, "an open holder takes one copy from an unknown sender");
+    assert_eq!(net.holder(&c.id()).stats().items, 1);
+    // The recipient collects the copy the stranger's deposit left behind.
     let cb = client(&net, b.id(), 1);
-    let (rep, _st) = collect_into(&cb, &b, &[c.id()], 2_000);
-    assert_eq!(rep.offered, 0);
-    assert!(b.received(&a.id()).is_empty());
+    let (rep, st) = collect_into(&cb, &b, &[c.id()], 2_000);
+    assert_eq!((rep.offered, rep.taken), (1, 1));
+    assert_eq!(st, [AckStatus::Stored]);
+    assert_eq!(b.received(&a.id()), ["held for a stranger"]);
+    // A depositor over its quota is refused: the unknown-peer item cap is 16,
+    // so filling to the cap and then depositing once more is refused.
+    for n in 1..=16u8 {
+        let rep = ca.deposit(&[c.id()], &a.id(), &b.id(), ItemId([n; 16]), b"x", 3_000);
+        assert_eq!(rep.held_by, vec![c.id()], "within quota");
+    }
+    let over = ca.deposit(&[c.id()], &a.id(), &b.id(), ItemId([200; 16]), b"x", 3_000);
+    assert!(over.held_by.is_empty(), "over quota: no copy taken");
+    assert_eq!(
+        over.failed[0].1,
+        MailboxError::Refused(CustodyError::DepositorBudget)
+    );
 }
 
 // ── Directed-share invite custody ────────────────────────────────────────────
@@ -600,12 +617,13 @@ fn a_directed_invite_deposit_with_the_only_holder_offline_takes_no_copy() {
 }
 
 #[test]
-fn a_directed_invite_only_to_an_untrusting_holder_takes_no_copy() {
-    // The candidate holder does not trust the sender, so it refuses: held_by
-    // empty, failed records the refusal, not delivered.
+fn a_directed_invite_to_a_holder_that_does_not_know_the_sender_is_taken_within_quota() {
+    // Open deposits apply to directed invites too: a holder that does not trust
+    // the sender still takes one copy within the unknown-depositor quota, and a
+    // sender past that quota is refused for budget.
     let (a, b, c) = (side(), side(), side());
     let net = Arc::new(Net::default());
-    // C trusts only B, not the sender A.
+    // C trusts only B, not the sender A; A is an unknown depositor to C.
     net.add_holder(c.id(), on(), &[b.id()]);
     let ca = client(&net, a.id(), 1);
     let rep = ca.deposit_directed(
@@ -616,13 +634,39 @@ fn a_directed_invite_only_to_an_untrusting_holder_takes_no_copy() {
         b"invite",
         1_000,
     );
-    assert!(rep.held_by.is_empty(), "an untrusting holder takes no copy");
-    assert_eq!(rep.failed.len(), 1);
     assert_eq!(
-        rep.failed[0].1,
-        MailboxError::Refused(CustodyError::NotTrusted)
+        rep.held_by,
+        vec![c.id()],
+        "an open holder takes one copy from an unknown sender"
     );
-    assert_eq!(net.holder(&c.id()).stats().items, 0);
+    assert!(rep.failed.is_empty());
+    assert_eq!(net.holder(&c.id()).stats().items, 1);
+    // A depositor over its quota is refused: the unknown-peer item cap is 16;
+    // one slot is already used, so fill to the cap and then deposit once more.
+    for n in 9..=23u8 {
+        let rep = ca.deposit_directed(
+            &[c.id()],
+            &a.id(),
+            &b.id(),
+            ItemId([n; 16]),
+            b"invite",
+            1_000,
+        );
+        assert_eq!(rep.held_by, vec![c.id()], "within quota");
+    }
+    let over = ca.deposit_directed(
+        &[c.id()],
+        &a.id(),
+        &b.id(),
+        ItemId([200; 16]),
+        b"invite",
+        1_000,
+    );
+    assert!(over.held_by.is_empty(), "over quota: no copy taken");
+    assert_eq!(
+        over.failed[0].1,
+        MailboxError::Refused(CustodyError::DepositorBudget)
+    );
 }
 
 #[test]

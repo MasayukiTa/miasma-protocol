@@ -311,7 +311,8 @@ impl ChatCore {
         self.settle_rollback(&e.peer);
         let e = self.outbox.get(id).ok_or(PrepareError::Gone)?;
         if (super::file_notice::text_to_notice(&e.text).is_some()
-            || super::file_notice::text_to_network_notice(&e.text).is_some())
+            || super::file_notice::text_to_network_notice(&e.text).is_some()
+            || super::file_notice::text_to_holder_intro(&e.text).is_some())
             && !self.has_protected_session(&e.peer)
         {
             return Err(PrepareError::Storage("no protected session".into()));
@@ -422,6 +423,10 @@ impl ChatCore {
 
     fn finish(&self, id: &[u8; 16], state: MsgState, reason: Option<String>, now: u64) {
         let Some(e) = self.outbox.get(id) else { return };
+        if super::file_notice::text_to_holder_intro(&e.text).is_some() {
+            self.outbox.remove(id);
+            return;
+        }
         if e.kind == OutKind::Read {
             // A receipt leaves no trace: delivered or given up, it just goes.
             self.outbox.remove(id);
@@ -530,7 +535,7 @@ impl ChatCore {
     /// Apply an envelope that arrived from `peer` (already authenticated by the
     /// transport and allowed by the contact list).
     pub fn accept(&self, peer: &[u8; 32], wire: &[u8], now: u64) -> AcceptOutcome {
-        self.accept_inner(peer, wire, now, None, None, None)
+        self.accept_inner(peer, wire, now, None, None, None, None)
     }
 
     #[cfg(feature = "pqc")]
@@ -541,7 +546,7 @@ impl ChatCore {
         now: u64,
         on_call: &dyn Fn(&[u8]),
     ) -> AcceptOutcome {
-        self.accept_inner(peer, wire, now, Some(on_call), None, None)
+        self.accept_inner(peer, wire, now, Some(on_call), None, None, None)
     }
 
     /// Apply an authenticated envelope and deliver file notices to the caller.
@@ -555,6 +560,27 @@ impl ChatCore {
         on_notice: &dyn Fn(super::proto::FileDepositNotice),
         on_network_notice: &dyn Fn(super::proto::NetworkFileNotice),
     ) -> AcceptOutcome {
+        self.accept_with_holder_intro(
+            peer,
+            wire,
+            now,
+            on_call,
+            on_notice,
+            on_network_notice,
+            &|_| {},
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn accept_with_holder_intro(
+        &self,
+        peer: &[u8; 32],
+        wire: &[u8],
+        now: u64,
+        on_call: Option<&dyn Fn(&[u8])>,
+        on_notice: &dyn Fn(super::proto::FileDepositNotice),
+        on_network_notice: &dyn Fn(super::proto::NetworkFileNotice),
+        on_intro: &dyn Fn(super::proto::HolderIntro),
+    ) -> AcceptOutcome {
         self.accept_inner(
             peer,
             wire,
@@ -562,8 +588,10 @@ impl ChatCore {
             on_call,
             Some(on_notice),
             Some(on_network_notice),
+            Some(on_intro),
         )
     }
+    #[allow(clippy::too_many_arguments)]
     fn accept_inner(
         &self,
         peer: &[u8; 32],
@@ -572,6 +600,7 @@ impl ChatCore {
         on_call: Option<&dyn Fn(&[u8])>,
         on_notice: Option<&dyn Fn(super::proto::FileDepositNotice)>,
         on_network_notice: Option<&dyn Fn(super::proto::NetworkFileNotice)>,
+        on_intro: Option<&dyn Fn(super::proto::HolderIntro)>,
     ) -> AcceptOutcome {
         let plain = |status| AcceptOutcome {
             status,
@@ -809,8 +838,13 @@ impl ChatCore {
         } else {
             None
         };
+        let intro = if is_new && !too_big && on_intro.is_some() {
+            super::file_notice::text_to_holder_intro(&message.text)
+        } else {
+            None
+        };
         let mut stored: Option<StoredMessage> = None;
-        if is_new && !too_big && notice.is_none() && network_notice.is_none() {
+        if is_new && !too_big && notice.is_none() && network_notice.is_none() && intro.is_none() {
             let nm = NewMessage {
                 outgoing: false,
                 id: message.id,
@@ -857,7 +891,11 @@ impl ChatCore {
         }
         let status = if too_big {
             AckStatus::TooBig
-        } else if stored.is_some() || notice.is_some() || network_notice.is_some() {
+        } else if stored.is_some()
+            || notice.is_some()
+            || network_notice.is_some()
+            || intro.is_some()
+        {
             AckStatus::Stored
         } else {
             AckStatus::Duplicate
@@ -871,6 +909,9 @@ impl ChatCore {
         if let (Some(notice), Some(deliver)) = (network_notice, on_network_notice) {
             deliver(notice);
         }
+        if let (Some(intro), Some(deliver)) = (intro, on_intro) {
+            deliver(intro);
+        }
         AcceptOutcome {
             status,
             session_replaced: replaced,
@@ -882,6 +923,9 @@ impl ChatCore {
     /// Put a message that never left the outbox (expired while the program
     /// was off) into the history as failed.
     pub fn record_unsent(&self, e: &OutEntry, reason: &str, now: u64) {
+        if super::file_notice::text_to_holder_intro(&e.text).is_some() {
+            return;
+        }
         let nm = Self::stored_from(e, MsgState::Failed, Some(reason.to_owned()), now);
         let _ = self.store.record(&e.peer, nm, false);
     }

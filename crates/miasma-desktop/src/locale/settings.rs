@@ -27,7 +27,7 @@ settings_strings! {
     // The Danger zone page.
     danger_intro,
     // The custody switch on the Privacy and storage page.
-    custody_label, custody_desc,
+    custody_label, custody_desc, custody_unknown_label, custody_unknown_desc,
     // Absolute dates: the zone the time is written in.
     utc,
 }
@@ -48,12 +48,16 @@ static SE_EN: SettingsStrings = SettingsStrings {
     cat_about: "About",
     cat_danger: "Danger zone",
     danger_intro: "These actions delete data and cannot be undone. Each one asks you to confirm and says what will be deleted.",
+    custody_unknown_label: "Also hold files from people you do not know on Miasma",
+    custody_unknown_desc: "Applies to messages and files. Restart the node to apply changes.",
     custody_label: "Hold messages for offline contacts",
     custody_desc: "When this is on, your node keeps a sealed copy of a message for a trusted contact who is offline, and leaves a copy with your other trusted contacts when a direct send does not get through, so it can be delivered once they come back. Holders only ever see the sealed message, never its contents. On by default.",
     utc: "UTC",
 };
 
 static SE_JA: SettingsStrings = SettingsStrings {
+    custody_unknown_label: "Miasma を使っている知らない相手のファイルも預かる",
+    custody_unknown_desc: "メッセージとファイルに適用されます。変更を反映するにはノードを再起動してください。",
     cat_general: "一般",
     cat_privacy: "プライバシーと保存",
     cat_network: "ネットワーク",
@@ -67,6 +71,8 @@ static SE_JA: SettingsStrings = SettingsStrings {
 };
 
 static SE_ZH_CN: SettingsStrings = SettingsStrings {
+    custody_unknown_label: "也为使用 Miasma 的陌生人保管文件",
+    custody_unknown_desc: "适用于消息和文件。重启节点后更改生效。",
     cat_general: "常规",
     cat_privacy: "隐私与存储",
     cat_network: "网络",

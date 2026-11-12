@@ -99,6 +99,12 @@ enum Commands {
         total_shards: usize,
     },
 
+    /// Introduce this node as a custody holder to contacts.
+    HolderIntro {
+        #[arg(long)]
+        contact: Option<String>,
+    },
+
     /// Show node status (peer ID, storage usage, config summary).
     Status,
 
@@ -664,6 +670,24 @@ async fn main() -> Result<()> {
             total_shards,
         ),
 
+        Commands::HolderIntro { contact } => {
+            use miasma_core::chat::{ChatRequest, ChatResponse};
+            use miasma_core::{daemon_request, ControlRequest, ControlResponse};
+            match daemon_request(
+                &data_dir,
+                ControlRequest::Chat(ChatRequest::HolderIntro { contact }),
+            )
+            .await?
+            {
+                ControlResponse::Chat(ChatResponse::HolderIntroQueued { count }) => {
+                    println!("Queued holder introductions for {count} contact(s)");
+                    Ok(())
+                }
+                ControlResponse::Chat(ChatResponse::Error { message, .. })
+                | ControlResponse::Error(message) => bail!("{message}"),
+                _ => bail!("unexpected daemon response"),
+            }
+        }
         Commands::Status => cmd_status(&data_dir).await,
 
         Commands::Logs {
@@ -877,6 +901,7 @@ fn cmd_init(
         discovery: Default::default(),
         push: Default::default(),
         chat: Default::default(),
+        custody: Default::default(),
         privacy: Default::default(),
         update: Default::default(),
         transfer: Default::default(),
@@ -1023,6 +1048,8 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
         use miasma_core::ControlResponse;
         if let ControlResponse::Status(s) = resp {
             println!("Miasma Daemon Status");
+            offline_check::print_accept_unknown_depositors(data_dir);
+            offline_check::print_custody_peer_counts(data_dir).await;
             println!("  Peer ID:             {}", s.peer_id);
             for addr in &s.listen_addrs {
                 println!("  Listen addr:         {addr}/p2p/{}", s.peer_id);
@@ -1150,6 +1177,7 @@ async fn cmd_status(data_dir: &std::path::Path) -> Result<()> {
     let store = LocalShareStore::open_with_quotas(data_dir, quota_mb, hosted_quota_mb)
         .context("cannot open share store")?;
     println!("Miasma Node Status (daemon not running)");
+    offline_check::print_accept_unknown_depositors(data_dir);
     println!(
         "  Network discovery: {}, peers found last round 0",
         if config.discovery.enabled {
@@ -2004,6 +2032,9 @@ fn cmd_config_loaded(
                 "storage.hosted_quota_mb" => println!("{}", config.storage.hosted_quota_mb),
                 "privacy.stealth_mode" => println!("{}", config.privacy.stealth_mode),
                 "chat.enabled" => println!("{}", config.chat.enabled),
+                "custody.accept_unknown_depositors" => {
+                    println!("{}", config.custody.accept_unknown_depositors)
+                }
                 "chat.custody_enabled" => println!("{}", config.chat.custody_enabled),
                 "push.file_custody_enabled" => println!("{}", config.push.file_custody_enabled),
                 "chat.history_save" => match config.chat.history_save {
@@ -2101,6 +2132,10 @@ fn cmd_config_loaded(
                 }
                 "chat.enabled" => {
                     config.chat.enabled = v.parse().context("expected bool")?;
+                }
+                "custody.accept_unknown_depositors" => {
+                    config.custody.accept_unknown_depositors =
+                        v.parse().context("expected bool")?;
                 }
                 "chat.custody_enabled" => {
                     config.chat.custody_enabled = v.parse().context("expected bool")?;

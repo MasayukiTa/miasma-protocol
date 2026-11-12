@@ -667,3 +667,47 @@ fn network_notice_dispatch_and_protected_session_gate() {
     );
     assert_eq!(received.borrow().len(), 1);
 }
+
+#[test]
+fn holder_intro_dispatch() {
+    use super::{
+        file_notice::holder_intro_to_text,
+        proto::{HolderEntry, HolderIntro, Message},
+    };
+    use std::cell::RefCell;
+    let a = side();
+    let b = side();
+    let intro = HolderIntro {
+        holders: vec![HolderEntry {
+            endpoint_id: rand::random(),
+            expires_ms: 500,
+            file_custody: true,
+            chat_custody: false,
+        }],
+    };
+    let received = RefCell::new(Vec::new());
+    let plain = Message {
+        id: rand::random(),
+        seq: 1,
+        sent_ms: 1,
+        text: holder_intro_to_text(&intro).unwrap(),
+    }
+    .encode()
+    .unwrap();
+    let (wire, _) = a.core.seal_for(&b.id(), &plain).unwrap();
+    let dispatch = |value| received.borrow_mut().push(value);
+    assert_eq!(
+        b.core
+            .accept_with_holder_intro(&a.id(), &wire, 2, None, &|_| {}, &|_| {}, &dispatch)
+            .status,
+        AckStatus::Stored
+    );
+    assert!(b.texts(&a.id()).is_empty());
+    assert_eq!(received.borrow().as_slice(), &[intro]);
+    assert_eq!(
+        b.core
+            .accept_with_holder_intro(&a.id(), &wire, 3, None, &|_| {}, &|_| {}, &dispatch)
+            .status,
+        AckStatus::Duplicate
+    );
+}

@@ -93,6 +93,7 @@ pub struct ChatSettings {
     /// copy with trusted holders when a direct send cannot go through
     /// (`chat.custody_enabled`, default on).
     pub custody_enabled: bool,
+    pub accept_unknown_depositors: bool,
     /// Limits and switch for the separate file holder.
     pub file_custody_limits: crate::push::file_holder::FileCustodyLimits,
     /// How many trusted holders get a copy when a direct send fails
@@ -135,6 +136,7 @@ impl Default for ChatSettings {
             inbound_per_minute: 30.0,
             group_auto_join: true,
             custody_enabled: false,
+            accept_unknown_depositors: true,
             file_custody_limits: Default::default(),
             custody_copies: crate::config::DEFAULT_CHAT_CUSTODY_COPIES,
             custody_burst: crate::config::DEFAULT_CHAT_CUSTODY_RATE_BURST as f64,
@@ -255,6 +257,7 @@ pub fn start_for_daemon(
         max_message_bytes: cfg.chat.max_message_bytes.clamp(1, proto::MAX_TEXT_BYTES),
         group_auto_join: cfg.chat.group_auto_join,
         custody_enabled: cfg.chat.custody_enabled,
+        accept_unknown_depositors: cfg.custody.accept_unknown_depositors,
         file_custody_limits: crate::push::file_holder::FileCustodyLimits::from_config(&cfg.push),
         custody_copies: cfg.chat.custody_copies.clamp(1, 8),
         custody_burst: cfg.chat.custody_rate_burst.max(1) as f64,
@@ -315,6 +318,7 @@ struct Worker {
 pub struct ChatService {
     core: Arc<ChatCore>,
     contacts: Arc<ContactStore>,
+    introduced_holders: Mutex<super::introduced_holders::IntroducedHolders>,
     node: Arc<IrohNode>,
     settings: ChatSettings,
     unknown: Mutex<Buckets>,
@@ -452,7 +456,25 @@ impl ChatService {
             } else {
                 None
             };
+        let contact_ids: Vec<_> = contacts
+            .list()
+            .iter()
+            .filter_map(|c| c.endpoint_bytes())
+            .collect();
+        let introduced_holders = match super::introduced_holders::IntroducedHolders::open(
+            chat_dir.parent()?,
+            core.own_id(),
+            &contact_ids,
+            now_ms(),
+        ) {
+            Ok(store) => Mutex::new(store),
+            Err(e) => {
+                warn!("chat stays off: {e}");
+                return None;
+            }
+        };
         let svc = Arc::new(Self {
+            introduced_holders,
             core,
             contacts,
             node: node.clone(),
@@ -524,6 +546,21 @@ impl ChatService {
                     tokio::select! {
                         _ = tokio::time::sleep(me.settings.custody_collect_every) => {}
                         _ = wake.notified() => {}
+                        _ = stop.changed() => return,
+                    }
+                }
+            });
+        }
+        if svc.settings.custody_enabled || svc.settings.file_custody_limits.enabled {
+            let me = svc.clone();
+            let mut stop = svc.shutdown.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    for contact in me.contacts.list() {
+                        me.introduce_self(&contact);
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(12 * 3600)) => {}
                         _ = stop.changed() => return,
                     }
                 }
@@ -608,6 +645,82 @@ impl ChatService {
         let id = self.core.enqueue(&peer, text, now_ms())?;
         self.kick(&peer);
         Ok(id)
+    }
+
+    /// Send holder details in a protected chat message.
+    pub fn introduce_holders(
+        self: &Arc<Self>,
+        to: &Contact,
+        holders: &[proto::HolderEntry],
+    ) -> Result<[u8; 16], EnqueueError> {
+        let text = super::file_notice::holder_intro_to_text(&proto::HolderIntro {
+            holders: holders.to_vec(),
+        })
+        .map_err(|e| EnqueueError::Storage(e.to_string()))?;
+        self.send(to, &text)
+    }
+
+    pub(crate) fn introduce_self(self: &Arc<Self>, contact: &Contact) {
+        if !(self.settings.custody_enabled || self.settings.file_custody_limits.enabled)
+            || !contact.allow_send
+        {
+            return;
+        }
+        let holder = proto::HolderEntry {
+            endpoint_id: self.core.own_id(),
+            expires_ms: now_ms().saturating_add(24 * 60 * 60 * 1000),
+            file_custody: self.settings.file_custody_limits.enabled,
+            chat_custody: self.settings.custody_enabled,
+        };
+        if let Err(e) = self.introduce_holders(contact, &[holder]) {
+            warn!("holder introduction: {e:?}");
+        }
+    }
+
+    /// Queue this node's custody endpoint for selected contacts.
+    pub fn introduce_self_to_contacts(
+        self: &Arc<Self>,
+        selector: Option<&str>,
+    ) -> Result<usize, String> {
+        if !(self.settings.custody_enabled || self.settings.file_custody_limits.enabled) {
+            return Err("custody is disabled".into());
+        }
+        let contacts = match selector {
+            Some(name) => vec![self
+                .contacts
+                .find(name)
+                .ok_or_else(|| format!("no contact: {name}"))?],
+            None => self
+                .contacts
+                .list()
+                .into_iter()
+                .filter(|c| c.allow_send)
+                .collect(),
+        };
+        let holder = proto::HolderEntry {
+            endpoint_id: self.core.own_id(),
+            expires_ms: now_ms().saturating_add(24 * 60 * 60 * 1000),
+            file_custody: self.settings.file_custody_limits.enabled,
+            chat_custody: self.settings.custody_enabled,
+        };
+        for contact in &contacts {
+            if !contact.allow_send {
+                return Err(format!("sending to {} is disabled", contact.label));
+            }
+            self.introduce_holders(contact, std::slice::from_ref(&holder))
+                .map_err(|e| format!("{e:?}"))?;
+        }
+        Ok(contacts.len())
+    }
+    pub fn custody_peer_counts(&self) -> (usize, usize) {
+        let introduced = self.introduced_holders.lock().unwrap().count(now_ms());
+        let allowed = self
+            .contacts
+            .list()
+            .iter()
+            .filter(|c| c.allow_receive && c.endpoint_bytes().is_some())
+            .count();
+        (introduced, allowed)
     }
 
     /// Queue a file deposit notice as an ordinary chat message.
@@ -1084,7 +1197,24 @@ impl ChatService {
             let _ = tx.finish();
             return;
         }
-        store.trust(*who);
+        let allowed = self.contact_may_write(who);
+        if !allowed
+            && (!matches!(&req, Request::Deposit { .. })
+                || !self.settings.accept_unknown_depositors)
+        {
+            let _ = wire::write_response(
+                tx,
+                &Response::Refused(super::mailbox::holder::CustodyError::NotTrusted),
+            )
+            .await;
+            let _ = tx.finish();
+            return;
+        }
+        if allowed {
+            store.trust(*who);
+        } else {
+            store.untrust(who);
+        }
         let now = now_ms();
         let who = *who;
         let resp = tokio::task::spawn_blocking(move || match req {
@@ -1118,12 +1248,52 @@ impl ChatService {
 
     /// The trusted contacts, other than `peer`, that could hold a copy for it.
     pub(crate) fn holders_for(&self, peer: &[u8; 32]) -> Vec<[u8; 32]> {
-        self.contacts
+        self.holders_for_kind(peer, false)
+    }
+
+    pub(crate) fn holders_for_kind(&self, peer: &[u8; 32], files: bool) -> Vec<[u8; 32]> {
+        let mut holders: Vec<_> = self
+            .contacts
             .list()
             .into_iter()
             .filter_map(|c| c.endpoint_bytes())
             .filter(|id| id != peer)
-            .collect()
+            .collect();
+        let mut exclude = holders.clone();
+        exclude.push(*peer);
+        holders.extend(self.introduced_holders.lock().unwrap().holders_for_deposit(
+            now_ms(),
+            &exclude,
+            files,
+        ));
+        holders
+    }
+
+    fn receive_holder_intro(&self, sender: [u8; 32], intro: proto::HolderIntro) {
+        if !self.contact_may_write(&sender) {
+            return;
+        }
+        let contacts: Vec<_> = self
+            .contacts
+            .list()
+            .iter()
+            .filter_map(|c| c.endpoint_bytes())
+            .collect();
+        let now = now_ms();
+        let mut store = self.introduced_holders.lock().unwrap();
+        for holder in intro.holders {
+            let entry = super::introduced_holders::IntroducedHolder {
+                endpoint_id: holder.endpoint_id,
+                introduced_by: sender,
+                expires_ms: holder.expires_ms,
+                file_custody: holder.file_custody,
+                chat_custody: holder.chat_custody,
+                first_seen_ms: now,
+            };
+            if let Err(e) = store.insert(entry, now, &contacts) {
+                warn!("holder introduction: {e}");
+            }
+        }
     }
 
     pub(crate) fn file_mailbox_transport(&self) -> super::mailbox::transport::ChatMailboxTransport {
@@ -1235,7 +1405,7 @@ impl ChatService {
             if !self.contact_may_write(sender) {
                 return false;
             }
-            core.accept_with_notice(
+            core.accept_with_holder_intro(
                 sender,
                 wire,
                 now_ms(),
@@ -1244,6 +1414,7 @@ impl ChatService {
                     self.receive_file_notice(*sender, notice);
                 },
                 &|notice| self.receive_network_notice(*sender, notice),
+                &|intro| self.receive_holder_intro(*sender, intro),
             )
             .status
             .is_delivered()
@@ -1331,21 +1502,16 @@ impl ChatService {
         let mut bad = 0u32;
         let mut announced = false;
         for _ in 0..MAX_STREAMS_PER_CONNECTION {
-            // Looked up for every stream: a contact removed or switched off
-            // mid-connection stops being served at once.
-            match self.contacts.by_endpoint(&remote) {
-                Some(c) if c.allow_receive => {}
-                _ => {
-                    self.contacts.note_unknown(&remote);
-                    let loud = self.unknown.lock().unwrap().allow(remote);
-                    if loud {
-                        debug!(peer = %fingerprint(&remote), "chat refused: not a contact that may write");
-                    }
-                    conn.close(CLOSE_NOT_ALLOWED.into(), b"");
-                    return;
-                }
+            let allowed = self.contact_may_write(&remote);
+            if !allowed {
+                // A stranger that reaches us is remembered as a suggestion for
+                // the contact list as soon as it connects, whether it goes on
+                // to send a chat frame (refused below) or an open custody
+                // deposit (accepted within quota). This is `note_unknown`'s own
+                // job to keep idempotent and to skip for known contacts.
+                self.contacts.note_unknown(&remote);
             }
-            if !announced {
+            if allowed && !announced {
                 announced = true;
                 // The contact is online: let our own queue for it go out now,
                 // and ask our holders in case this contact (or any) kept
@@ -1359,6 +1525,10 @@ impl ChatService {
                     // `Sync` arrives on a unidirectional stream (see
                     // `sync_with`); the answer goes back on one of ours.
                     let Ok(mut urx) = u else { break };
+                    if !allowed {
+                        conn.close(CLOSE_NOT_ALLOWED.into(), b"");
+                        return;
+                    }
                     let frame = tokio::time::timeout(
                         self.settings.read_timeout,
                         proto::read_frame(&mut urx),
@@ -1412,14 +1582,17 @@ impl ChatService {
                 _ => break,
             };
             if first == super::mailbox::wire::CUSTODY_STREAM_TAG {
-                if self.contact_may_write(&remote) {
-                    self.serve_custody(&remote, &mut tx, &mut rx).await;
-                } else {
-                    // Not offering custody, or not a contact that may use it.
-                    conn.close(CLOSE_NOT_ALLOWED.into(), b"");
-                    return;
-                }
+                self.serve_custody(&remote, &mut tx, &mut rx).await;
                 continue;
+            }
+            if !allowed {
+                // Already noted as a suggestion at the top of the loop.
+                let loud = self.unknown.lock().unwrap().allow(remote);
+                if loud {
+                    debug!(peer = %fingerprint(&remote), "chat refused: not a contact that may write");
+                }
+                conn.close(CLOSE_NOT_ALLOWED.into(), b"");
+                return;
             }
             let first_byte = [first];
             let mut rx = AsyncReadExt::chain(&first_byte[..], rx);
@@ -1456,7 +1629,7 @@ impl ChatService {
                     #[cfg(feature = "pqc")]
                     if let Some(sink) = sink {
                         let now = now_ms();
-                        return core.accept_with_notice(
+                        return core.accept_with_holder_intro(
                             &remote,
                             &w,
                             now,
@@ -1472,9 +1645,10 @@ impl ChatService {
                             }),
                             &|notice| service.receive_file_notice(remote, notice),
                             &|notice| service.receive_network_notice(remote, notice),
+                            &|intro| service.receive_holder_intro(remote, intro),
                         );
                     }
-                    core.accept_with_notice(
+                    core.accept_with_holder_intro(
                         &remote,
                         &w,
                         now_ms(),
@@ -1483,6 +1657,7 @@ impl ChatService {
                             service.receive_file_notice(remote, notice);
                         },
                         &|notice| service.receive_network_notice(remote, notice),
+                        &|intro| service.receive_holder_intro(remote, intro),
                     )
                 })
                 .await

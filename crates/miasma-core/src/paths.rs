@@ -513,6 +513,17 @@ spec!(
     "Directory of chat state: per-contact sessions and history, and the outbox."
 );
 spec!(
+    CHAT_INTRODUCED_HOLDERS,
+    "chat/introduced-holders.doc",
+    File,
+    DataDir,
+    State,
+    Encrypt,
+    CryptoEraseOverwriteRemove,
+    "D27",
+    "Holders introduced by contacts."
+);
+spec!(
     CHAT_SESSION,
     "chat/*.sess",
     Pattern,
@@ -1070,6 +1081,7 @@ pub const REGISTRY: &[PathSpec] = &[
     DIRECTED_V2_INCOMING,
     DIRECTED_V2_OUTGOING,
     CHAT_DIR,
+    CHAT_INTRODUCED_HOLDERS,
     CHAT_SESSION,
     CHAT_HISTORY,
     CHAT_OUTBOX,
@@ -1383,6 +1395,11 @@ pub fn anchor_dir(data_dir: &Path) -> Option<PathBuf> {
 }
 
 /// `<chat dir>/<stem>.msgs`: the saved messages of one contact.
+pub fn chat_introduced_holders_file(data_dir: &Path) -> PathBuf {
+    CHAT_INTRODUCED_HOLDERS.in_dir(data_dir)
+}
+
+/// A contact's chat history file.
 pub fn chat_history_file(chat_dir: &Path, stem: &str) -> PathBuf {
     chat_dir.join(format!("{stem}.msgs"))
 }

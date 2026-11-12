@@ -45,6 +45,23 @@ pub fn text_to_network_notice(text: &str) -> Option<NetworkFileNotice> {
     NetworkFileNotice::decode(&URL_SAFE_NO_PAD.decode(encoded).ok()?).ok()
 }
 
+pub const HOLDER_INTRO_PREFIX: &str = "miasma-holder-intro:v1:";
+pub fn holder_intro_to_text(
+    intro: &super::proto::HolderIntro,
+) -> Result<String, super::proto::ProtoError> {
+    let encoded = URL_SAFE_NO_PAD.encode(intro.encode()?);
+    Ok(format!("A contact introduced storage holders. Update Miasma to use them.\n{HOLDER_INTRO_PREFIX}{encoded}"))
+}
+pub fn text_to_holder_intro(text: &str) -> Option<super::proto::HolderIntro> {
+    let encoded = text
+        .lines()
+        .find_map(|line| line.strip_prefix(HOLDER_INTRO_PREFIX))?;
+    if encoded.len() > 512 {
+        return None;
+    }
+    super::proto::HolderIntro::decode(&URL_SAFE_NO_PAD.decode(encoded).ok()?).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
