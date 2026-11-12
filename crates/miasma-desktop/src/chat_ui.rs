@@ -812,6 +812,21 @@ impl ChatUi {
             .collect();
         self.previews.retain(|k, _| keep.contains(k.as_str()));
         self.unread.retain_peers(|k| keep.contains(k));
+        // A conversation that is open but no longer in the list (the contact was removed, or
+        // another device deleted it) must not keep a dead pane: its history would stay empty and
+        // its send target would point at a contact that is gone. Return to the list, keeping any
+        // unsent text as that conversation's draft. The group pane manages its own list the same
+        // way in `group_ui.rs`.
+        let open_ep = self.open().map(|o| o.endpoint_id.clone());
+        if let Some(ep) = open_ep {
+            let still_listed = self
+                .conversations
+                .iter()
+                .any(|x| x.endpoint_id == ep);
+            if !still_listed {
+                self.close_conversation();
+            }
+        }
         // The last message of each conversation that changed (the first screenful only).
         let mut wanted = Vec::new();
         for r in self.rows.iter().take(MAX_PREVIEWS) {
@@ -938,7 +953,13 @@ impl ChatUi {
         self.window.clear();
         self.heights.clear();
         self.timeline.clear();
+        self.timeline_dirty = true;
         self.thread_loaded = false;
+        self.scroll_to = None;
+        self.scroll_offset = 0.0;
+        self.newest_inflight = None;
+        self.older_inflight = None;
+        self.want_newest = false;
         self.page_msg = None;
         self.list_dirty = true;
     }
@@ -2451,6 +2472,81 @@ mod tests {
         names
     }
 
+    /// Draw the chat area once in a wide window (the list beside the right pane) with AccessKit
+    /// on, and collect every node name, so a test can check the right pane's empty-state text.
+    fn drawn_names_wide(chat: &mut ChatUi) -> Vec<String> {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        kit::apply_theme(&ctx, false);
+        let list: Vec<ContactInfo> = Vec::new();
+        let mut names = Vec::new();
+        for _ in 0..3 {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0.0, 0.0),
+                    vec2(1400.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let out = ctx.run(raw, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    kit::column_max(ui, TWO_PANE_MAX, |ui| {
+                        let _ = chat.show(ui, chat_strings(Locale::En), true, &list);
+                    });
+                });
+            });
+            if let Some(update) = out.platform_output.accesskit_update {
+                names = update
+                    .nodes
+                    .iter()
+                    .filter_map(|(_, n)| n.name().map(|s| s.to_owned()))
+                    .collect();
+            }
+        }
+        names
+    }
+
+    #[test]
+    fn the_right_pane_says_there_are_none_while_the_list_is_empty() {
+        // Wide window, nothing in the list: the right pane must not say "pick a conversation"
+        // (there is none to pick) — it says there are none yet, matching the empty list.
+        let gs = group_strings(Locale::En);
+        let mut chat = ready();
+        chat.conv_loaded = true;
+        let names = drawn_names_wide(&mut chat);
+        assert!(
+            names.iter().any(|n| n == gs.pane_none),
+            "the empty right pane did not say there are none: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == gs.pane_empty),
+            "the empty right pane still said to pick one: {names:?}"
+        );
+    }
+
+    #[test]
+    fn the_right_pane_says_pick_one_once_a_conversation_exists() {
+        // Wide window with one conversation in the list but none open: the right pane invites
+        // the person to pick one.
+        let gs = group_strings(Locale::En);
+        let mut chat = ready();
+        chat.area_open = true;
+        chat.on_reply(
+            c(),
+            ChatRequest::Conversations {},
+            Ok(ChatResponse::Conversations(vec![one_conv("a", 5)])),
+        );
+        let names = drawn_names_wide(&mut chat);
+        assert!(
+            names.iter().any(|n| n == gs.pane_empty),
+            "the right pane did not invite picking a conversation: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == gs.pane_none),
+            "the right pane still said there are none: {names:?}"
+        );
+    }
+
     #[test]
     fn before_setup_the_chat_tab_does_not_repeat_the_service_notice() {
         // Not connected: the connection card above the tab is the single guide, so
@@ -3127,6 +3223,63 @@ mod tests {
             Ok(ChatResponse::Conversations(vec![conv("b", 4)])),
         );
         assert!(!ui.previews.contains_key("a"));
+    }
+
+    fn one_conv(ep: &str, last: u64) -> ConversationInfo {
+        ConversationInfo {
+            endpoint_id: ep.into(),
+            fingerprint: String::new(),
+            label: Some(ep.into()),
+            contact_id: Some(ep.into()),
+            messages: 2,
+            last_ms: last,
+            pending: 0,
+            read_receipts: true,
+            pending_reason: None,
+            pending_tried_ms: 0,
+            pqc: None,
+            pqc_reason: None,
+        }
+    }
+
+    #[test]
+    fn a_refresh_that_keeps_the_open_conversation_leaves_it_open() {
+        let mut ui = ready();
+        ui.area_open = true;
+        ui.open_conversation("a", "a", "A");
+        assert!(matches!(ui.view, View::Conversation(_)));
+        // The list is read again and still holds this conversation: it stays open, and its send
+        // target is unchanged.
+        ui.on_reply(
+            c(),
+            ChatRequest::Conversations {},
+            Ok(ChatResponse::Conversations(vec![one_conv("a", 5), one_conv("b", 4)])),
+        );
+        assert!(matches!(ui.view, View::Conversation(_)));
+        assert_eq!(ui.open_contact_id(), Some("a"));
+    }
+
+    #[test]
+    fn a_refresh_that_drops_the_open_conversation_returns_to_the_list_and_keeps_the_draft() {
+        let mut ui = ready();
+        ui.area_open = true;
+        ui.open_conversation("a", "a", "A");
+        // Something was typed but not sent.
+        ui.composer = "half a sentence".to_owned();
+        // The list is read again and no longer holds this conversation (the contact was removed,
+        // or another device deleted it). The pane must not stay open on a conversation that is
+        // gone.
+        ui.on_reply(
+            c(),
+            ChatRequest::Conversations {},
+            Ok(ChatResponse::Conversations(vec![one_conv("b", 4)])),
+        );
+        assert!(matches!(ui.view, View::List));
+        assert_eq!(ui.open_contact_id(), None);
+        // The unsent text is not lost: it is kept as that conversation's draft, and the composer
+        // is clear so it cannot leak into the next conversation opened.
+        assert_eq!(ui.drafts.get("a").map(String::as_str), Some("half a sentence"));
+        assert!(ui.composer.is_empty());
     }
 
     #[test]
