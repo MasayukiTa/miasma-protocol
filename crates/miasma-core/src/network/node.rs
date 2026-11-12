@@ -1313,7 +1313,11 @@ impl DhtHandle {
         if !signed.verify_for_key(&mid_digest) {
             return None;
         }
-        let (record, _) = crate::transfer::decode_record_value(&signed.value).ok()?;
+        // Accept both a v3 and a v4 record here: the envelope is only checked and
+        // returned whole (the manifest is not needed), so reading a v4 trailer
+        // with `decode_record_value_any` lets this node serve on a v4 record it
+        // holds instead of dropping it. A v3 record decodes identically.
+        let (record, _) = crate::transfer::decode_record_value_any(&signed.value).ok()?;
         if record.dht_key().as_slice() != mid_digest.as_slice() || record.validate().is_err() {
             return None;
         }
