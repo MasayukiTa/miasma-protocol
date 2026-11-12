@@ -1,0 +1,178 @@
+   Compiling proc-macro2 v1.0.107
+    Checking cfg-if v1.0.4
+    Checking windows-link v0.2.1
+    Checking pin-project-lite v0.2.17
+    Checking typenum v1.20.1
+    Checking subtle v2.6.1
+    Checking memchr v2.8.3
+    Checking bytes v1.12.1
+    Checking windows-sys v0.61.2
+    Checking smallvec v1.16.0
+    Checking getrandom v0.2.17
+    Checking serde_core v1.0.229
+    Checking futures-core v0.3.34
+    Checking critical-section v1.2.0
+    Checking log v0.4.34
+    Checking slab v0.4.12
+    Checking futures-io v0.3.34
+    Checking scopeguard v1.2.0
+    Checking futures-sink v0.3.34
+    Checking parking_lot_core v0.9.12
+    Checking lock_api v0.4.14
+    Checking futures-task v0.3.34
+    Checking rand_core v0.10.1
+    Checking futures-channel v0.3.34
+   Compiling getrandom v0.4.3
+    Checking stable_deref_trait v1.2.1
+   Compiling semver v1.0.28
+    Checking cpufeatures v0.3.1
+    Checking parking_lot v0.12.5
+    Checking const-oid v0.10.2
+    Checking writeable v0.6.4
+    Checking litemap v0.8.3
+   Compiling quote v1.0.47
+   Compiling jobserver v0.1.35
+   Compiling rustc_version v0.4.1
+    Checking rand_core v0.6.4
+   Compiling syn v2.0.119
+   Compiling syn v3.0.4
+   Compiling cc v1.4.4
+    Checking utf8_iter v1.0.4
+    Checking cmov v0.5.4
+    Checking icu_normalizer_data v2.3.0
+    Checking icu_properties_data v2.3.0
+    Checking percent-encoding v2.3.2
+    Checking chacha20 v0.10.2
+    Checking base64ct v1.8.3
+    Checking ctutils v0.4.4
+    Checking data-encoding v2.11.1
+    Checking form_urlencoded v1.2.2
+    Checking hybrid-array v0.4.15
+    Checking generic-array v0.14.7
+    Checking rand v0.10.2
+    Checking pem-rfc7468 v1.0.0
+   Compiling curve25519-dalek v5.0.0
+    Checking untrusted v0.9.0
+    Checking foldhash v0.2.0
+    Checking base16ct v1.0.0
+    Checking signature v3.0.0
+    Checking crypto-common v0.1.7
+    Checking cpufeatures v0.2.17
+    Checking crypto-common v0.2.2
+    Checking block-buffer v0.12.1
+   Compiling anyhow v1.0.104
+    Checking hashbrown v0.17.1
+    Checking either v1.18.0
+    Checking unsigned-varint v0.8.0
+    Checking byteorder v1.5.0
+    Checking static_assertions v1.1.0
+    Checking itoa v1.0.18
+    Checking const-str v0.4.3
+    Checking multihash v0.19.5
+    Checking base-x v0.2.11
+    Checking base45 v3.2.0
+    Checking bs58 v0.5.1
+    Checking num-traits v0.2.19
+    Checking windows-strings v0.5.1
+    Checking windows-result v0.4.1
+    Checking digest v0.11.3
+    Checking fnv v1.0.7
+    Checking web-time v1.1.0
+    Checking futures-timer v3.0.3
+    Checking sha2 v0.11.0
+    Checking hmac v0.13.0
+    Checking arrayref v0.3.9
+    Checking ipnet v2.12.1
+    Checking libc v0.2.189
+    Checking hkdf v0.13.0
+   Compiling num-conv v0.2.2
+   Compiling cmake v0.1.58
+   Compiling time-core v0.1.9
+    Checking http v1.5.0
+    Checking powerfmt v0.2.0
+    Checking deranged v0.5.8
+    Checking base64 v0.22.1
+   Compiling time-macros v0.2.32
+    Checking block-buffer v0.10.4
+   Compiling zerocopy v0.8.56
+    Checking httparse v1.10.1
+    Checking minimal-lexical v0.2.1
+    Checking digest v0.10.7
+    Checking http-body v1.1.0
+    Checking nom v7.1.3
+    Checking tinyvec_macros v0.1.1
+    Checking hashlink v0.12.2
+    Checking inout v0.1.4
+    Checking tinyvec v1.13.2
+    Checking sync_wrapper v1.0.2
+    Checking tower-service v0.3.3
+    Checking atomic-waker v1.1.2
+    Checking try-lock v0.2.5
+    Checking zmij v1.0.23
+    Checking num-integer v0.1.47
+    Checking universal-hash v0.5.1
+    Checking want v0.3.1
+    Checking windows-threading v0.2.1
+    Checking lazy_static v1.5.0
+    Checking rustc-hash v2.1.3
+    Checking fastrand v2.5.0
+   Compiling crossbeam-utils v0.8.22
+    Checking opaque-debug v0.3.1
+    Checking httpdate v1.0.3
+    Checking num-bigint v0.4.8
+    Checking base64 v0.23.1
+    Checking tower-layer v0.3.3
+    Checking bitflags v2.13.1
+    Checking rand_pcg v0.10.2
+    Checking spin v0.10.1
+    Checking serde_json v1.0.151
+    Checking equivalent v1.0.2
+    Checking diatomic-waker v0.2.3
+    Checking cordyceps v0.3.5
+    Checking lru-slab v0.1.2
+    Checking parking v2.2.1
+    Checking polyval v0.6.2
+    Checking futures-lite v2.6.1
+    Checking futures-buffered v0.2.13
+    Checking http-body-util v0.1.5
+    Checking pem v3.0.6
+    Checking aead v0.5.2
+    Checking utf8parse v0.2.2
+    Checking once_cell_polyfill v1.70.2
+    Checking regex-syntax v0.8.11
+    Checking anstyle v1.0.14
+    Checking anstyle-parse v1.0.0
+   Compiling indexmap v2.14.1
+    Checking ghash v0.5.1
+    Checking getrandom v0.3.4
+    Checking colorchoice v1.0.5
+    Checking is_terminal_polyfill v1.70.2
+    Checking arc-swap v1.9.2
+    Checking windows-registry v0.6.1
+    Checking clap_lex v1.1.0
+    Checking widestring v1.2.1
+   Compiling ring v0.17.14
+   Compiling aws-lc-sys v0.45.0
+error: failed to write `C:\work\wp-a4\target\debug\.fingerprint\aws-lc-sys-94dfd118e095b18b\invoked.timestamp`
+
+Caused by:
+  指定されたパスが見つかりません。 (os error 3)
+warning: build failed, waiting for other jobs to finish...
+error: could not parse/generate dep info at: C:\work\wp-a4\target\debug\deps\arc_swap-99b4b2cd098d2bbf.d
+
+Caused by:
+  failed to write `C:\work\wp-a4\target\debug\.fingerprint\arc-swap-99b4b2cd098d2bbf\dep-lib-arc_swap`
+
+Caused by:
+  指定されたパスが見つかりません。 (os error 3)
+error: failed to write C:\work\wp-a4\target\debug\deps\libsyn-df50712d339f8405.rmeta: 指定されたパスが見つかりません。 (os error 3)
+error: could not compile `syn` (lib) due to 1 previous error
+error: could not parse/generate dep info at: C:\work\wp-a4\target\debug\deps\syn-78ecf16247a84852.d
+
+Caused by:
+  failed to write `C:\work\wp-a4\target\debug\.fingerprint\syn-78ecf16247a84852\dep-lib-syn`
+
+Caused by:
+  指定されたパスが見つかりません。 (os error 3)
+error: couldn't create a temp dir: 指定されたパスが見つかりません。 (os error 3) at path "C:\\work\\wp-a4\\target\\debug\\deps\\rmetabuwT5s"
+error: could not compile `windows-sys` (lib) due to 1 previous error
