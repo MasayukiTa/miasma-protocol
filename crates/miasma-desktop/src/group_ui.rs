@@ -51,8 +51,11 @@ const RETRY_UNSUPPORTED: Duration = Duration::from_secs(30);
 const STALE: Duration = Duration::from_secs(20);
 /// Height of a row of the conversation list (the same as a one-to-one row).
 const ROW_H: f32 = 62.0;
-/// Room kept under the message list for the composer and its hints.
-const COMPOSER_RESERVE: f32 = 220.0;
+/// Room kept under the message list for the composer and its hints. The one-to-one view keeps
+/// 120 for its single-line composer; a group keeps a little more for the extra line that says a
+/// group has no file button (and points to where a file is sent), so the two message areas get
+/// nearly the same share of the height instead of the group's being much shorter.
+const COMPOSER_RESERVE: f32 = 160.0;
 /// Drafts remembered while another group is open.
 const MAX_DRAFTS: usize = 20;
 
@@ -1089,6 +1092,15 @@ impl GroupUi {
         let added_line = detail.and_then(|d| added_by_line(gs, d));
         let messages = &self.messages;
         let loaded = self.thread_loaded;
+        // The newest message of mine that has not reached everyone yet: under it the same
+        // reassurance the one-to-one view gives (the message is kept and arrives once they come
+        // online), so a group says it on the conversation screen too, not only in the group info.
+        let waiting_note_at = messages.iter().rposition(|m| m.outgoing).filter(|&i| {
+            matches!(
+                delivery_of(&messages[i]),
+                GroupDelivery::Waiting { .. } | GroupDelivery::Partial { .. }
+            )
+        });
         egui::ScrollArea::vertical()
             .id_source(("group_thread", o.id.as_str()))
             .max_height(height)
@@ -1112,11 +1124,17 @@ impl GroupUi {
                 if messages.is_empty() && loaded {
                     kit::paragraph_muted(ui, cs.empty_thread);
                 }
-                for m in messages {
+                for (i, m) in messages.iter().enumerate() {
                     let sender = sender_of(gs, m);
                     let code = detail.and_then(|d| contact_code_of(d, &m.sender));
                     if message_row(ui, gs, cs, m, &sender, code.is_some(), clock, bubble_w) {
                         add_code = code.map(str::to_owned);
+                    }
+                    if waiting_note_at == Some(i) {
+                        ui.add(
+                            egui::Label::new(kit::meta_text(gs.thread_waiting_note, pal().muted))
+                                .wrap(true),
+                        );
                     }
                 }
             });
@@ -1356,12 +1374,20 @@ impl GroupUi {
         };
         let mut out = MemberOut::default();
         let mut toggle = false;
+        // The member's facts (role, verified-or-not, why they cannot be reached) are shown under
+        // the row, wrapped to the full width, so the reason is read in full instead of being cut
+        // to one line with an ellipsis. The row itself keeps the name only.
+        let subtitle_color = if level == Level::Muted {
+            pal().muted
+        } else {
+            pal().warning
+        };
         kit::list_row(
             ui,
             kit::ListRow {
                 avatar: Some(&shown),
                 title: &shown,
-                subtitle: Some((&subtitle, level)),
+                subtitle: None,
             },
             |ui| {
                 if m.you {
@@ -1393,6 +1419,12 @@ impl GroupUi {
         if toggle && !self.shown_codes.remove(&m.endpoint_id) {
             self.shown_codes.insert(m.endpoint_id.clone());
         }
+        // The member's facts under the name, wrapped to the full width so the reachability reason
+        // is read in full.
+        ui.horizontal(|ui| {
+            ui.add_space(kit::AVATAR_PX + kit::SP_3);
+            ui.add(egui::Label::new(kit::meta_text(subtitle.as_str(), subtitle_color)).wrap(true));
+        });
         if show_code {
             ui.horizontal(|ui| {
                 ui.add_space(kit::AVATAR_PX + kit::SP_3);
@@ -1963,18 +1995,25 @@ fn message_row(
         GroupDelivery::Partial { .. } | GroupDelivery::FailedAll { .. } => p.danger,
         _ => p.muted,
     };
-    ui.with_layout(layout, |ui| {
-        if let Some(line) = state {
+    // The delivery state goes on its own row, given the bubble's full width so it reads in full
+    // and wraps when it is long, instead of sharing a row with the time where a wide time left it
+    // too little width and cut it short. The time follows on its own row, the same for a message
+    // sent today and an older one.
+    if let Some(line) = state {
+        ui.with_layout(layout, |ui| {
+            ui.set_max_width(bubble_w);
             let r = ui.add(egui::Label::new(kit::meta_text(&line.shown, state_color)).wrap(true));
             if let Some(full) = line.full {
                 r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, full.clone()));
                 r.on_hover_text(full);
             }
-        }
-        if !when.is_empty() {
+        });
+    }
+    if !when.is_empty() {
+        ui.with_layout(layout, |ui| {
             ui.label(kit::meta_text(when, p.muted));
-        }
-    });
+        });
+    }
     if m.gap_before > 0 {
         ui.with_layout(layout, |ui| {
             ui.add(
@@ -2983,6 +3022,107 @@ mod tests {
                 assert!(requests(&mut ui).is_empty(), "{name}");
             }
         }
+    }
+
+    // ─── AccessKit: the conversation drawn headless, read as a screen reader reads it ─────────
+
+    /// Draw the open group conversation `w`×`h` with AccessKit on and return every node's name
+    /// paired with the bottom of its box (`bounds.y1`). A screen reader (and UI Automation) reads
+    /// these names, so a line that is kept in full here is read in full even when the drawn text
+    /// is shortened to one word and the box is narrow.
+    fn a11y_conversation(ui: &mut GroupUi, w: f32, h: f32) -> Vec<(String, f64)> {
+        use egui::accesskit;
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        kit::apply_theme(&ctx, false);
+        let mut nodes: Vec<(String, f64)> = Vec::new();
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), vec2(w, h))),
+                ..Default::default()
+            };
+            let out = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |panel| {
+                    kit::column(panel, |panel| {
+                        let _ = ui.conversation_view(panel, clock(), 4096);
+                    });
+                });
+            });
+            nodes = out
+                .platform_output
+                .accesskit_update
+                .expect("an accessibility update")
+                .nodes
+                .iter()
+                .filter_map(|(_, n)| {
+                    let name = n.name()?;
+                    let y1 = n.bounds().map_or(0.0, |b| b.y1);
+                    Some((name.to_owned(), y1))
+                })
+                .collect();
+        }
+        nodes
+    }
+
+    /// C-H1: in a group the delivery line under my message sent today is shortened to one word
+    /// ("Waiting") to save width, and before the fix the word shared a row with the time, so the
+    /// count ("Delivered to 1 of 2 members so far") was cut to about 39 px and never reached a
+    /// screen reader. The full count must be kept as the node's name even in a narrow window, the
+    /// same as the one-to-one view keeps its waiting sentence in full.
+    #[test]
+    fn a_group_delivery_count_sent_today_reaches_a_screen_reader_in_full_in_a_narrow_window() {
+        let gs = group_strings(Locale::En);
+        let mut ui = GroupUi::fixture("group", Locale::En).expect("group");
+        let names: Vec<String> = a11y_conversation(&mut ui, 360.0, 900.0)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        // The newest of my messages is only waiting; its drawn word is short, but the exact count
+        // is the name a screen reader reads.
+        let full = fill(gs.state_waiting, &[("d", "1"), ("n", "2")]);
+        assert!(
+            names.iter().any(|n| n == &full),
+            "the full waiting count {full:?} is not in {names:?}"
+        );
+        assert!(requests(&mut ui).is_empty());
+    }
+
+    /// C-M5: a group says the same reassurance the one-to-one view gives (the messages are kept
+    /// and arrive once members come online) on the conversation screen, under the newest of my
+    /// messages that has not reached everyone, not only in the group information panel.
+    #[test]
+    fn a_group_conversation_says_messages_are_kept_until_members_come_online() {
+        let gs = group_strings(Locale::En);
+        let mut ui = GroupUi::fixture("group", Locale::En).expect("group");
+        let names: Vec<String> = a11y_conversation(&mut ui, 360.0, 900.0)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            names.iter().any(|n| n == gs.thread_waiting_note),
+            "the waiting note is not under the messages: {names:?}"
+        );
+        assert!(requests(&mut ui).is_empty());
+    }
+
+    /// C-H2: the message area takes the height the window gives it. Drawn in a taller window the
+    /// conversation reaches further down (its lowest node's box ends lower) instead of keeping a
+    /// fixed short height with empty space under the composer.
+    #[test]
+    fn the_group_message_area_grows_with_the_window() {
+        let lowest = |h: f32| {
+            let mut ui = GroupUi::fixture("group", Locale::En).expect("group");
+            a11y_conversation(&mut ui, 700.0, h)
+                .into_iter()
+                .map(|(_, y1)| y1)
+                .fold(0.0_f64, f64::max)
+        };
+        let short = lowest(520.0);
+        let tall = lowest(900.0);
+        assert!(
+            tall > short + 100.0,
+            "the conversation did not grow with the window: {short} vs {tall}"
+        );
     }
 
     /// The two group dialogs in the narrowest window (320 px, the smallest the window can be
