@@ -83,7 +83,7 @@ mod tests {
     use crate::{
         crypto::hash::ContentId,
         network::types::DhtRecord,
-        transfer::{PasswordProtection, Protection, TransferManifest},
+        transfer::{DecodedManifest, PasswordProtection, Protection, TransferManifest},
         DissolutionParams,
     };
 
@@ -97,6 +97,7 @@ mod tests {
     }
 
     fn fetched(manifest: Option<TransferManifest>) -> FetchedRecord {
+        let decoded = manifest.clone().map(DecodedManifest::V3);
         FetchedRecord {
             record: DhtRecord {
                 mid_digest: [7; 32],
@@ -107,6 +108,7 @@ mod tests {
                 published_at: 1,
             },
             manifest,
+            decoded,
             signer: [9; 32],
         }
     }
@@ -210,6 +212,7 @@ mod tests {
             FetchedRecord {
                 record: self.record.clone(),
                 manifest: self.manifest.clone(),
+                decoded: self.decoded.clone(),
                 signer: self.signer,
             }
         }

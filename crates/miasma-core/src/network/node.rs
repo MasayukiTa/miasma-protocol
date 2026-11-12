@@ -1313,7 +1313,7 @@ impl DhtHandle {
         if !signed.verify_for_key(&mid_digest) {
             return None;
         }
-        let (record, _) = crate::transfer::decode_record_value(&signed.value).ok()?;
+        let (record, _) = crate::transfer::decode_record_value_any(&signed.value).ok()?;
         if record.dht_key().as_slice() != mid_digest.as_slice() || record.validate().is_err() {
             return None;
         }

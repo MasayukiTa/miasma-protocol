@@ -837,8 +837,18 @@ pub fn decode_record_value(
 #[derive(Debug, Clone)]
 pub struct FetchedRecord {
     pub record: DhtRecord,
+    /// The v3 manifest the record carries, as the unchanged [`TransferManifest`]
+    /// view the v3 receive path already consumes. It is `Some` only for a v3
+    /// manifest; for a v4 manifest it is `None` (a v4 manifest is not a
+    /// `TransferManifest`) and the decoded manifest is in [`Self::decoded`]
+    /// instead. A legacy record with no trailer leaves both `None`.
     pub manifest: Option<TransferManifest>,
-    /// The key that signed the envelope. If `manifest` is present it names this
+    /// The manifest exactly as decoded, tagged by the version that was read
+    /// (v3 or v4), or `None` for a legacy record with no trailer. This is the
+    /// one field that carries a v4 manifest; [`Self::manifest`] stays on the
+    /// v3-only type so every existing v3 caller is unchanged.
+    pub decoded: Option<DecodedManifest>,
+    /// The key that signed the envelope. If a manifest is present it names this
     /// key as its publisher.
     pub signer: [u8; 32],
 }
@@ -900,7 +910,12 @@ pub fn open_signed_record(
             }
         }
     }
-    let (record, manifest) = decode_record_value(&signed.value)
+    // The v4-accepting reader: a v3 trailer decodes exactly as the v3-only
+    // `decode_record_value` does and a v4 trailer is accepted rather than
+    // refused. A pre-v4 build that still calls `decode_record_value` keeps
+    // rejecting a v4 record with the "update Miasma" message, so the versions
+    // stay interoperable.
+    let (record, decoded) = decode_record_value_any(&signed.value)
         .map_err(|e| SignedRecordError::InvalidInner(inner_message(e)))?;
     if record.dht_key().as_slice() != expected_key {
         return Err(SignedRecordError::InnerMidMismatch);
@@ -908,15 +923,22 @@ pub fn open_signed_record(
     record
         .validate()
         .map_err(|e| SignedRecordError::InvalidInner(inner_message(e)))?;
-    if manifest
+    if decoded
         .as_ref()
-        .is_some_and(|m| m.publisher != signed.signer_pubkey)
+        .is_some_and(|m| m.publisher() != signed.signer_pubkey)
     {
         return Err(SignedRecordError::ManifestPublisher);
     }
+    // Keep the v3-only view the existing receive path consumes: `Some` for a v3
+    // manifest, `None` for v4 (carried in `decoded`) or a legacy record.
+    let manifest = match &decoded {
+        Some(DecodedManifest::V3(m)) => Some(m.clone()),
+        _ => None,
+    };
     Ok(FetchedRecord {
         record,
         manifest,
+        decoded,
         signer: signed.signer_pubkey,
     })
 }
