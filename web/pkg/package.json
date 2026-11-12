@@ -5,7 +5,7 @@
     "Miasma Contributors"
   ],
   "description": "Miasma Protocol WebAssembly build — browser-side dissolve/retrieve",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "license": "MIT",
   "files": [
     "miasma_wasm_bg.wasm",
